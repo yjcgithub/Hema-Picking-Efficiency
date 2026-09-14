@@ -54,14 +54,19 @@ body {
 }
 .btn.primary:hover { background: #1d4ed8; }
 
-/* 卡片工具按钮（导出 / 复制为图片） */
-.card-tools { display: flex; gap: 6px; justify-content: flex-end; margin: 0 0 6px; }
+/* 卡片工具按钮（导出 / 复制为图片）：与标题同行靠右 */
+.card-tools { flex: 0 0 auto; display: flex; gap: 6px; }
 .mini {
-  padding: 3px 9px; border-radius: 7px; font-size: 11.5px;
+  padding: 3px 9px; border-radius: 7px; font-size: 11.5px; font-weight: 400;
   border: 1px solid var(--line); background: #fff; color: var(--muted);
   cursor: pointer; transition: .15s;
 }
 .mini:hover { border-color: var(--primary); color: var(--primary); background: #f8faff; }
+
+/* 口径开关（顶栏统一入口：人均 / 按工时加权） */
+.btn.switch { padding: 8px 14px; gap: 7px; font-size: 13px; color: var(--txt); }
+.btn.switch input { margin: 0; width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
+.btn.switch:has(input:checked) { border-color: var(--primary); color: var(--primary); background: #f0f6ff; }
 
 /* 导出/复制的范围气泡菜单（透视卡片：全部 / 前场 / 后场 / 一体化） */
 .menu-wrap { position: relative; display: inline-block; }
@@ -80,7 +85,7 @@ body {
 
 /* ---------- 提示条 ---------- */
 .notice {
-  margin: 14px 28px 0; padding: 10px 14px; border-radius: 9px;
+  margin: 14px 20px 0; padding: 10px 14px; border-radius: 9px;
   background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: 13px;
 }
 .notice.ok { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
@@ -94,9 +99,9 @@ main { padding: 14px 20px 6px; }
   display: grid; gap: 12px; margin-bottom: 12px;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
-/* 第二行：规模指标，更小 */
+/* 第二行：规模指标，更小。与第一行保持同样的 12px 行距 */
 .kpis.sub {
-  gap: 12px; margin-top: -8px;
+  gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 .kpis.sub .kpi { padding: 10px 14px; border-radius: 11px; }
@@ -107,38 +112,55 @@ main { padding: 14px 20px 6px; }
 .kpi {
   background: var(--card); border-radius: 12px; padding: 11px 14px;
   box-shadow: var(--shadow); border: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px;
 }
-.kpi .label { color: var(--muted); font-size: 12px; }
+.kpi .label { flex: 1 1 auto; color: var(--muted); font-size: 12px; }
 .kpi .label .dot { margin-right: 6px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; vertical-align: middle; }
-.kpi .value { font-size: 21px; font-weight: 700; margin-top: 3px; letter-spacing: .3px; }
+.kpi .value { flex: 0 0 auto; font-size: 21px; font-weight: 700; letter-spacing: .3px; }
 .kpi .value small { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 4px; }
-.kpi .foot { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.kpi .foot { flex: 0 0 100%; margin-top: 2px; font-size: 12px; color: var(--muted); }
 
 .grid {
-  display: grid; gap: 12px; margin-bottom: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  display: grid; gap: 12px; margin-bottom: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.grid .card.wide { grid-column: span 2; }
-@media (max-width: 900px) { .grid .card.wide { grid-column: auto; } }
+.grid .card.wide { grid-column: 1 / -1; }
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* 两栏并排容器（用于把长表分两栏） */
+.two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .two-col { grid-template-columns: minmax(0, 1fr); } }
 .card {
-  background: var(--card); border-radius: 12px; padding: 12px 14px 10px;
+  background: var(--card); border-radius: 12px; padding: 14px;
   box-shadow: var(--shadow); border: 1px solid var(--line); margin-bottom: 12px;
 }
-.card h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; }
+/* 标题与工具按钮同一行：标题占据剩余宽度，按钮靠右且不换行挤压标题 */
+.card h3 {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 10px; font-size: 13.5px; font-weight: 600;
+}
+.card h3 .card-title { flex: 1 1 auto; min-width: 0; }
 .chart { width: 100%; height: 250px; }
-/* 人员效率排行柱多，单独加高避免挤压 */
-#chartPerson { height: 440px; }
 
 /* ---------- 表格 ---------- */
-/* 表格：不设内部滚动，整表铺开 */
-.table-wrap { border: 1px solid var(--line); border-radius: 10px; }
-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 11.5px; }
-th, td { padding: 4px 9px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
-th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+/* 表格：不设内部滚动，整表铺开；overflow 让表头背景被圆角裁齐 */
+.table-wrap { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13.5px; }
+th, td {
+  padding: 6px 12px; text-align: center; white-space: nowrap;
+  border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums;
+}
+/* 末行去掉分隔线，避免与外框叠成双线 */
+table tbody tr:last-child td, table tfoot tr:last-child td { border-bottom: 0; }
+/* 数值居中，仅标签列（作业类型 / 拣货分区 / 拣货人）左对齐 */
+#tableZone th:nth-child(1), #tableZone td:nth-child(1),
+#tableZone th:nth-child(2), #tableZone td:nth-child(2),
+#tablePerson th:nth-child(2), #tablePerson td:nth-child(2),
+.pivot-block th:nth-child(1), .pivot-block td:nth-child(1) { text-align: left; }
 thead th {
   position: sticky; top: 0; z-index: 3; background: #f8fafc;
-  font-weight: 600; color: #475569; font-size: 12px;
+  font-weight: 600; color: #475569; font-size: 13px;
 }
 th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--primary); }
@@ -156,10 +178,12 @@ td.eff-hi { color: #047857; font-weight: 600; }
 td.eff-lo { color: #b45309; }
 
 /* 透视分块（前场合流 / 后场合流 / 一体化），可折叠 */
-.pivot-block { margin-bottom: 12px; }
+.pivot-block { margin-bottom: 16px; }
 .pivot-block:last-child { margin-bottom: 0; }
+/* 块与块之间加分隔线，三块界限更清晰 */
+.pivot-block + .pivot-block { border-top: 1px solid var(--line); padding-top: 14px; }
 .pivot-title {
-  display: flex; align-items: center; gap: 7px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 7px;
   font-weight: 600; font-size: 13px; margin: 0 0 6px;
   cursor: pointer; user-select: none;
 }
@@ -167,9 +191,53 @@ td.eff-lo { color: #b45309; }
 .pivot-title .caret { font-size: 10px; color: var(--muted); width: 10px; }
 .pivot-title small { font-weight: 400; color: var(--muted); font-size: 11.5px; margin-left: 2px; }
 .pivot-block.collapsed .table-wrap { display: none; }
+/* 透视列数随小时数变化，列多时在容器内横向滚动，避免撑出屏幕 */
+.pivot-block .table-wrap { overflow-x: auto; }
 
-/* 分块内首列（拣货人） */
-.pivot-block table th:nth-child(1), .pivot-block table td:nth-child(1) { min-width: 84px; }
+/* 分块内首列（拣货人）吸左：横向滚动时始终可见 */
+.pivot-block th:nth-child(1), .pivot-block tbody td:nth-child(1) {
+  position: sticky; left: 0; z-index: 2;
+  min-width: 84px; background: #fff;
+}
+.pivot-block thead th:nth-child(1) { z-index: 4; background: #f8fafc; box-shadow: 1px 0 0 var(--line); }
+.pivot-block tbody td:nth-child(1) { box-shadow: 1px 0 0 var(--line); }
+.pivot-block tbody tr.total td:nth-child(1) { background: #f8fafc; }
+.pivot-block tbody tr:hover td:nth-child(1) { background: #eef4ff; color: var(--primary); }
+
+/* 透视：平均值 / 中位数所在行 —— 只加边框，不改底色 */
+.pivot-block tbody tr.near-avg td, .pivot-block tbody tr.near-median td {
+  border-top: 2px solid #93c5fd; border-bottom: 2px solid #93c5fd;
+}
+.pivot-block tbody tr.near-avg td:first-child, .pivot-block tbody tr.near-median td:first-child {
+  border-left: 2px solid #93c5fd;
+}
+.pivot-block tbody tr.near-avg td:last-child, .pivot-block tbody tr.near-median td:last-child {
+  border-right: 2px solid #93c5fd;
+}
+.pivot-block tbody tr.near-median td {
+  border-top-color: #d8b4fe; border-bottom-color: #d8b4fe;
+}
+.pivot-block tbody tr.near-median td:first-child { border-left-color: #d8b4fe; }
+.pivot-block tbody tr.near-median td:last-child { border-right-color: #d8b4fe; }
+/* 标注浮在所在行上边框上（不占行高、不撑高行） */
+.pivot-block tbody td.stat-cell { position: relative; }
+.pivot-block .stat-badge {
+  position: absolute; top: -1px; right: 0; transform: translateY(-50%);
+  padding: 0 3px; border-radius: 3px; background: #fff; z-index: 4;
+  font-size: 9.5px; font-weight: 700; line-height: 1.5; letter-spacing: .2px;
+  white-space: nowrap;
+}
+.pivot-block .stat-badge.avg { color: #1d4ed8; }
+.pivot-block .stat-badge.median { color: #7e22ce; }
+/* 标题图例色点与边框同色 */
+.dot.avg { background: #93c5fd; }
+.dot.median { background: #d8b4fe; }
+/* 每个分块表格底部的口径说明行 */
+.pivot-block td.table-note {
+  text-align: left; white-space: normal; color: var(--muted);
+  font-size: 11.5px; line-height: 1.7; background: #fff;
+  border-top: 1px solid var(--line); padding-top: 8px; padding-bottom: 8px;
+}
 
 footer {
   padding: 4px 20px 16px; color: var(--muted); font-size: 11.5px; line-height: 1.8;

@@ -19,6 +19,9 @@
     </div>
   </div>
   <div class="actions">
+    <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）">
+      <input type="checkbox" id="weightedToggle">按工时加权
+    </label>
     <select class="select" id="historySelect" title="历史数据集"></select>
     <label class="btn primary" id="uploadLabel">
       上传拣货单 xlsx
@@ -35,17 +38,13 @@
   <section class="kpis sub" id="kpisSub"></section>
 
   <section class="grid">
-    <div class="card">
-      <h3>各小时效率趋势</h3>
-      <div class="chart" id="chartHour"></div>
-    </div>
-    <div class="card">
+    <div class="card wide">
       <h3>作业类型 × 小时 效率</h3>
       <div class="chart" id="chartJtHour"></div>
     </div>
     <div class="card wide">
-      <h3>人员效率排行（Top 15）</h3>
-      <div class="chart" id="chartPerson"></div>
+      <h3>各小时效率趋势</h3>
+      <div class="chart" id="chartHour"></div>
     </div>
   </section>
 
@@ -62,16 +61,16 @@
   </section>
 
   <section class="card">
-    <h3>人员效率明细</h3>
-    <div class="table-wrap">
-      <table id="tablePerson"></table>
-    </div>
+    <h3>人员效率明细（分两栏，点击表头可升/降序）</h3>
+    <div class="two-col" id="tablePerson"></div>
   </section>
 </main>
 
 <footer>
-  口径：效率 = Σ拣货行数 ÷ Σ拣货时长(h)；拣货时长 = 拣货完成时间 − 拣货开始时间；
-  作业类型由「任务子类型」与「拣货分区→前后场分区」映射生成。文件解析与计算在服务端完成。
+  效率口径（顶栏开关统一切换，影响顶端卡片与「作业类型 × 小时 效率」图）：
+  人均 = 各人效率的算术平均；按工时加权 = Σ拣货行数 ÷ Σ拣货时长(h)（透视与明细固定此口径）。
+  拣货时长 = 拣货完成时间 − 拣货开始时间；作业类型由「任务子类型」与「拣货分区→前后场分区」映射生成。
+  文件解析与计算在服务端完成。
 </footer>
 
 <script src="assets/js/config.js"></script>

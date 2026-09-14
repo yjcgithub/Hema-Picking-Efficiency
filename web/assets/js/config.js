@@ -5,9 +5,9 @@ window.HEMA_CONFIG = {
   UNIT: '行/h',
 
   /* 后端接口基地址：
-     - 前端与后端同源（由 Node 服务托管前端）时用 '/api'
-     - 前后端分离（前端静态托管，后端在别的域名/路径）时填完整地址，例如：
-       'https://api.yjmc.xyz/hpe/api'
+     - 由 Node 服务直接托管前端（同源）时用 '/api'
+     - 前后端分离（前端静态托管，后端在别的域名/路径）时填完整地址
+     - 用完整地址时，页面无论通过域名还是 IP 打开，请求都指向同一后端
   */
   API_BASE: 'https://api.yjmc.xyz/hpe/api',
 

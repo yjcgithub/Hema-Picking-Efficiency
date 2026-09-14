@@ -74,6 +74,7 @@ for r in data[1:]:
         dropped += 1
         continue
     recs.append({'date': t0.strftime('%Y-%m-%d'), 'hour': t0.hour,
+                 'slot': t0.hour + (0.5 if t0.minute >= 30 else 0),
                  'jobType': job_type(r[ix['拣货分区']], r[ix['任务子类型']]),
                  'zone': str(r[ix['拣货分区']] or '').strip(),
                  'code': zone_code(r[ix['拣货分区']]),
@@ -118,6 +119,14 @@ for h in hours:
     a, b = agg(gh[h])
     by_hour.append({'hour': h, 'rows': round(a), 'hours': round(b, 4), 'eff': eff(a, b)})
 
+# 半小时刻度（仅供「作业类型 × 小时 效率」「各小时效率趋势」两张图；透视仍按整点小时）
+slots = sorted({x['slot'] for x in recs})
+gs = grouped('slot')
+by_slot = []
+for s in slots:
+    a, b = agg(gs[s])
+    by_slot.append({'slot': s, 'rows': round(a), 'hours': round(b, 4), 'eff': eff(a, b)})
+
 # 细分：作业类型 x 拣货分区
 type_rank = {d['name']: i for i, d in enumerate(by_jt)}
 zone_acc = {}
@@ -148,6 +157,29 @@ for jt in [d['name'] for d in by_jt]:
         rs = [x for x in recs if x['jobType'] == jt and x['hour'] == h]
         dat.append(eff(*agg(rs)) if rs else None)
     series_jt.append({'name': jt, 'data': dat})
+
+# 作业类型 x 半小时
+series_jt_slot = []
+for jt in [d['name'] for d in by_jt]:
+    dat = []
+    for s in slots:
+        rs = [x for x in recs if x['jobType'] == jt and x['slot'] == s]
+        dat.append(eff(*agg(rs)) if rs else None)
+    series_jt_slot.append({'name': jt, 'data': dat})
+
+# 分块人员 x 半小时（供「人均」口径在半小时刻度上取数）
+groups_slot = []
+for jt in [d['name'] for d in by_jt]:
+    rs = [x for x in recs if x['jobType'] == jt]
+    persons = []
+    for p in sorted({x['person'] for x in rs}):
+        rs0 = [x for x in rs if x['person'] == p]
+        dat = []
+        for s in slots:
+            sub = [x for x in rs0 if x['slot'] == s]
+            dat.append(eff(*agg(sub)) if sub else None)
+        persons.append({'person': p, 'data': dat})
+    groups_slot.append({'type': jt, 'persons': persons})
 
 # 人员(含作业类型) x 小时
 person_rows = []
@@ -188,6 +220,9 @@ dataset = {
     'jobTypeByHour': {'hours': hours, 'series': series_jt,
                       'total': [d['eff'] for d in by_hour]},
     'zoneByHour': zone_by_hour,
+    'bySlot': by_slot,
+    'jobTypeBySlot': {'slots': slots, 'series': series_jt_slot,
+                      'total': [d['eff'] for d in by_slot], 'groups': groups_slot},
     'personByHour': {'hours': hours, 'rows': person_rows, 'groups': groups},
 }
 

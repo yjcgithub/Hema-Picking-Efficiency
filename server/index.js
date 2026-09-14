@@ -119,8 +119,9 @@ if (db.count() === 0 && fs.existsSync(SEED_FILE)) {
   }
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('服务已启动： http://localhost:' + PORT +
     (BASE_PATH ? '  （子路径 ' + BASE_PATH + '）' : '') + '  静态目录 ' + WEB_DIR);
+  console.log('可通过本地 IP 或域名访问');
   console.log('历史数据集数量：' + db.count());
 });

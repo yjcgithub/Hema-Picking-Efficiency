@@ -1,0 +1,13 @@
+[22252:39764:0915/062846.586:WARNING:t_skinfilemap.cpp(56)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v3.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v3.filemap.sogouime2020c00a5e7
+[22252:39764:0915/062846.586:WARNING:t_skinfilemap.cpp(65)] SGRenderLog:CheckUpdate finish: old version:1
+[22252:39764:0915/062846.586:WARNING:t_skinfilemap.cpp(67)] SGRenderLog:CheckUpdate finish: new version:3
+[22252:39764:0915/062847.929:WARNING:t_skinfilemap.cpp(56)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v3.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v3.filemap.sogouime2020c00a5e7
+[22252:39764:0915/062847.931:WARNING:t_skinfilemap.cpp(65)] SGRenderLog:CheckUpdate finish: old version:1
+[22252:39764:0915/062847.931:WARNING:t_skinfilemap.cpp(67)] SGRenderLog:CheckUpdate finish: new version:3
+[22252:39764:0915/062847.948:WARNING:t_skinfilemap.cpp(100)] SGRenderLog:GetBasePtr_Direct m_mem uninit
+[22252:39764:0915/062847.957:WARNING:t_skinfilemap.cpp(56)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v3.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v3.filemap.sogouime2020c00a5e7
+[22252:39764:0915/062847.957:WARNING:t_skinfilemap.cpp(65)] SGRenderLog:CheckUpdate finish: old version:0
+[22252:39764:0915/062847.957:WARNING:t_skinfilemap.cpp(67)] SGRenderLog:CheckUpdate finish: new version:3

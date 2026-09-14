@@ -129,6 +129,48 @@ function buildDataset(recs, meta) {
     })
   };
 
+  // 半小时刻度（细分粒度，仅供「作业类型 × 小时 效率」「各小时效率趋势」两张图使用；透视仍按整点小时）
+  const slots = [];
+  for (const r of recs) if (slots.indexOf(r.slot) < 0) slots.push(r.slot);
+  slots.sort((a, b) => a - b);
+
+  const gsl = groupBy(recs, x => x.slot);
+  const bySlot = slots.map(s => {
+    const a = sum(gsl[s]);
+    return { slot: s, rows: Math.round(a[0]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
+  });
+
+  const seriesJTSlot = byJobType.map(d => {
+    const rs = recs.filter(x => x.jobType === d.name);
+    return {
+      name: d.name,
+      data: slots.map(s => {
+        const sub = rs.filter(x => x.slot === s);
+        return sub.length ? eff(...sum(sub)) : null;
+      })
+    };
+  });
+
+  // 分块人员 × 半小时（供「人均」口径在半小时刻度上取数）
+  const groupsSlot = byJobType.map(jt => {
+    const rs = recs.filter(x => x.jobType === jt.name);
+    const names = {};
+    rs.forEach(x => { names[x.person] = 1; });
+    return {
+      type: jt.name,
+      persons: Object.keys(names).sort().map(p => {
+        const rs2 = rs.filter(x => x.person === p);
+        return {
+          person: p,
+          data: slots.map(s => {
+            const sub = rs2.filter(x => x.slot === s);
+            return sub.length ? eff(...sum(sub)) : null;
+          })
+        };
+      })
+    };
+  });
+
   // 人员（含作业类型）× 小时
   const personRows = [];
   byJobType.forEach(jt => {
@@ -177,6 +219,8 @@ function buildDataset(recs, meta) {
     byJobType, byPerson, byHour, byZone,
     jobTypeByHour: { hours, series: seriesJT, total: byHour.map(d => d.eff) },
     zoneByHour,
+    bySlot,
+    jobTypeBySlot: { slots, series: seriesJTSlot, total: bySlot.map(d => d.eff), groups: groupsSlot },
     personByHour: { hours, rows: personRows, groups }
   };
 }
@@ -204,8 +248,9 @@ function buildFromMatrix(matrix, meta) {
     const hrs = (t1 - t0) / 3600000;
     if (!(hrs > 0)) { dropped++; continue; }
     const zone = String(row[idx['拣货分区']] == null ? '' : row[idx['拣货分区']]).trim();
+    const h0 = t0.getHours();
     recs.push({
-      date: dateStr(t0), hour: t0.getHours(),
+      date: dateStr(t0), hour: h0, slot: h0 + (t0.getMinutes() >= 30 ? 0.5 : 0),
       jobType: jobType(zone, row[idx['任务子类型']]),
       zone, code: zoneCode(zone),
       person: String(person).trim(),
