@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>门店拣货效率监控看板</title>
+<link rel="stylesheet" href="assets/css/style.css">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">盒</div>
+    <div>
+      <h1>门店拣货效率监控看板</h1>
+      <p class="sub" id="metaLine">加载中…</p>
+    </div>
+  </div>
+  <div class="actions">
+    <select class="select" id="historySelect" title="历史数据集"></select>
+    <label class="btn primary" id="uploadLabel">
+      上传拣货单 xlsx
+      <input type="file" id="fileInput" accept=".xlsx,.xls" hidden>
+    </label>
+    <button class="btn" id="resetBtn">示例数据</button>
+  </div>
+</header>
+
+<div id="notice" class="notice hidden"></div>
+
+<main>
+  <section class="kpis" id="kpis"></section>
+  <section class="kpis sub" id="kpisSub"></section>
+
+  <section class="grid">
+    <div class="card">
+      <h3>各小时效率趋势</h3>
+      <div class="chart" id="chartHour"></div>
+    </div>
+    <div class="card">
+      <h3>作业类型 × 小时 效率</h3>
+      <div class="chart" id="chartJtHour"></div>
+    </div>
+    <div class="card wide">
+      <h3>人员效率排行（Top 15）</h3>
+      <div class="chart" id="chartPerson"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>人员 × 小时 效率透视（行/h，按前场合流 / 后场合流 / 一体化 分为 3 块）</h3>
+    <div id="pivotBlocks"></div>
+  </section>
+
+  <section class="card">
+    <h3>细分效率明细（作业类型 / 拣货分区）</h3>
+    <div class="table-wrap">
+      <table id="tableZone"></table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>人员效率明细</h3>
+    <div class="table-wrap">
+      <table id="tablePerson"></table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  口径：效率 = Σ拣货行数 ÷ Σ拣货时长(h)；拣货时长 = 拣货完成时间 − 拣货开始时间；
+  作业类型由「任务子类型」与「拣货分区→前后场分区」映射生成。文件解析与计算在服务端完成。
+</footer>
+
+<script src="assets/js/config.js"></script>
+<script src="assets/js/data.js"></script>
+<script src="assets/js/charts.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
