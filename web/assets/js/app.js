@@ -38,36 +38,23 @@
       '<div class="foot">' + c.foot + '</div></div>';
   }
 
-  /* 人均（不加权）口径取数：各人「总计效率」的算术平均 */
-  function personsOf(d, type) {
-    var pb = d.personByHour;
-    if (!pb || !pb.groups) return [];
-    if (type == null) {
-      var all = [];
-      pb.groups.forEach(function (g) { all = all.concat(g.persons || []); });
-      return all;
-    }
-    for (var i = 0; i < pb.groups.length; i++) {
-      if (pb.groups[i].type === type) return pb.groups[i].persons || [];
-    }
-    return [];
-  }
-  function meanEff(list) {
-    var s = 0, n = 0;
-    list.forEach(function (p) { if (p.total != null) { s += p.total; n++; } });
-    return n ? Math.round(s / n * 100) / 100 : null;
+  /* 人均（不加权）口径取数：各人「总计效率」的算术平均（服务端已算好，前端只取数） */
+  function personMean(d, type) {
+    var pm = d.stats && d.stats.personMean;
+    if (!pm) return { avg: null, n: 0 };
+    if (type == null) return pm.all || { avg: null, n: 0 };
+    return (pm.byType && pm.byType[type]) || { avg: null, n: 0 };
   }
 
   function renderKpis(d) {
     var t = d.totals;
     var colors = (global.HEMA_CONFIG && global.HEMA_CONFIG.COLORS) || {};
-    var all = personsOf(d, null);
-    var allAvg = meanEff(all);
-    var useAvg = !weighted && allAvg != null;
+    var all = personMean(d, null);
+    var useAvg = !weighted && all.avg != null;
     var main = [
       {
-        label: '综合效率', value: fmt(useAvg ? allAvg : t.eff), unit: '行/h',
-        foot: useAvg ? '全员人均（' + all.length + ' 人）' : '全部作业类型加权'
+        label: '综合效率', value: fmt(useAvg ? all.avg : t.eff), unit: '行/h',
+        foot: useAvg ? '全员人均（' + all.n + ' 人）' : '全部作业类型加权'
       }
     ];
     // 固定顺序：前场合流 / 后场合流 / 一体化（其余类型排在最后）
@@ -77,13 +64,12 @@
       return ia - ib;
     }).forEach(function (j) {
       var color = colors[j.name] || '#64748b';
-      var ps = personsOf(d, j.name);
-      var avg = meanEff(ps);
+      var ps = personMean(d, j.name);
       var scale = j.rows.toLocaleString() + ' 行 · ' + fmt(j.hours, 2) + ' h';
       main.push({
         label: '<span class="dot" style="background:' + color + '"></span>' + esc(j.name),
-        value: fmt(!weighted && avg != null ? avg : j.eff), unit: '行/h',
-        foot: !weighted && avg != null ? ps.length + ' 人平均 · ' + scale : scale
+        value: fmt(!weighted && ps.avg != null ? ps.avg : j.eff), unit: '行/h',
+        foot: !weighted && ps.avg != null ? ps.n + ' 人平均 · ' + scale : scale
       });
     });
     var sub = [
@@ -145,29 +131,6 @@
     }
   }
 
-  /* 最接近给定值的行号（忽略空值），无有效值返回 -1 */
-  function nearestIdx(arr, v) {
-    if (v == null) return -1;
-    var bi = -1, bd = Infinity;
-    arr.forEach(function (x, i) {
-      if (x == null) return;
-      var dd = Math.abs(x - v);
-      if (dd < bd) { bd = dd; bi = i; }
-    });
-    return bi;
-  }
-
-  /* 一列数值的平均值 / 中位数（忽略空值） */
-  function statOf(arr, kind) {
-    var vals = arr.filter(function (v) { return v != null; }).sort(function (a, b) { return a - b; });
-    if (!vals.length) return null;
-    if (kind === 'avg') {
-      return vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
-    }
-    var m = Math.floor(vals.length / 2);
-    return vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2;
-  }
-
   /* 分块顺序 + 折叠记忆 */
   var PIVOT_ORDER = ['前场合流', '后场合流', '一体化'];
   var PIVOT_LS = 'hema.pivot.collapsed';
@@ -219,13 +182,12 @@
       };
       var cellArr = function (arr) { return arr.map(function (v) { return cell(v); }).join(''); };
 
-      // 平均值 / 中位数按「总计」列口径计算，对应行加边框并在右上角标注
-      var totals = g.persons.map(function (r) { return r.total; });
-      var avg = statOf(totals, 'avg'), med = statOf(totals, 'median');
-      var iAvg = nearestIdx(totals, avg), iMed = nearestIdx(totals, med);
+      // 平均值 / 中位数按「总计」列口径计算（服务端给出），对应行加边框并在右上角标注
+      var gs = g.stat || {};
+      var avg = gs.avg == null ? null : gs.avg, med = gs.median == null ? null : gs.median;
 
-      var body = g.persons.map(function (r, i) {
-        var tag = i === iMed ? 'median' : (i === iAvg ? 'avg' : '');
+      var body = g.persons.map(function (r) {
+        var tag = r.person === gs.medianPerson ? 'median' : (r.person === gs.avgPerson ? 'avg' : '');
         return '<tr class="person' + (tag ? ' near-' + tag : '') + '">' +
           '<td>' + esc(r.person) + '</td>' + cellArr(r.data) + cell(r.total, tag) + '</tr>';
       }).join('');
@@ -302,6 +264,124 @@
     }).join('');
   }
 
+  /* ---------- 指标小卡 ---------- */
+
+  /* 指标小卡（分布 / 集中度卡片顶部一行） */
+  function chip(k, v, unit, tip) {
+    return '<div class="stat-chip"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' +
+      '<div class="k">' + k + '</div><div class="v">' + v +
+      (unit ? '<small>' + unit + '</small>' : '') + '</div></div>';
+  }
+
+  /* ---------- 卡片：人员效率分布与稳定性（指标全部由服务端计算，此处只渲染） ---------- */
+  function renderDist(d) {
+    var s = d.stats || {};
+    var dist = s.personDist;
+    if (!dist) return;
+    var n = dist.n;
+
+    document.getElementById('distStat').innerHTML = [
+      chip('人员数', n, '人', '参与拣货并被统计的人员数'),
+      chip('平均效率', fmt(dist.avg, 1), '行/h', '各人总计效率的算术平均'),
+      chip('中位数效率', fmt(dist.median, 1), '行/h', '一半人高于此值，比平均更不受极端值影响'),
+      chip('四分位区间', fmt(dist.q1, 0) + ' – ' + fmt(dist.q3, 0), '行/h', 'P25 – P75：中间 50% 的人落在这一区间'),
+      chip('最高 / 最低', fmt(dist.max, 0) + ' / ' + fmt(dist.min, 0), '行/h', '个人总计效率的极值'),
+      chip('变异系数', fmt(dist.cv, 2), '', '标准差 ÷ 平均：人员之间的效率差距，越大越不均衡')
+    ].join('');
+
+    /* 效率分档：看「多少人落在哪一档」与各档贡献了多少行 */
+    var html = '<thead><tr><th>效率区间（行/h）</th><th>人数</th><th>人数占比</th><th>行数合计</th></tr></thead><tbody>';
+    (s.effBins || []).forEach(function (b) {
+      html += '<tr><td>' + b.label + '</td><td>' + b.n + '</td><td>' +
+        fmt(n ? b.n / n * 100 : 0, 1) + '%</td><td>' + b.rows.toLocaleString() + '</td></tr>';
+    });
+    html += '<tr class="total"><td>合计</td><td>' + n + '</td><td>100.0%</td><td>' +
+      d.totals.rows.toLocaleString() + '</td></tr></tbody>';
+    document.getElementById('tableEffBin').innerHTML = html;
+
+    /* 稳定性榜：波动最大 / 最稳定各 10 人（人数不足时全部列出） */
+    var st = s.stability || [];
+    var head = '<thead><tr>' + ['拣货人', '主要作业类型', '记录小时数', '平均效率', '标准差', '变异系数']
+      .map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead>';
+    var rowOf = function (r) {
+      return '<tr><td>' + esc(r.person) + '</td><td>' + esc(r.type) + '</td><td>' + r.n + '</td><td>' +
+        fmt(r.avg, 1) + '</td><td>' + fmt(r.sd, 1) + '</td><td>' + fmt(r.cv, 2) + '</td></tr>';
+    };
+    var sec = function (t) {
+      return '<tr class="group"><td colspan="6">' + t + '</td></tr>';
+    };
+    var body;
+    if (!st.length) {
+      body = '<tr><td colspan="6" class="dm-empty">暂无足够的每小时记录（每人需 ≥ 3 小时）</td></tr>';
+    } else if (st.length <= 22) {
+      body = st.map(rowOf).join('');
+    } else {
+      body = sec('波动最大（变异系数高，需关注）') + st.slice(-10).reverse().map(rowOf).join('') +
+        sec('最稳定（变异系数低）') + st.slice(0, 10).map(rowOf).join('');
+    }
+    document.getElementById('tableStab').innerHTML = head + '<tbody>' + body + '</tbody>';
+
+    document.getElementById('distNote').textContent =
+      '分布：按各人总计效率（Σ拣货行数 ÷ Σ拣货时长）统计，不受顶栏口径开关影响。' +
+      '稳定性：变异系数 = 标准差 ÷ 平均，越小表示该人各小时产出一致；' +
+      '为避免跨作业类型的基准差异（后场合流约 250、前场合流约 70）被误判为「不稳定」，' +
+      '只在该人记录最多的作业类型内计算，且仅统计记录小时数 ≥ 3 的人。';
+  }
+
+  /* ---------- 卡片：拣货行数统计（按人员分布与集中度） ---------- */
+  function renderRowsStat(d) {
+    var s = (d.stats && d.stats.rowsStat) || null;
+    if (!s) return;
+    var n = s.n;
+    var totalRows = s.total;
+
+    /* 帕累托：行数从高到低累计，前 k 人贡献的行数占比（服务端已算好） */
+    var paretoChip = function (t, label) {
+      if (!t) return '';
+      return chip(label, fmt(t.pct, 1), '%',
+        '行数最多的前 ' + t.k + ' 人（占 ' + fmt(t.k / n * 100, 0) + '%）贡献了 ' + fmt(t.pct, 1) + '% 的行数');
+    };
+
+    document.getElementById('rowsStat').innerHTML = [
+      chip('总拣货行数', totalRows.toLocaleString(), '行', '有效明细合计'),
+      chip('人均行数', fmt(s.avg, 0), '行', '总行数 ÷ ' + n + ' 人'),
+      chip('中位数行数', fmt(s.median, 0), '行', '一半人高于此值'),
+      chip('最高 / 最低', s.max.toLocaleString() + ' / ' + s.min, '行',
+        '个人行数的极值，差距大说明分工不均'),
+      paretoChip(s.top10, 'TOP 10% 人员行数占比'),
+      paretoChip(s.top25, 'TOP 25% 人员行数占比')
+    ].join('');
+
+    /* TOP 10：条形长度按最高行数归一，右侧标注行数与占比（行名与占比均由服务端给出） */
+    var top = (d.stats && d.stats.rowsTop) || [];
+    var maxRows = top.length ? top[0].rows : 0;
+    document.getElementById('rowsTop').innerHTML = top.map(function (r, i) {
+      var w = maxRows ? r.rows / maxRows * 100 : 0;
+      return '<div class="bar-item">' +
+        '<span class="bar-name" title="' + esc(r.name) + '">' + (i + 1) + '. ' + esc(r.name) + '</span>' +
+        '<span class="bar-track"><span class="bar-fill" style="width:' + fmt(w, 1) + '%"></span></span>' +
+        '<span class="bar-val">' + r.rows.toLocaleString() + ' 行 · ' + fmt(r.share, 1) + '%</span>' +
+        '</div>';
+    }).join('');
+
+    /* 行数分档：人数占比看「多少人干得少」，行数占比看「产出集中在哪一档」 */
+    var bins = (d.stats && d.stats.rowsBins) || [];
+    var html = '<thead><tr><th>行数区间</th><th>人数</th><th>人数占比</th><th>行数合计</th><th>行数占比</th>' +
+      '</tr></thead><tbody>';
+    bins.forEach(function (b) {
+      html += '<tr><td>' + b.label + '</td><td>' + b.n + '</td><td>' + fmt(b.n / n * 100, 1) + '%</td><td>' +
+        b.rows.toLocaleString() + '</td><td>' + fmt(totalRows ? b.rows / totalRows * 100 : 0, 1) + '%</td></tr>';
+    });
+    html += '<tr class="total"><td>合计</td><td>' + n + '</td><td>100.0%</td><td>' +
+      totalRows.toLocaleString() + '</td><td>100.0%</td></tr></tbody>';
+    document.getElementById('tableRowsBin').innerHTML = html;
+
+    document.getElementById('rowsNote').textContent =
+      '占比条长度按最高个人行数归一，右侧为「行数 · 占总行数比例」。' +
+      '分档表同时给两条口径：人数占比说明有多少人产出偏低；行数占比说明总产出集中在哪一档，' +
+      '两者差距越大，说明产出越向少数人集中。';
+  }
+
   /* ---------- 总渲染 ---------- */
   function render(d) {
     if (!d) { notice('没有可展示的数据', 'err'); return; }
@@ -314,32 +394,74 @@
     renderPivotBlocks(d);
     renderZoneTable(d);
     renderPersonTable(d);
+    renderDist(d);
+    renderRowsStat(d);
     HEMA.charts.render(d);
   }
 
-  /* ---------- 历史数据集 ---------- */
-  var sel = document.getElementById('historySelect');
-  function loadHistory(currentId) {
-    fetch(API + '/datasets').then(readJson).then(function (list) {
-      var opts = ['<option value="sample">内置示例数据</option>'];
-      list.forEach(function (x) {
-        opts.push('<option value="' + x.id + '">#' + x.id + ' · ' + esc(x.sourceFile) +
-          ' · ' + esc(x.dates) + ' · ' + fmt(x.eff) + ' 行/h</option>');
-      });
-      sel.innerHTML = opts.join('');
-      sel.value = currentId ? String(currentId) : 'sample';
-    }).catch(function () {
-      sel.innerHTML = '<option value="sample">内置示例数据</option>';
+  /* ---------- 历史数据集（顶栏自定义下拉：每项两行，第一行文件名、第二行元信息） ---------- */
+  var selBtn = document.getElementById('historyBtn');
+  var selMenu = document.getElementById('historyMenu');
+  var selItems = [];        // [{ id, file, sub }]
+  var selId = 'sample';     // 当前数据集 id；'sample' = 内置示例数据
+
+  function selHtml(it) {
+    return '<span class="sel-l1">' + esc(it.file) + '</span>' +
+      '<span class="sel-l2">' + esc(it.sub) + '</span>';
+  }
+
+  // 按钮文案跟随当前选中项，并标注列表项选中态
+  function syncHistory() {
+    var cur = null;
+    selItems.forEach(function (it) { if (String(it.id) === String(selId)) cur = it; });
+    selBtn.innerHTML = selHtml(cur || selItems[0] || { file: '内置示例数据', sub: '' });
+    Array.prototype.forEach.call(selMenu.querySelectorAll('.sel-item'), function (b) {
+      b.classList.toggle('on', b.getAttribute('data-id') === String(selId));
     });
   }
 
-  sel.addEventListener('change', function () {
-    var v = sel.value;
-    if (v === 'sample') { render(SAMPLE); notice('已切换到内置示例数据。', 'ok'); return; }
-    fetch(API + '/datasets/' + v).then(readJson).then(function (ds) {
+  function renderHistoryMenu() {
+    selMenu.innerHTML = selItems.map(function (it) {
+      return '<button type="button" class="sel-item" data-id="' + esc(it.id) + '">' + selHtml(it) + '</button>';
+    }).join('');
+    syncHistory();
+  }
+
+  function loadHistory(currentId, list) {
+    selId = currentId == null ? 'sample' : currentId;
+    syncHistory();
+    var p = list ? Promise.resolve(list) : fetch(API + '/datasets').then(readJson);
+    p.then(function (list) {
+      selItems = [{ id: 'sample', file: '内置示例数据', sub: '离线示例，无需后端' }];
+      list.forEach(function (x) {
+        selItems.push({
+          id: x.id, file: x.sourceFile,
+          sub: '#' + x.id + ' · ' + x.dates + ' · ' + fmt(x.eff) + ' 行/h'
+        });
+      });
+      renderHistoryMenu();
+    }).catch(function () {
+      selItems = [{ id: 'sample', file: '内置示例数据', sub: '离线示例，无需后端' }];
+      renderHistoryMenu();
+    });
+  }
+
+  // 选择数据集（'sample' = 内置示例数据）
+  function pickHistory(id) {
+    selId = id;
+    syncHistory();
+    if (id === 'sample') { render(SAMPLE); notice('已切换到内置示例数据。', 'ok'); return; }
+    fetch(API + '/datasets/' + id).then(readJson).then(function (ds) {
       render(ds);
-      notice('已加载数据集 #' + v + '。', 'ok');
+      notice('已加载数据集 #' + id + '。', 'ok');
     }).catch(function () { notice('加载数据集失败。', 'err'); });
+  }
+
+  selMenu.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.sel-item') : null;
+    if (!btn) return;
+    closeMenus();
+    pickHistory(btn.getAttribute('data-id'));
   });
 
   /* ---------- 上传（服务端解析+计算） ---------- */
@@ -366,11 +488,296 @@
     if (f) upload(f);
     ev.target.value = '';
   });
-  document.getElementById('resetBtn').addEventListener('click', function () {
-    render(SAMPLE);
-    sel.value = 'sample';
-    notice('已切换到内置示例数据。', 'ok');
+
+  /* ---------- 数据管理（顶栏按钮 → 弹窗）：切换查看 / 删除单条 / 批量删除 / 清空 ---------- */
+  var dmMask = document.getElementById('dataMgrMask');
+  var dmTable = document.getElementById('dmTable');
+  var dmSum = document.getElementById('dmSum');
+  var dmAll = document.getElementById('dmAll');
+  var dmDelSel = document.getElementById('dmDelSel');
+  var dmList = [];
+
+  function dmTime(s) {
+    var d = new Date(s);
+    if (!s || isNaN(d)) return '-';
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function dmPicks() {
+    return Array.prototype.slice.call(dmTable.querySelectorAll('.dm-pick:checked'))
+      .map(function (el) { return el.value; });
+  }
+
+  function dmSyncBar() {
+    var n = dmPicks().length, total = dmList.length;
+    dmAll.checked = n > 0 && n === total;
+    dmAll.indeterminate = n > 0 && n < total;
+    dmDelSel.disabled = n === 0;
+    dmDelSel.textContent = n ? '删除选中（' + n + '）' : '删除选中';
+  }
+
+  function renderDmTable() {
+    var cur = current && current.id != null ? String(current.id) : '';
+    var head = '<thead><tr><th class="dm-ck"></th><th>ID</th><th>文件名</th><th>日期</th>' +
+      '<th>有效明细</th><th>丢弃</th><th>综合效率(行/h)</th><th>上传时间</th><th>操作</th></tr></thead>';
+    var body = dmList.map(function (x) {
+      var now = String(x.id) === cur;
+      return '<tr class="' + (now ? 'now' : '') + '">' +
+        '<td class="dm-ck"><input type="checkbox" class="dm-pick" value="' + x.id + '"></td>' +
+        '<td>' + (now ? '<span class="dot" style="background:var(--primary)"></span> ' : '') + '#' + x.id + '</td>' +
+        '<td class="dm-file" title="' + esc(x.sourceFile) + '">' + esc(x.sourceFile) + '</td>' +
+        '<td>' + esc(x.dates || '-') + '</td>' +
+        '<td>' + (x.recordCount || 0).toLocaleString() + '</td>' +
+        '<td>' + (x.dropped || 0) + '</td>' +
+        '<td>' + fmt(x.eff) + '</td>' +
+        '<td>' + dmTime(x.createdAt) + '</td>' +
+        '<td class="dm-act">' +
+        '<button type="button" class="mini" data-view="' + x.id + '">' + (now ? '当前' : '查看') + '</button>' +
+        '<button type="button" class="mini danger" data-del="' + x.id + '">删除</button>' +
+        '</td></tr>';
+    }).join('');
+    dmTable.innerHTML = head + '<tbody>' +
+      (body || '<tr><td colspan="9" class="dm-empty">暂无数据集，请先上传拣货单 xlsx</td></tr>') + '</tbody>';
+    dmSum.textContent = '共 ' + dmList.length + ' 条';
+    dmSyncBar();
+  }
+
+  function loadDataMgr(currentId) {
+    return fetch(API + '/datasets').then(readJson).then(function (list) {
+      dmList = (list || []).slice();
+      renderDmTable();
+      loadHistory(currentId === undefined ? (current && current.id) : currentId, dmList);
+    }).catch(function (e) {
+      dmList = [];
+      renderDmTable();
+      notice('数据管理加载失败：' + esc(e.message || e), 'err');
+    });
+  }
+
+  // 删除后：当前数据集仍在则只刷新列表，否则切到最新数据集（都没有则回内置示例）
+  function afterDelete(ids) {
+    var curId = current && current.id != null ? String(current.id) : null;
+    var curGone = curId != null && ids.some(function (x) { return String(x) === curId; });
+    notice('已删除 ' + ids.length + ' 条数据集。', 'ok');
+    if (!curGone) { loadDataMgr(curId); return; }
+    fetch(API + '/latest').then(readJson).then(function (ds) {
+      render(ds);
+      loadDataMgr(ds.id);
+      notice('当前数据集已删除，已切换到最新数据集 #' + ds.id + '。', 'ok');
+    }).catch(function () {
+      render(SAMPLE);
+      loadDataMgr(null);
+      notice('数据集已全部删除，已切换到内置示例数据。', 'ok');
+    });
+  }
+
+  function removeThen(ids) {
+    Promise.all(ids.map(function (id) {
+      return fetch(API + '/datasets/' + encodeURIComponent(id), { method: 'DELETE' }).then(readJson);
+    })).then(function () {
+      afterDelete(ids.map(String));
+    }).catch(function (e) {
+      notice('删除失败：' + esc(e.message || e), 'err');
+      loadDataMgr();
+    });
+  }
+
+  /* 删除前的二次确认：页内弹层（不依赖浏览器原生 confirm，避免被环境拦截时静默删除） */
+  var dmConfirm = document.getElementById('dmConfirm');
+  var dmConfirmText = document.getElementById('dmConfirmText');
+  var dmConfirmOk = document.getElementById('dmConfirmOk');
+  var dmPending = null;
+
+  function askConfirm(text, onOk) {
+    dmConfirmText.textContent = text;
+    dmPending = onOk;
+    dmConfirm.classList.remove('hidden');
+    dmConfirmOk.focus();
+  }
+  function closeConfirm() { dmConfirm.classList.add('hidden'); dmPending = null; }
+
+  dmConfirmOk.addEventListener('click', function () {
+    var fn = dmPending;
+    closeConfirm();
+    if (fn) fn();
   });
+  document.getElementById('dmConfirmCancel').addEventListener('click', closeConfirm);
+  dmConfirm.addEventListener('click', function (ev) { if (ev.target === dmConfirm) closeConfirm(); });
+
+  function deleteDatasets(ids) {
+    if (!ids.length) return;
+    var text;
+    if (ids.length === 1) {
+      var one = dmList.filter(function (x) { return String(x.id) === String(ids[0]); })[0];
+      text = '确认删除数据集 #' + ids[0] + (one ? '（' + one.sourceFile + '）' : '') + '？删除后不可恢复。';
+    } else {
+      text = '确认删除选中的 ' + ids.length + ' 条数据集？删除后不可恢复。';
+    }
+    askConfirm(text, function () { removeThen(ids); });
+  }
+
+  function clearDatasets() {
+    if (!dmList.length) { notice('当前没有可删除的数据集。', 'ok'); return; }
+    askConfirm('确认清空全部 ' + dmList.length + ' 条数据集？删除后不可恢复。', function () {
+      removeThen(dmList.map(function (x) { return String(x.id); }));
+    });
+  }
+
+  function switchDataset(id) {
+    fetch(API + '/datasets/' + encodeURIComponent(id)).then(readJson).then(function (ds) {
+      render(ds);
+      loadDataMgr(ds.id);
+      notice('已加载数据集 #' + ds.id + '。', 'ok');
+    }).catch(function () { notice('加载数据集失败。', 'err'); });
+  }
+
+  function openDataMgr() { dmMask.classList.remove('hidden'); loadDataMgr(); }
+  function closeDataMgr() { closeConfirm(); dmMask.classList.add('hidden'); }
+
+  document.getElementById('dataMgrBtn').addEventListener('click', openDataMgr);
+  document.getElementById('dataMgrClose').addEventListener('click', closeDataMgr);
+  document.getElementById('dmRefresh').addEventListener('click', function () { loadDataMgr(); });
+  document.getElementById('dmClear').addEventListener('click', clearDatasets);
+  dmDelSel.addEventListener('click', function () { deleteDatasets(dmPicks()); });
+  dmMask.addEventListener('click', function (ev) { if (ev.target === dmMask) closeDataMgr(); });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Escape') return;
+    if (!dmConfirm.classList.contains('hidden')) { closeConfirm(); return; }
+    if (!dmMask.classList.contains('hidden')) { closeDataMgr(); return; }
+    var zc = document.getElementById('zoneCfgMask');
+    if (zc && !zc.classList.contains('hidden')) closeZoneCfg();
+  });
+  dmAll.addEventListener('change', function () {
+    Array.prototype.forEach.call(dmTable.querySelectorAll('.dm-pick'), function (el) {
+      el.checked = dmAll.checked;
+    });
+    dmSyncBar();
+  });
+  dmTable.addEventListener('change', function (ev) {
+    if (ev.target.classList && ev.target.classList.contains('dm-pick')) dmSyncBar();
+  });
+  dmTable.addEventListener('click', function (ev) {
+    var el = ev.target;
+    if (!el.getAttribute) return;
+    var view = el.getAttribute('data-view'), del = el.getAttribute('data-del');
+    if (view) switchDataset(view);
+    else if (del) deleteDatasets([String(del)]);
+  });
+
+  /* ---------- 分区设置（顶栏按钮 → 弹窗）：维护「拣货分区 → 前后场分区」映射 ---------- */
+  var zcMask = document.getElementById('zoneCfgMask');
+  var zcList = document.getElementById('zoneCfgList');
+  var zcSum = document.getElementById('zoneCfgSum');
+  var zcNew = document.getElementById('zoneCfgNew');
+  var zcSave = document.getElementById('zoneCfgSave');
+  var zcTypes = [];        // 可选作业类型（「不映射」由前端补空值选项）
+  var zcRows = [];         // [{ zone, type, inData }]；type 为空串 = 不映射
+
+  function zcOptions(cur) {
+    var opts = ['<option value=""' + (cur ? '' : ' selected') + '>不映射</option>'];
+    zcTypes.forEach(function (t) {
+      opts.push('<option value="' + esc(t) + '"' + (t === cur ? ' selected' : '') + '>' + esc(t) + '</option>');
+    });
+    return opts.join('');
+  }
+
+  function zcSyncSum() {
+    var mapped = zcRows.filter(function (r) { return !!r.type; }).length;
+    zcSum.textContent = '共 ' + zcRows.length + ' 个分区，已映射 ' + mapped + ' 个';
+  }
+
+  function renderZoneCfg() {
+    zcList.innerHTML = zcRows.length
+      ? zcRows.map(function (r, i) {
+        return '<div class="zone-row">' +
+          '<span class="zone-name" title="' + esc(r.zone) + '">' + esc(r.zone) +
+          (r.inData ? '<span class="zone-tag">数据中</span>' : '') + '</span>' +
+          '<select class="zone-sel" data-i="' + i + '">' + zcOptions(r.type) + '</select>' +
+          '</div>';
+      }).join('')
+      : '<div class="zone-empty">暂无可配置的分区，可在下方手动新增。</div>';
+    zcSyncSum();
+  }
+
+  function loadZoneCfg() {
+    zcSum.textContent = '加载中…';
+    return fetch(API + '/settings').then(readJson).then(function (j) {
+      zcTypes = j.jobTypes || [];
+      zcRows = (j.zones || []).map(function (z) {
+        return { zone: z.zone, type: z.type || '', inData: !!z.inData };
+      });
+      renderZoneCfg();
+    }).catch(function (e) {
+      zcList.innerHTML = '';
+      zcSum.textContent = '加载失败';
+      notice('分区设置加载失败：' + esc(e.message || e), 'err');
+    });
+  }
+
+  zcList.addEventListener('change', function (ev) {
+    var el = ev.target;
+    if (!el.classList || !el.classList.contains('zone-sel')) return;
+    var r = zcRows[Number(el.getAttribute('data-i'))];
+    if (!r) return;
+    r.type = el.value;
+    zcSyncSum();
+  });
+
+  function zcAdd() {
+    var name = (zcNew.value || '').trim();
+    if (!name) { notice('请输入拣货分区名称。', 'err'); zcNew.focus(); return; }
+    var hit = false;
+    zcRows.forEach(function (r) { if (r.zone === name) hit = true; });
+    if (hit) { notice('分区「' + esc(name) + '」已在列表中。', 'ok'); zcNew.select(); return; }
+    zcRows.push({ zone: name, type: '', inData: false });
+    zcNew.value = '';
+    renderZoneCfg();
+  }
+
+  function saveZoneCfg() {
+    var map = {};
+    zcRows.forEach(function (r) { if (r.type) map[r.zone] = r.type; });
+    zcSave.disabled = true;
+    fetch(API + '/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ map: map })
+    }).then(readJson).then(function (j) {
+      zcSave.disabled = false;
+      var upd = (j.updated || []).length, skip = j.skipped || [], fail = (j.failed || []).length;
+      var msg = '已保存 ' + Object.keys(j.map || {}).length + ' 个分区的映射，并按新映射重算历史数据集：成功 ' +
+        upd + ' 条';
+      if (skip.length) msg += '，跳过 ' + skip.length + ' 条（数据集 #' + skip.join('、') +
+        ' 上传时未保存原始明细，需重新上传该文件才能重算）';
+      if (fail) msg += '，失败 ' + fail + ' 条';
+      notice(msg + '。', fail ? 'err' : 'ok');
+      renderZoneCfg();
+      // 重算只影响服务端数据：当前正查看的数据集需重新拉取才反映新映射
+      var curId = current && current.id != null ? String(current.id) : null;
+      loadDataMgr(curId);
+      if (curId != null) {
+        fetch(API + '/datasets/' + encodeURIComponent(curId)).then(readJson).then(function (ds) {
+          if (String(ds.id) === curId) render(ds);
+        }).catch(function () { });
+      }
+    }).catch(function (e) {
+      zcSave.disabled = false;
+      notice('保存失败：' + esc(e.message || e), 'err');
+    });
+  }
+
+  function openZoneCfg() { zcMask.classList.remove('hidden'); loadZoneCfg(); }
+  function closeZoneCfg() { zcMask.classList.add('hidden'); }
+
+  document.getElementById('zoneCfgBtn').addEventListener('click', openZoneCfg);
+  document.getElementById('zoneCfgClose').addEventListener('click', closeZoneCfg);
+  document.getElementById('zoneCfgRefresh').addEventListener('click', loadZoneCfg);
+  document.getElementById('zoneCfgAdd').addEventListener('click', zcAdd);
+  zcNew.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') zcAdd(); });
+  zcSave.addEventListener('click', saveZoneCfg);
+  zcMask.addEventListener('click', function (ev) { if (ev.target === zcMask) closeZoneCfg(); });
 
   // 人员效率明细：点击表头切换升/降序
   document.getElementById('tablePerson').addEventListener('click', function (ev) {

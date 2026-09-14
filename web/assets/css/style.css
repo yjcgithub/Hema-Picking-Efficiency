@@ -39,7 +39,15 @@ body {
 }
 .topbar h1 { margin: 0; font-size: 19px; }
 .sub { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
-.actions { display: flex; gap: 10px; }
+/* 数据集信息条（原顶栏副标题）：位于 KPI 上方，超长自动换行，不挤压顶栏控件 */
+.meta-bar {
+  margin-bottom: 12px; padding: 7px 12px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); font-size: 12.5px; line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+/* 控件组：右对齐；宽度不足时组内自动换行，不再挤压品牌区 */
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 
 .btn {
   display: inline-flex; align-items: center;
@@ -142,6 +150,8 @@ main { padding: 14px 20px 6px; }
 }
 .card h3 .card-title { flex: 1 1 auto; min-width: 0; }
 .chart { width: 100%; height: 250px; }
+/* 「作业类型 × 小时 效率」：类型多、数据点密，单独加高 */
+.chart.tall { height: 340px; }
 
 /* ---------- 表格 ---------- */
 /* 表格：不设内部滚动，整表铺开；overflow 让表头背景被圆角裁齐 */
@@ -174,6 +184,31 @@ tbody tr.total td { font-weight: 700; background: #f8fafc; }
   max-width: 300px;
 }
 .select:hover { border-color: #c9d6ea; }
+
+/* 历史数据集下拉（自定义，每项两行：文件名 / 元信息） */
+.sel-btn {
+  position: relative; width: 300px; padding: 5px 26px 5px 12px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  text-align: left; font: inherit; font-size: 13px; line-height: 1.3;
+}
+.sel-btn::after {
+  content: '▾'; position: absolute; right: 10px; top: 50%;
+  transform: translateY(-50%); color: var(--muted); font-size: 11px;
+}
+/* 两行文本：超长省略，不撑破按钮 */
+.sel-l1, .sel-l2 { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-l2 { color: var(--muted); font-size: 11.5px; }
+.menu.sel-menu {
+  left: 0; right: auto; min-width: 100%; max-width: 460px; width: max-content;
+  max-height: min(60vh, 420px); overflow: auto;
+}
+/* 菜单项同样两行（覆盖 .menu button 的 display:block） */
+.menu .sel-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 5px 10px; line-height: 1.3;
+}
+.menu .sel-item.on { background: #eef4ff; color: var(--primary); }
+.menu .sel-item.on .sel-l2 { color: var(--primary); }
 td.eff-hi { color: #047857; font-weight: 600; }
 td.eff-lo { color: #b45309; }
 
@@ -193,6 +228,8 @@ td.eff-lo { color: #b45309; }
 .pivot-block.collapsed .table-wrap { display: none; }
 /* 透视列数随小时数变化，列多时在容器内横向滚动，避免撑出屏幕 */
 .pivot-block .table-wrap { overflow-x: auto; }
+/* 透视表行多，行高压紧一点点（上下内边距 6px -> 4px） */
+.pivot-block th, .pivot-block td { padding-top: 4px; padding-bottom: 4px; }
 
 /* 分块内首列（拣货人）吸左：横向滚动时始终可见 */
 .pivot-block th:nth-child(1), .pivot-block tbody td:nth-child(1) {
@@ -239,13 +276,166 @@ td.eff-lo { color: #b45309; }
   border-top: 1px solid var(--line); padding-top: 8px; padding-bottom: 8px;
 }
 
+/* ---------- 分布 / 集中度分析卡片 ---------- */
+/* 段落小标题（分档表 / 稳定性榜 / TOP 10） */
+.sub-title { margin: 0 0 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
+/* 与上方内容留出间距的小标题（稳定性榜接在两栏下方） */
+.sub-title.gap { margin-top: 12px; }
+/* 指标小卡一行：人数、平均、中位数、四分位、变异系数等 */
+.stat-strip {
+  display: grid; gap: 10px; margin: 10px 0 12px;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+}
+.stat-chip {
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: #f8fafc;
+}
+.stat-chip .k { color: var(--muted); font-size: 11.5px; }
+.stat-chip .v {
+  margin-top: 2px; font-size: 17px; font-weight: 700;
+  font-variant-numeric: tabular-nums; letter-spacing: .2px;
+}
+.stat-chip .v small { margin-left: 3px; font-size: 11px; font-weight: 500; color: var(--muted); }
+/* 占比条列表（行数 TOP 10）：名称 / 条 / 行数·占比 */
+.bar-list { display: flex; flex-direction: column; gap: 7px; }
+.bar-item {
+  display: grid; grid-template-columns: 96px minmax(0, 1fr) 122px;
+  align-items: center; gap: 8px; font-size: 12.5px;
+}
+.bar-name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { height: 14px; border-radius: 7px; background: #f1f5f9; overflow: hidden; }
+.bar-fill {
+  display: block; height: 100%; border-radius: 7px;
+  background: linear-gradient(90deg, #93c5fd, #2563eb);
+}
+.bar-val { text-align: right; font-variant-numeric: tabular-nums; }
+/* 表格内的分组标题行（波动最大 / 最稳定） */
+table tbody tr.group td {
+  text-align: left; white-space: normal; font-weight: 600;
+  color: var(--muted); font-size: 11.5px; background: #f8fafc;
+}
+/* 稳定性榜独占整行，标签列（拣货人 / 作业类型）左对齐 */
+#tableStab th:nth-child(1), #tableStab td:nth-child(1),
+#tableStab th:nth-child(2), #tableStab td:nth-child(2) { text-align: left; }
+/* 卡片底部的口径说明 */
+.note { margin-top: 10px; color: var(--muted); font-size: 11.5px; line-height: 1.7; }
+
+@media (max-width: 720px) {
+  .bar-item { grid-template-columns: 84px minmax(0, 1fr) 108px; }
+}
+
 footer {
   padding: 4px 20px 16px; color: var(--muted); font-size: 11.5px; line-height: 1.8;
 }
+
+/* ---------- 数据管理弹窗 ---------- */
+.mask {
+  position: fixed; inset: 0; z-index: 50; padding: 24px;
+  background: rgba(15, 23, 42, .42);
+  display: flex; align-items: center; justify-content: center;
+}
+.mask.hidden { display: none; }
+.modal {
+  width: min(1100px, 100%); max-height: 88vh;
+  display: flex; flex-direction: column;
+  background: #fff; border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(15, 40, 80, .28);
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+}
+.modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-x {
+  padding: 2px 7px; border: 0; border-radius: 6px; background: none;
+  color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer;
+}
+.modal-x:hover { background: #f1f5f9; color: var(--txt); }
+.modal-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 18px; background: #fbfcfe; border-bottom: 1px solid var(--line);
+}
+.modal-bar .grow { flex: 1 1 auto; }
+.modal-bar .chk {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 13px; cursor: pointer;
+}
+.modal-bar .chk input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary); cursor: pointer; }
+.modal-sum { color: var(--muted); font-size: 12.5px; }
+.btn.danger { color: #b91c1c; border-color: #fecaca; }
+.btn.danger:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.modal-body { overflow: auto; max-height: 62vh; padding: 0 18px 16px; }
+.modal-body table { font-size: 13px; }
+.modal-body thead th { padding-top: 9px; padding-bottom: 9px; }
+#dmTable .dm-ck { width: 36px; }
+#dmTable .dm-pick { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
+#dmTable td.dm-file {
+  max-width: 280px; text-align: left; overflow: hidden; text-overflow: ellipsis;
+}
+#dmTable td.dm-act { white-space: nowrap; }
+#dmTable .dm-act .mini { margin: 0 3px; }
+.mini.danger { color: #b91c1c; border-color: #fecaca; }
+.mini.danger:hover { background: #fef2f2; border-color: #fca5a5; color: #b91c1c; }
+/* 当前正在查看的数据集：整行浅蓝底 + 左侧色条 */
+#dmTable tbody tr.now td { background: #eef4ff; }
+#dmTable tbody tr.now td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+#dmTable .dm-empty { padding: 24px 0; color: var(--muted); }
+
+/* ---------- 分区设置弹窗 ---------- */
+/* 分区清单是单列窄表，不需要数据管理那么宽 */
+.modal.narrow { width: min(660px, 100%); }
+.zone-cfg-head { margin: 14px 0 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.zone-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 176px;
+  align-items: center; gap: 10px;
+  padding: 6px 0; border-bottom: 1px solid var(--line);
+}
+.zone-row:last-child { border-bottom: 0; }
+/* 分区名可能很长：省略号截断，完整名称放 title */
+.zone-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zone-tag {
+  margin-left: 6px; padding: 0 5px; border-radius: 5px;
+  background: #f1f5f9; color: var(--muted); font-size: 10.5px;
+}
+.zone-sel {
+  width: 100%; padding: 5px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: #fff; color: var(--txt);
+  font-size: 12.5px; cursor: pointer;
+}
+.zone-sel:hover { border-color: #c9d6ea; }
+.zone-add {
+  display: flex; gap: 10px; margin-top: 12px;
+  padding-top: 12px; border-top: 1px dashed var(--line);
+}
+.zone-add input {
+  flex: 1 1 auto; min-width: 0; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  font: inherit; font-size: 13px; color: var(--txt);
+}
+.zone-add input:focus { outline: none; border-color: var(--primary); }
+.zone-empty { padding: 18px 0; color: var(--muted); text-align: center; }
+
+/* 删除二次确认弹层 */
+.confirm {
+  position: fixed; inset: 0; z-index: 60; padding: 24px;
+  background: rgba(15, 23, 42, .38);
+  display: flex; align-items: center; justify-content: center;
+}
+.confirm.hidden { display: none; }
+.confirm-box {
+  width: min(440px, 100%); padding: 18px 20px 16px;
+  background: #fff; border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(15, 40, 80, .3);
+}
+.confirm-text { margin: 0 0 16px; color: var(--txt); font-size: 13.5px; line-height: 1.7; }
+.confirm-act { display: flex; justify-content: flex-end; gap: 10px; }
 
 @media (max-width: 720px) {
   .topbar { flex-direction: column; align-items: flex-start; }
   main, .topbar, .notice, footer { padding-left: 14px; padding-right: 14px; }
   .notice { margin-left: 14px; margin-right: 14px; }
   .grid { grid-template-columns: 1fr; }
+  .mask { padding: 10px; }
+  .modal { max-height: 92vh; }
 }

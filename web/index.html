@@ -13,34 +13,39 @@
 <header class="topbar">
   <div class="brand">
     <div class="logo">盒</div>
-    <div>
-      <h1>门店拣货效率监控看板</h1>
-      <p class="sub" id="metaLine">加载中…</p>
-    </div>
+    <h1>门店拣货效率监控看板</h1>
   </div>
   <div class="actions">
     <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）">
       <input type="checkbox" id="weightedToggle">按工时加权
     </label>
-    <select class="select" id="historySelect" title="历史数据集"></select>
+    <div class="menu-wrap" id="historyWrap">
+      <button type="button" class="select sel-btn" id="historyBtn" data-menu="1" title="历史数据集">
+        <span class="sel-l1">加载中…</span>
+        <span class="sel-l2"></span>
+      </button>
+      <div class="menu sel-menu" id="historyMenu"></div>
+    </div>
     <label class="btn primary" id="uploadLabel">
       上传拣货单 xlsx
       <input type="file" id="fileInput" accept=".xlsx,.xls" hidden>
     </label>
-    <button class="btn" id="resetBtn">示例数据</button>
+    <button class="btn" id="zoneCfgBtn">分区设置</button>
+    <button class="btn" id="dataMgrBtn">数据管理</button>
   </div>
 </header>
 
 <div id="notice" class="notice hidden"></div>
 
 <main>
+  <div class="meta-bar" id="metaLine">加载中…</div>
   <section class="kpis" id="kpis"></section>
   <section class="kpis sub" id="kpisSub"></section>
 
   <section class="grid">
     <div class="card wide">
       <h3>作业类型 × 小时 效率</h3>
-      <div class="chart" id="chartJtHour"></div>
+      <div class="chart tall" id="chartJtHour"></div>
     </div>
     <div class="card wide">
       <h3>各小时效率趋势</h3>
@@ -64,14 +69,110 @@
     <h3>人员效率明细（分两栏，点击表头可升/降序）</h3>
     <div class="two-col" id="tablePerson"></div>
   </section>
+
+  <section class="card">
+    <h3>人员效率分布与稳定性（按各人总计效率，人均口径）</h3>
+    <div class="stat-strip" id="distStat"></div>
+    <div class="two-col">
+      <div>
+        <div class="sub-title">各人效率分布（箱线图：整体 + 各作业类型）</div>
+        <div class="chart" id="chartDist"></div>
+      </div>
+      <div>
+        <div class="sub-title">效率分档（各档人数与产出）</div>
+        <div class="table-wrap"><table id="tableEffBin"></table></div>
+      </div>
+    </div>
+    <div class="sub-title gap">稳定性榜（越大越不稳定）</div>
+    <div class="table-wrap"><table id="tableStab"></table></div>
+    <div class="note" id="distNote"></div>
+  </section>
+
+  <section class="card">
+    <h3>拣货行数统计（按人员分布与集中度）</h3>
+    <div class="stat-strip" id="rowsStat"></div>
+    <div class="two-col">
+      <div>
+        <div class="sub-title">行数 TOP 10</div>
+        <div class="bar-list" id="rowsTop"></div>
+      </div>
+      <div>
+        <div class="sub-title">行数分档（人数 / 行数两条口径）</div>
+        <div class="table-wrap"><table id="tableRowsBin"></table></div>
+      </div>
+    </div>
+    <div class="note" id="rowsNote"></div>
+  </section>
 </main>
 
 <footer>
   效率口径（顶栏开关统一切换，影响顶端卡片与「作业类型 × 小时 效率」图）：
   人均 = 各人效率的算术平均；按工时加权 = Σ拣货行数 ÷ Σ拣货时长(h)（透视与明细固定此口径）。
-  拣货时长 = 拣货完成时间 − 拣货开始时间；作业类型由「任务子类型」与「拣货分区→前后场分区」映射生成。
+  拣货时长 = 拣货完成时间 − 拣货开始时间；作业类型由「任务子类型」与「拣货分区→前后场分区」映射生成
+  （映射可在顶栏「分区设置」中维护，保存后服务端按新映射重算历史数据集）。
   文件解析与计算在服务端完成。
 </footer>
+
+<!-- 数据管理弹窗：查看/切换/删除历史数据集 -->
+<div class="mask hidden" id="dataMgrMask">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>数据管理</h3>
+      <button type="button" class="modal-x" id="dataMgrClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-bar">
+      <label class="chk"><input type="checkbox" id="dmAll">全选</label>
+      <span class="modal-sum" id="dmSum">共 0 条</span>
+      <span class="grow"></span>
+      <button type="button" class="btn" id="dmRefresh">刷新</button>
+      <button type="button" class="btn danger" id="dmDelSel" disabled>删除选中</button>
+      <button type="button" class="btn danger" id="dmClear">清空全部</button>
+    </div>
+    <div class="modal-body">
+      <table id="dmTable"></table>
+    </div>
+  </div>
+
+  <!-- 删除二次确认（页内弹层，不依赖浏览器原生 confirm） -->
+  <div class="confirm hidden" id="dmConfirm">
+    <div class="confirm-box">
+      <p class="confirm-text" id="dmConfirmText"></p>
+      <div class="confirm-act">
+        <button type="button" class="btn" id="dmConfirmCancel">取消</button>
+        <button type="button" class="btn danger" id="dmConfirmOk">确认删除</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 分区设置弹窗：配置「拣货分区 → 前后场分区（作业类型）」映射，保存后由服务端重算历史数据集 -->
+<div class="mask hidden" id="zoneCfgMask">
+  <div class="modal narrow">
+    <div class="modal-head">
+      <h3>分区设置（拣货分区 → 前后场分区）</h3>
+      <button type="button" class="modal-x" id="zoneCfgClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-bar">
+      <span class="modal-sum" id="zoneCfgSum">加载中…</span>
+      <span class="grow"></span>
+      <button type="button" class="btn" id="zoneCfgRefresh">刷新</button>
+      <button type="button" class="btn primary" id="zoneCfgSave">保存并重算</button>
+    </div>
+    <div class="modal-body">
+      <div class="zone-cfg-head">数据中出现的拣货分区</div>
+      <div id="zoneCfgList"></div>
+      <div class="zone-add">
+        <input type="text" id="zoneCfgNew" placeholder="手动新增拣货分区名（需与导出文件中的名称完全一致）">
+        <button type="button" class="btn" id="zoneCfgAdd">新增</button>
+      </div>
+      <div class="note">
+        该映射决定每条明细的「作业类型」：任务子类型为「拆零拣打一体」时固定为「一体化」，
+        其余按此处的「拣货分区 → 前后场分区」取值；选「不映射」的分区归入「未匹配分区」。
+        保存后会立即用新映射重算全部历史数据集（依赖上传时保存的原始明细，早期数据集可能需重新上传）。
+      </div>
+    </div>
+  </div>
+</div>
 
 <script src="assets/js/config.js"></script>
 <script src="assets/js/data.js"></script>
