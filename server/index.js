@@ -2,10 +2,10 @@
    - 托管前端静态文件（../web）
    - CORS：前端与后端不同源时必需
    - BASE_PATH：反向代理子路径（如 nginx 把 https://api.yjmc.xyz/hpe/ 转到本服务）
-   - POST /api/upload 上传 xlsx -> 解析并计算 -> 存入 SQLite -> 返回数据集
+   - POST /api/upload 上传 xlsx -> 解析并计算 -> 按时间维度覆盖/新增入库 -> 返回数据集
    - GET  /api/latest /api/datasets /api/datasets/:id
-   - GET  /api/settings 读取「拣货分区 -> 前后场分区」映射与数据集里出现过的分区
-   - POST /api/settings 保存映射，并用新映射重算历史数据集
+   - GET  /api/settings 读取「拣货分区 -> 前后场分区」映射、忽略分区与数据集里出现过的分区
+   - POST /api/settings 保存映射与忽略分区，并用新设置重算历史数据集
    - DELETE /api/datasets/:id
 */
 const fs = require('fs');
@@ -60,6 +60,12 @@ function currentMap() {
   return db.getSetting(CFG.MAPPING_KEY) || CFG.DEFAULT_FRONT_BACK_MAP;
 }
 
+// 「忽略分区」列表（这些分区的明细完全排除出统计）；未保存过则为空
+function currentIgnore() {
+  const v = db.getSetting(CFG.IGNORE_KEY);
+  return Array.isArray(v) ? v.map(z => String(z).trim()).filter(Boolean) : [];
+}
+
 // 汇总所有数据集里实际出现过的「拣货分区」（新数据集走原始明细，旧数据集用 payload 里的分区兜底）
 function dataZones() {
   const set = {};
@@ -74,28 +80,34 @@ function dataZones() {
   return set;
 }
 
-// 设置界面用清单：数据里出现过的分区 + 映射里已配置的分区（去重、排序）
+// 设置界面用清单：数据里出现过的分区 + 映射里已配置的分区 + 已忽略的分区（去重、排序）
 function zoneRows() {
   const map = currentMap();
+  const ignore = currentIgnore();
+  const ig = {};
+  ignore.forEach(z => { ig[z] = 1; });
+
   const inData = dataZones();
   const all = {};
   Object.keys(inData).forEach(z => { all[z] = 1; });
   Object.keys(map).forEach(z => { all[z] = 1; });
+  ignore.forEach(z => { all[z] = 1; });
 
   return Object.keys(all).sort().map(z => ({
     zone: z,
     type: map[z] || '',      // 空 = 未映射（数据里会归入「未匹配分区」）
+    ignored: !!ig[z],        // 已忽略的分区完全排除出统计
     inData: !!inData[z]
   }));
 }
 
-// 用新映射重算全部历史数据集（缺少原始明细的跳过，需重新上传才能重算）
-function rebuildAll(map) {
+// 用新映射与忽略列表重算全部历史数据集（缺少原始明细的跳过，需重新上传才能重算）
+function rebuildAll(map, ignore) {
   const updated = [], failed = [];
   db.rebuildTargets().forEach(t => {
     if (!t.recs || !t.recs.length) return;
     try {
-      db.updatePayload(t.id, compute.rebuild(t.recs, { sourceFile: t.sourceFile, dropped: t.dropped }, map));
+      db.updatePayload(t.id, compute.rebuild(t.recs, { sourceFile: t.sourceFile, dropped: t.dropped }, map, ignore));
       updated.push(t.id);
     } catch (e) {
       failed.push({ id: t.id, error: e.message || String(e) });
@@ -111,13 +123,14 @@ router.get('/api/health', (req, res) => {
 router.get('/api/settings', (req, res) => {
   res.json({
     map: currentMap(),
+    ignore: currentIgnore(),
     jobTypes: CFG.JOB_TYPES,
     unmatched: CFG.UNMATCHED_TYPE,
     zones: zoneRows()
   });
 });
 
-// 保存映射（未提交/值为空的分区视为「不映射」-> 从映射中移除）并按新映射重算历史数据集
+// 保存映射与忽略分区（未提交/值为空的分区视为「不映射」-> 从映射中移除），并按新设置重算历史数据集
 router.post('/api/settings', express.json({ limit: '1mb' }), (req, res) => {
   try {
     const input = (req.body && req.body.map) || {};
@@ -131,9 +144,22 @@ router.post('/api/settings', express.json({ limit: '1mb' }), (req, res) => {
       }
       map[zone] = type;
     }
+
+    // 忽略分区：命中即完全排除出统计（与其映射无关）
+    const ignore = [];
+    const inputIgnore = req.body && req.body.ignore;
+    if (inputIgnore != null && !Array.isArray(inputIgnore)) {
+      return res.status(400).json({ error: '忽略分区列表格式不合法（应为分区名数组）' });
+    }
+    (inputIgnore || []).forEach(z => {
+      const zone = String(z == null ? '' : z).trim();
+      if (zone && ignore.indexOf(zone) < 0) ignore.push(zone);
+    });
+
     db.setSetting(CFG.MAPPING_KEY, map);
-    const r = rebuildAll(map);
-    res.json({ ok: true, map, updated: r.updated, skipped: r.skipped, failed: r.failed });
+    db.setSetting(CFG.IGNORE_KEY, ignore);
+    const r = rebuildAll(map, ignore);
+    res.json({ ok: true, map, ignore, updated: r.updated, skipped: r.skipped, failed: r.failed });
   } catch (e) {
     res.status(400).json({ error: e.message || String(e) });
   }
@@ -156,14 +182,20 @@ router.get('/api/datasets/:id', (req, res) => {
 });
 
 // 上传：raw body 传 xlsx 字节，文件名通过 ?name= 或 x-filename 头传入
+// 覆盖/新增规则：以文件内「拣货开始时间」的日期集合为时间维度，
+// 命中同维度历史记录则整条覆盖，否则新增一条（文件名不再参与匹配）
 router.post('/api/upload', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
   try {
     const buf = req.body;
     if (!buf || !buf.length) return res.status(400).json({ error: '未收到文件内容' });
     const name = String(req.query.name || req.get('x-filename') || 'upload.xlsx');
-    const built = compute.buildFromBuffer(buf, name, currentMap());
-    const id = db.insert(built.dataset, built.recs);
-    res.json(Object.assign({ id }, built.dataset));
+    const built = compute.buildFromBuffer(buf, name, currentMap(), currentIgnore());
+
+    const hit = db.findByDates(built.dataset.meta.dates);
+    const id = hit
+      ? db.overwrite(hit.id, built.dataset, built.recs)
+      : db.insert(built.dataset, built.recs);
+    res.json(Object.assign({ id, mode: hit ? 'overwrite' : 'create' }, built.dataset));
   } catch (e) {
     res.status(400).json({ error: e.message || String(e) });
   }
@@ -192,21 +224,26 @@ app.use(function (req, res) {
   });
 });
 
-// 首次启动：若库为空且有示例导出文件，则初始化一条
-if (db.count() === 0 && fs.existsSync(SEED_FILE)) {
-  try {
-    const built = compute.buildFromBuffer(fs.readFileSync(SEED_FILE), path.basename(SEED_FILE), currentMap());
-    db.insert(built.dataset, built.recs);
-    console.log('已用示例文件初始化数据集：' + path.basename(SEED_FILE) +
-      '（有效明细 ' + built.dataset.meta.recordCount + ' 条，综合效率 ' + built.dataset.totals.eff + ' 行/h）');
-  } catch (e) {
-    console.warn('示例数据初始化失败：' + e.message);
+// 直接运行时才启动监听与示例数据播种（被 require 时只导出 app，便于测试）
+if (require.main === module) {
+  // 首次启动：若库为空且有示例导出文件，则初始化一条
+  if (db.count() === 0 && fs.existsSync(SEED_FILE)) {
+    try {
+      const built = compute.buildFromBuffer(fs.readFileSync(SEED_FILE), path.basename(SEED_FILE), currentMap(), currentIgnore());
+      db.insert(built.dataset, built.recs);
+      console.log('已用示例文件初始化数据集：' + path.basename(SEED_FILE) +
+        '（有效明细 ' + built.dataset.meta.recordCount + ' 条，综合效率 ' + built.dataset.totals.eff + ' 行/h）');
+    } catch (e) {
+      console.warn('示例数据初始化失败：' + e.message);
+    }
   }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log('服务已启动： http://localhost:' + PORT +
+      (BASE_PATH ? '  （子路径 ' + BASE_PATH + '）' : '') + '  静态目录 ' + WEB_DIR);
+    console.log('可通过本地 IP 或域名访问');
+    console.log('历史数据集数量：' + db.count());
+  });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('服务已启动： http://localhost:' + PORT +
-    (BASE_PATH ? '  （子路径 ' + BASE_PATH + '）' : '') + '  静态目录 ' + WEB_DIR);
-  console.log('可通过本地 IP 或域名访问');
-  console.log('历史数据集数量：' + db.count());
-});
+module.exports = app;

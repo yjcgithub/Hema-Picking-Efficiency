@@ -5,7 +5,8 @@
   "description": "门店拣货效率监控看板 - Node.js 后端（解析 xlsx / 计算效率 / SQLite 存历史 / 托管前端）",
   "main": "index.js",
   "scripts": {
-    "start": "node --env-file-if-exists=.env index.js"
+    "start": "node --env-file-if-exists=.env index.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=22.5.0"

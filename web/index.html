@@ -17,7 +17,7 @@
   </div>
   <div class="actions">
     <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）">
-      <input type="checkbox" id="weightedToggle">按工时加权
+      <input type="checkbox" id="weightedToggle" checked>按工时加权
     </label>
     <div class="menu-wrap" id="historyWrap">
       <button type="button" class="select sel-btn" id="historyBtn" data-menu="1" title="历史数据集">
@@ -103,12 +103,21 @@
     </div>
     <div class="note" id="rowsNote"></div>
   </section>
+
+  <section class="card">
+    <h3>人员工作时间图（由拣货单起止时间反推的在岗时段）</h3>
+    <div class="stat-strip" id="timelineStat"></div>
+    <div class="chart xtall" id="chartTimeline"></div>
+    <div class="sub-title gap">各「人·日」班次明细（按人员效率降序）</div>
+    <div class="table-wrap scroll-x"><table id="tableTimeline"></table></div>
+    <div class="note" id="timelineNote"></div>
+  </section>
 </main>
 
 <footer>
   效率口径（顶栏开关统一切换，影响顶端卡片与「作业类型 × 小时 效率」图）：
   人均 = 各人效率的算术平均；按工时加权 = Σ拣货行数 ÷ Σ拣货时长(h)（透视与明细固定此口径）。
-  拣货时长 = 拣货完成时间 − 拣货开始时间；作业类型由「任务子类型」与「拣货分区→前后场分区」映射生成
+  拣货时长 = 拣货完成时间 − 拣货开始时间；作业类型由「拣货单类型」与「拣货分区→前后场分区」映射生成
   （映射可在顶栏「分区设置」中维护，保存后服务端按新映射重算历史数据集）。
   文件解析与计算在服务端完成。
 </footer>
@@ -166,9 +175,12 @@
         <button type="button" class="btn" id="zoneCfgAdd">新增</button>
       </div>
       <div class="note">
-        该映射决定每条明细的「作业类型」：任务子类型为「拆零拣打一体」时固定为「一体化」，
-        其余按此处的「拣货分区 → 前后场分区」取值；选「不映射」的分区归入「未匹配分区」。
-        保存后会立即用新映射重算全部历史数据集（依赖上传时保存的原始明细，早期数据集可能需重新上传）。
+        该映射决定每条明细的「作业类型」：拣货单类型为「拣打一体」时固定为「一体化」，
+        其余按此处的「拣货分区 → 前后场分区」取值；选「不映射」的分区归入「未匹配分区」。<br>
+        选「忽略（排除统计）」的分区，其明细完全排除出统计（不计入任何指标与图表），
+        仅在上传结果与数据管理中单独记为「已忽略」，与「丢弃」（缺人/缺时间）区分。<br>
+        保存后会立即用新设置重算全部历史数据集（依赖上传时保存的原始明细，早期数据集可能需重新上传）；
+        若所有分区都被忽略，上传与重算会因无数据可统计而失败。
       </div>
     </div>
   </div>

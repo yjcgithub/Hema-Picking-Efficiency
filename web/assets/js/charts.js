@@ -6,7 +6,7 @@
 
   var instances = {};
   var cache = null;
-  var weighted = false;   // 效率口径：false = 人均（默认），true = 按工时加权
+  var weighted = true;    // 效率口径：true = 按工时加权（默认），false = 人均
 
   function inst(id) {
     var el = document.getElementById(id);
@@ -25,9 +25,73 @@
     var h = Math.floor(v), m = Math.round((v - h) * 60);
     return h + ':' + (m < 10 ? '0' + m : String(m));
   }
+  /* 分钟（当天 0 点起算）-> HH:MM（工作时间图的时间轴） */
+  function minText(m) {
+    var h = Math.floor(m / 60), mi = Math.round(m - h * 60);
+    if (mi >= 60) { h += 1; mi -= 60; }
+    return (h < 10 ? '0' + h : h) + ':' + (mi < 10 ? '0' + mi : mi);
+  }
 
   var AXIS = { axisLine: { lineStyle: { color: '#e2e8f0' } }, axisLabel: { color: '#64748b', fontSize: 11 } };
   var SPLIT = { lineStyle: { color: '#f1f5f9' } };
+  /* 图例 / 系列的显示顺序（与透视分块一致） */
+  var TYPE_ORDER = ['前场合流', '后场合流', '一体化', '未匹配分区'];
+
+  /* 工作时间图：一行 = 一个「人·日」班次的最小行高（px）
+     行高不足时 ECharts 会自动抽稀纵轴标签（人员名会「消失」一部分），故取 18 保证标签完整可见 */
+  var TL_ROW_MIN_H = 18;
+  var TL_GRID_TOP = 34, TL_GRID_BOTTOM = 72;   // 底部含时间轴标签 + 横轴缩放条
+  var TL_GRID_LEFT = 128, TL_GRID_RIGHT = 34;  // 左侧放宽以容纳「人员 日期」标签
+  /* 横/纵缩放条统一外观（细长、浅灰），避免默认样式喧宾夺主 */
+  var TL_ZOOM_STYLE = {
+    showDetail: false, brushSelect: false, realTime: true,
+    backgroundColor: '#f8fafc', borderColor: '#e2e8f0',
+    fillerColor: 'rgba(148,163,184,0.18)',
+    handleStyle: { color: '#94a3b8', borderColor: '#94a3b8' },
+    moveHandleStyle: { color: '#cbd5e1' }
+  };
+
+  /* 工作时间图：点击「色块」或左侧「人员名」-> 高亮该行，同一时刻只保留一行高亮 */
+  var TL_HL_ID = 'tlHighlight';   // 高亮行系列的 id（增量 setOption 时按 id 合并）
+  var tlSel = -1;                 // 当前高亮行下标（对应 tlRows 的序号），-1 = 无高亮
+  var tlSelRows = null;           // 高亮所属的数据行（切换数据集后失效，需清空）
+
+  /* 工作时间图：把一段在岗区间画成圆角矩形（x 轴为当天的分钟刻度，y 轴为「人·日」分类） */
+  function timelineItem(params, api) {
+    var i = api.value(0);
+    var a = api.coord([api.value(1), i]);
+    var b = api.coord([api.value(2), i]);
+    var band = api.size([0, 1])[1];
+    // 高度跟随行高，上限 18px；绝不能超过行高，否则色块跨到相邻行、与左侧行名对不上
+    var h = Math.min(band * 0.6, 18, band);
+    var rect = echarts.graphic.clipRectByRect({
+      x: a[0], y: a[1] - h / 2,
+      width: Math.max(b[0] - a[0], 1.5), height: h
+    }, {
+      x: params.coordSys.x, y: params.coordSys.y,
+      width: params.coordSys.width, height: params.coordSys.height
+    });
+    return rect && {
+      type: 'rect',
+      shape: Object.assign({ r: 1.5 }, rect),
+      style: api.style()
+    };
+  }
+
+  /* 工作时间图：高亮行的整行底色 + 边框（silent —— 不拦截色块的点击与悬浮） */
+  function timelineHlItem(params, api) {
+    var y = api.coord([0, api.value(0)])[1];
+    var band = api.size([0, 1])[1];
+    return {
+      type: 'rect',
+      shape: {
+        x: params.coordSys.x + 1, y: y - band / 2,
+        width: Math.max(params.coordSys.width - 2, 2),
+        height: Math.max(band, 2), r: 3
+      },
+      style: { fill: 'rgba(37,99,235,0.10)', stroke: 'rgba(37,99,235,0.65)', lineWidth: 1.5 }
+    };
+  }
 
   function avgLine(v) {
     return {
@@ -217,6 +281,184 @@
           }
         ]
       }, true);
+    }
+
+    /* 4) 人员工作时间图（由拣货单起止时间反推的在岗时段）
+          一行 = 一个「人·日」班次，x 轴为当天时刻，色块 = 该时刻的一段在岗区间（按作业类型着色） */
+    var c6 = inst('chartTimeline');
+    if (c6 && data.timeline && data.timeline.rows && data.timeline.rows.length) {
+      var tlRows = data.timeline.rows;
+
+      // 换数据集后行数据是新数组，旧的高亮下标已失效 -> 清空；同一份数据重渲染（如切换效率口径）则保留
+      if (tlSelRows !== tlRows) tlSel = -1;
+      tlSelRows = tlRows;
+      if (tlSel >= tlRows.length) tlSel = -1;
+
+      // 同一人出现多天时纵轴标签补上日期，避免同名重复难分辨
+      var nameCnt = {};
+      tlRows.forEach(function (r) { nameCnt[r.person] = (nameCnt[r.person] || 0) + 1; });
+      var cats = tlRows.map(function (r) {
+        return nameCnt[r.person] > 1 ? r.person + ' ' + r.date.slice(5) : r.person;
+      });
+
+      // 高亮行的「人员名」加粗着主色，与网格内的整行底色共同构成整行高亮
+      var yDataOf = function (sel) {
+        return cats.map(function (c, i) {
+          return i === sel ? { value: c, textStyle: { color: '#1d4ed8', fontWeight: 'bold' } } : c;
+        });
+      };
+      var hlDataOf = function (sel) { return sel >= 0 ? [{ value: [sel] }] : []; };
+
+      /* 高亮行底色系列：整行铺一层浅蓝底 + 主色描边，置于色块之下（z:1 < 系列默认 z:2），
+         silent 使其不拦截色块的点击与悬浮。
+         encode 必须显式声明：纵轴 dataZoom 默认 filterMode:'filter'，会把「无法映射到
+         分类轴的数据」从数据模型里过滤掉。custom 系列不声明 encode 时无从得知哪个维度是
+         纵轴，这条数据即被过滤为 0 条 -> renderItem 不执行、整行高亮带画不出来（只剩人员名变色）。
+         补 encode:{ y: 0 } 声明 value[0] 是纵轴维度后，数据得以保留并正常渲染。 */
+      var hlSeries = function (sel) {
+        return {
+          id: TL_HL_ID, name: TL_HL_ID, type: 'custom', silent: true, z: 1,
+          encode: { y: 0 },
+          renderItem: timelineHlItem,
+          data: hlDataOf(sel)
+        };
+      };
+
+      // 时间轴范围：首个拣货开始 ~ 末个拣货结束，两侧各留 30 分钟
+      var tMin = Infinity, tMax = -Infinity;
+      tlRows.forEach(function (r) {
+        if (r.first < tMin) tMin = r.first;
+        if (r.last > tMax) tMax = r.last;
+      });
+
+      // 按作业类型分系列（同色即同类型），段分别落在各自的行上
+      var tlNames = [], byType = {};
+      tlRows.forEach(function (r, i) {
+        r.segs.forEach(function (sg) {
+          if (!byType[sg.type]) { byType[sg.type] = []; tlNames.push(sg.type); }
+          byType[sg.type].push({
+            value: [i, sg.s, sg.e, sg.rows, sg.orders, sg.eff, r.person, r.date]
+          });
+        });
+      });
+      tlNames.sort(function (a, b) {
+        var ia = TYPE_ORDER.indexOf(a), ib = TYPE_ORDER.indexOf(b);
+        if (ia < 0) ia = 90;
+        if (ib < 0) ib = 90;
+        return ia - ib;
+      });
+
+      // 行数多于 40 时默认只展示前 40 行（其余靠纵轴缩放查看），否则行高过密无法辨认
+      var win = tlRows.length > 40 ? Math.round(40 / tlRows.length * 100) : 100;
+
+      // 最小行高：容器高度按「当前可见班次数 × TL_ROW_MIN_H」撑开（不低于 620px），
+      // 这样缩放到最小（显示全部班次）时行高仍有下限，色块与左侧行名一一对应
+      var total = tlRows.length;
+      var tlEl = document.getElementById('chartTimeline');
+      var applyHeight = function (visible) {
+        if (!tlEl) return;
+        var h = Math.max(620, TL_GRID_TOP + TL_GRID_BOTTOM + Math.ceil(visible) * TL_ROW_MIN_H);
+        if (tlEl.style.height !== h + 'px') { tlEl.style.height = h + 'px'; c6.resize(); }
+      };
+      applyHeight(total * win / 100);
+
+      c6.setOption({
+        tooltip: {
+          trigger: 'item',
+          formatter: function (p) {
+            var v = p.value;
+            return '<b>' + v[6] + '</b>（' + v[7] + '）<br/>' +
+              p.marker + p.seriesName + '　' + minText(v[1]) + ' – ' + minText(v[2]) +
+              '（' + (v[2] - v[1]) + ' 分钟）<br/>' +
+              '行数：' + v[3] + '　拣货单：' + v[4] +
+              (v[5] == null ? '' : '<br/>该段效率：' + fmt(v[5]) + ' 行/h');
+          }
+        },
+        legend: {
+          data: tlNames, top: 0, left: 'center',
+          itemGap: 14, itemWidth: 14, itemHeight: 8,
+          textStyle: { fontSize: 11, color: '#64748b' }
+        },
+        grid: { left: TL_GRID_LEFT, right: TL_GRID_RIGHT, top: TL_GRID_TOP, bottom: TL_GRID_BOTTOM },
+        xAxis: {
+          type: 'value',
+          min: Math.max(0, Math.floor(tMin / 60) * 60 - 30),
+          max: Math.ceil(tMax / 60) * 60 + 30,
+          name: '时间', nameLocation: 'end', nameGap: 8,
+          nameTextStyle: { color: '#94a3b8', fontSize: 11, align: 'right', verticalAlign: 'top' },
+          axisTick: { show: false },
+          axisLine: { show: true, lineStyle: { color: '#cbd5e1' } },
+          axisLabel: { color: '#64748b', fontSize: 11, margin: 10, hideOverlap: true, formatter: minText },
+          splitLine: SPLIT
+        },
+        yAxis: {
+          type: 'category', data: yDataOf(tlSel), inverse: true,
+          // 打开轴标签的交互：否则标签默认 silent，点击「人员名」不会有 click 事件
+          triggerEvent: true,
+          axisTick: { show: false },
+          axisLine: { show: true, lineStyle: { color: '#cbd5e1' } },
+          // interval: 0 —— 强制显示全部人员名；行高压到最小时 ECharts 默认会抽稀分类轴标签，
+          // 这正是「缩放到最小后部分人员名消失」的原因
+          axisLabel: {
+            interval: 0,
+            color: '#64748b', fontSize: 11, margin: 8,
+            width: TL_GRID_LEFT - 20, overflow: 'truncate'
+          },
+          splitLine: { show: false }
+        },
+        // 纵轴（班次）与横轴（时刻）均可缩放：班次多时逐行看，时段集中时放大看细节
+        dataZoom: [
+          { type: 'inside', yAxisIndex: 0, start: 0, end: win },
+          Object.assign({
+            type: 'slider', yAxisIndex: 0, start: 0, end: win,
+            right: 6, width: 10, top: TL_GRID_TOP, bottom: TL_GRID_BOTTOM
+          }, TL_ZOOM_STYLE),
+          { type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: false },
+          Object.assign({
+            type: 'slider', xAxisIndex: 0,
+            height: 14, bottom: 12, left: TL_GRID_LEFT, right: TL_GRID_RIGHT
+          }, TL_ZOOM_STYLE)
+        ],
+        series: [hlSeries(tlSel)].concat(tlNames.map(function (name) {
+          return {
+            name: name, type: 'custom', renderItem: timelineItem,
+            encode: { x: [1, 2], y: 0 },
+            itemStyle: { color: colorOf(name) },
+            data: byType[name]
+          };
+        }))
+      }, true);
+
+      // 纵轴缩放后按可见班次数重算容器高度，保证每行不低于 TL_ROW_MIN_H
+      // （横轴缩放只改时间窗口、不改行数，取 yAxisIndex 的那一条即可）
+      c6.off('dataZoom');
+      c6.on('dataZoom', function () {
+        var dzs = c6.getOption().dataZoom || [], dz = null;
+        for (var i = 0; i < dzs.length; i++) {
+          if (dzs[i].yAxisIndex === 0) { dz = dzs[i]; break; }
+        }
+        if (dz) applyHeight(total * (dz.end - dz.start) / 100);
+      });
+
+      // 点击「色块」或左侧「人员名」-> 高亮所在的整行（同一时刻只保留一行，再次点击该行取消）
+      // 两者都由 canvas 绘制，只能走 ECharts 的事件机制，无法用 DOM 监听
+      c6.off('click');
+      c6.on('click', function (p) {
+        var idx = -1;
+        if (p.componentType === 'series') {
+          // 色块：value[0] 即该段所属的行下标（见上方 byType 的组装），不能用 dataIndex（那是系列内序号）
+          if (p.value && typeof p.value[0] === 'number') idx = p.value[0];
+        } else if (p.componentType === 'yAxis' && p.targetType === 'axisLabel') {
+          idx = p.dataIndex;
+        }
+        if (idx < 0 || idx >= total) return;
+        tlSel = (tlSel === idx) ? -1 : idx;
+        // 增量更新（不整图重绘）：按 id 合并高亮系列，同时刷新该行的人员名样式
+        c6.setOption({
+          yAxis: { data: yDataOf(tlSel) },
+          series: [hlSeries(tlSel)]
+        });
+      });
     }
   };
 

@@ -1,0 +1,29 @@
+# 依赖目录
+# 根目录曾出现无 package.json 的孤立 node_modules（echarts/zrender/tslib，54.3 MB，未被任何代码引用）
+# 注意：server/node_modules 为早期已入库内容，本规则不会自动取消其追踪
+node_modules/
+
+# 日志文件
+*.log
+
+# 临时调试脚本与中间产物（如 tmp_scan.js、tmp_probe*.json）
+tmp_*
+*.tmp
+
+# 清理/备份用临时目录
+_cleanup_backup*/
+
+# Excel 打开时的锁文件与手工备份副本
+~$*.xlsx
+*_备份.xlsx
+
+# SQLite 运行期临时文件
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 操作系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

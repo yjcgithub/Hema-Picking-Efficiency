@@ -4,7 +4,7 @@
   var SAMPLE = global.HEMA_DATA;
   var API = (global.HEMA_CONFIG && global.HEMA_CONFIG.API_BASE) || '/api';
   var current = null;
-  var weighted = false;   // 全局效率口径：false = 人均（默认），true = 按工时加权；由顶栏开关统一切换
+  var weighted = true;    // 全局效率口径：true = 按工时加权（默认），false = 人均；由顶栏开关统一切换
 
   // 统一响应解析：后端未部署/地址配错时返回的是 HTML，给出可定位的错误
   function readJson(res) {
@@ -25,11 +25,30 @@
   function fmt(v, d) { return v == null ? '-' : Number(v).toFixed(d == null ? 2 : d); }
 
   var noticeEl = document.getElementById('notice');
+  var noticeTimer = null;
+
+  /* 悬浮吐司提示（右下角浮层）：成功/进行中提示数秒后自动消失，
+     错误提示保留至手动关闭或被下一条覆盖 */
   function notice(msg, type) {
-    if (!msg) { noticeEl.className = 'notice hidden'; return; }
+    if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
+    if (!msg) { noticeEl.className = 'notice hidden'; noticeEl.innerHTML = ''; return; }
     noticeEl.className = 'notice ' + (type || '');
-    noticeEl.innerHTML = msg;
+    noticeEl.innerHTML = '<button type="button" class="notice-close" title="关闭">×</button>' + msg;
+    if (type !== 'err') {
+      noticeTimer = setTimeout(function () {
+        noticeTimer = null;
+        noticeEl.className = 'notice hidden';
+      }, 4000);
+    }
   }
+
+  noticeEl.addEventListener('click', function (ev) {
+    if (ev.target && ev.target.classList.contains('notice-close')) {
+      if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
+      noticeEl.className = 'notice hidden';
+      noticeEl.innerHTML = '';
+    }
+  });
 
   /* ---------- KPI：第一行 综合效率 + 各作业类型；第二行 规模指标（更小） ---------- */
   function kpiCard(c) {
@@ -75,7 +94,9 @@
     var sub = [
       { label: '拣货行数', value: t.rows.toLocaleString(), unit: '行', foot: '有效明细合计' },
       { label: '拣货人数', value: t.persons, unit: '人', foot: '参与拣货的人员' },
-      { label: '有效明细', value: d.meta.recordCount.toLocaleString(), unit: '条', foot: '丢弃 ' + d.meta.dropped + ' 条（缺人/缺时间）' }
+      { label: '有效明细', value: d.meta.recordCount.toLocaleString(), unit: '条',
+        foot: '丢弃 ' + d.meta.dropped + ' 条（缺人/缺时间）' +
+          (d.meta.ignored ? '，已忽略 ' + d.meta.ignored + ' 条（分区设置）' : '') }
     ];
     document.getElementById('kpis').innerHTML = main.map(kpiCard).join('');
     document.getElementById('kpisSub').innerHTML = sub.map(kpiCard).join('');
@@ -382,6 +403,90 @@
       '两者差距越大，说明产出越向少数人集中。';
   }
 
+  /* ---------- 卡片：人员工作时间图（由拣货单起止时间反推的在岗时段） ---------- */
+
+  /* 工作时间图与下方「各人·日 班次明细」共用 d.timeline.rows 这一份数据：
+     按「人员效率明细」(d.byPerson) 的效率(行/h)降序排列，同一人的各天相邻，再按日期 / 首次拣货时间。
+     就地排序 —— 图表（charts.js）随后直接读同一数组，且靠数组引用判断已选高亮行是否失效。 */
+  function sortTimelineRows(d) {
+    var tl = d && d.timeline;
+    if (!tl || !tl.rows || tl.rows.length < 2) return;
+    var rank = {};
+    (d.byPerson || []).forEach(function (p, i) { rank[p.name] = i; });   // byPerson 已按效率降序
+    tl.rows.sort(function (a, b) {
+      var ra = rank[a.person], rb = rank[b.person];
+      if (ra == null) ra = Infinity;
+      if (rb == null) rb = Infinity;
+      if (ra !== rb) return ra - rb;
+      return a.date === b.date ? a.first - b.first : (a.date < b.date ? -1 : 1);
+    });
+  }
+
+  /* 分钟（当天 0 点起算）-> HH:MM */
+  function clockOf(min) {
+    var h = Math.floor(min / 60), m = Math.round(min - h * 60);
+    if (m >= 60) { h += 1; m -= 60; }
+    return (h < 10 ? '0' + h : h) + ':' + (m < 10 ? '0' + m : m);
+  }
+
+  function renderTimeline(d) {
+    var wrap = document.getElementById('timelineStat');
+    var tableEl = document.getElementById('tableTimeline');
+    var noteEl = document.getElementById('timelineNote');
+    if (!wrap || !tableEl) return;
+
+    var tl = d.timeline;
+    var rows = (tl && tl.rows) || [];
+    if (!rows.length) {
+      wrap.innerHTML = '';
+      tableEl.innerHTML = '';
+      if (noteEl) noteEl.textContent = '当前数据集没有可用的拣货起止时间，无法反推在岗时段。';
+      return;
+    }
+
+    /* 汇总指标：在岗时长按「首次拣货开始 → 末次拣货结束」计；在岗率 = Σ有效作业时长 ÷ Σ在岗时长 */
+    var seen = {}, persons = 0;
+    var sumSpan = 0, sumBusy = 0, maxGap = 0;
+    rows.forEach(function (r) {
+      if (!seen[r.person]) { seen[r.person] = 1; persons++; }
+      sumSpan += r.span; sumBusy += r.busy;
+      if (r.maxGap > maxGap) maxGap = r.maxGap;
+    });
+    var n = rows.length;
+
+    wrap.innerHTML = [
+      chip('在岗人数', persons, '人', '当天出现过拣货记录的人数'),
+      chip('人·日 班次', n, '个', '按「拣货人 × 日期」拆分的班次数（一人多天算多个）'),
+      chip('平均在岗时长', fmt(sumSpan / n / 60, 2), 'h', '各人·日 从首次拣货开始到末次拣货结束的平均跨度'),
+      chip('平均在岗率', fmt(sumSpan ? sumBusy / sumSpan * 100 : 0, 1), '%',
+        'Σ有效作业时长 ÷ Σ在岗时长：在岗期间真正在拣货的比例，越低说明空档越多'),
+      chip('最大空档', maxGap, '分钟', '全员中最大的单次连续空档（相邻两段在岗之间的间隔）'),
+      chip('总在岗时长', fmt(sumSpan / 60, 2), 'h', '全部人·日 班次的在岗时长合计')
+    ].join('');
+
+    /* 明细：每行一个「人·日」班次，与上方图表同序（按人员效率降序，见 sortTimelineRows） */
+    var head = '<thead><tr>' + ['拣货人', '日期', '首次拣货', '末次拣货', '在岗时长', '在岗率',
+      '有效作业', '空闲时长', '最大空档', '拣货单数']
+      .map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead>';
+    var body = rows.map(function (r) {
+      return '<tr><td>' + esc(r.person) + '</td><td>' + esc(r.date) + '</td><td>' +
+        clockOf(r.first) + '</td><td>' + clockOf(r.last) + '</td><td>' +
+        fmt(r.span / 60, 2) + ' h</td><td>' + fmt(r.rate == null ? null : r.rate * 100, 1) + '%</td><td>' +
+        fmt(r.busy / 60, 2) + ' h</td><td>' + fmt(r.idle / 60, 2) + ' h</td><td>' +
+        r.maxGap + ' 分</td><td>' + r.orders + '</td></tr>';
+    }).join('');
+    tableEl.innerHTML = head + '<tbody>' + body + '</tbody>';
+
+    if (noteEl) noteEl.textContent =
+      '反推方法：按「拣货人 × 日期」分组，把每笔拣货按「拣货开始时间」归入半小时刻度；' +
+      '每个刻度生成一段在岗区间（起点 = 刻度起点，长度 = 该刻度内单笔拣货时长的最大值），' +
+      '相邻段间隔不超过 ' + ((tl && tl.mergeGap) || 1) + ' 分钟时合并为一段。' +
+      '在岗时长 = 末次拣货结束 − 首次拣货开始；有效作业 = 各段在岗区间时长之和（即在拣货的时间）；' +
+      '空闲时长 = 在岗时长 − 有效作业；在岗率 = 有效作业 ÷ 在岗时长。' +
+      '由于只按半小时刻度取整，同一段连续在岗跨越多个刻度时会被拆成多段，故段数不等于实际作业次数；' +
+      '在岗率偏低通常来自等单、备货、休息等未产生拣货记录的时间。';
+  }
+
   /* ---------- 总渲染 ---------- */
   function render(d) {
     if (!d) { notice('没有可展示的数据', 'err'); return; }
@@ -396,6 +501,8 @@
     renderPersonTable(d);
     renderDist(d);
     renderRowsStat(d);
+    sortTimelineRows(d);   // 图表与下方「人·日 班次明细」共用同一排序（就地排序，保持数组引用）
+    renderTimeline(d);
     HEMA.charts.render(d);
   }
 
@@ -475,9 +582,11 @@
     }).then(readJson).then(function (j) {
       render(j);
       loadHistory(j.id);
-      notice('已计算完成并入库（数据集 #' + j.id + '）：有效明细 ' +
+      notice('已计算完成并' + (j.mode === 'overwrite' ? '覆盖更新' : '新增入库') +
+        '（数据集 #' + j.id + '）：有效明细 ' +
         j.meta.recordCount.toLocaleString() + ' 条，丢弃 ' + j.meta.dropped +
-        ' 条，综合效率 ' + fmt(j.totals.eff) + ' 行/h。', 'ok');
+        ' 条' + (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
+        '，综合效率 ' + fmt(j.totals.eff) + ' 行/h。', 'ok');
     }).catch(function (err) {
       notice('上传失败：' + esc(err.message || err) + '<br>接口地址：' + esc(API + '/upload'), 'err');
     });
@@ -521,7 +630,7 @@
   function renderDmTable() {
     var cur = current && current.id != null ? String(current.id) : '';
     var head = '<thead><tr><th class="dm-ck"></th><th>ID</th><th>文件名</th><th>日期</th>' +
-      '<th>有效明细</th><th>丢弃</th><th>综合效率(行/h)</th><th>上传时间</th><th>操作</th></tr></thead>';
+      '<th>有效明细</th><th>丢弃</th><th>已忽略</th><th>综合效率(行/h)</th><th>上传时间</th><th>操作</th></tr></thead>';
     var body = dmList.map(function (x) {
       var now = String(x.id) === cur;
       return '<tr class="' + (now ? 'now' : '') + '">' +
@@ -531,6 +640,7 @@
         '<td>' + esc(x.dates || '-') + '</td>' +
         '<td>' + (x.recordCount || 0).toLocaleString() + '</td>' +
         '<td>' + (x.dropped || 0) + '</td>' +
+        '<td>' + (x.ignored || 0) + '</td>' +
         '<td>' + fmt(x.eff) + '</td>' +
         '<td>' + dmTime(x.createdAt) + '</td>' +
         '<td class="dm-act">' +
@@ -539,7 +649,7 @@
         '</td></tr>';
     }).join('');
     dmTable.innerHTML = head + '<tbody>' +
-      (body || '<tr><td colspan="9" class="dm-empty">暂无数据集，请先上传拣货单 xlsx</td></tr>') + '</tbody>';
+      (body || '<tr><td colspan="10" class="dm-empty">暂无数据集，请先上传拣货单 xlsx</td></tr>') + '</tbody>';
     dmSum.textContent = '共 ' + dmList.length + ' 条';
     dmSyncBar();
   }
@@ -666,26 +776,29 @@
     else if (del) deleteDatasets([String(del)]);
   });
 
-  /* ---------- 分区设置（顶栏按钮 → 弹窗）：维护「拣货分区 → 前后场分区」映射 ---------- */
+  /* ---------- 分区设置（顶栏按钮 → 弹窗）：维护「拣货分区 → 前后场分区」映射与忽略分区 ---------- */
+  var IGNORE_VAL = '__ignore__';    // 下拉里的「忽略」档位（哨兵值，不会与作业类型重名）
   var zcMask = document.getElementById('zoneCfgMask');
   var zcList = document.getElementById('zoneCfgList');
   var zcSum = document.getElementById('zoneCfgSum');
   var zcNew = document.getElementById('zoneCfgNew');
   var zcSave = document.getElementById('zoneCfgSave');
   var zcTypes = [];        // 可选作业类型（「不映射」由前端补空值选项）
-  var zcRows = [];         // [{ zone, type, inData }]；type 为空串 = 不映射
+  var zcRows = [];         // [{ zone, type, ignored, inData }]；type 为空串 = 不映射
 
-  function zcOptions(cur) {
-    var opts = ['<option value=""' + (cur ? '' : ' selected') + '>不映射</option>'];
+  function zcOptions(r) {
+    var opts = ['<option value=""' + (!r.ignored && !r.type ? ' selected' : '') + '>不映射</option>'];
     zcTypes.forEach(function (t) {
-      opts.push('<option value="' + esc(t) + '"' + (t === cur ? ' selected' : '') + '>' + esc(t) + '</option>');
+      opts.push('<option value="' + esc(t) + '"' + (!r.ignored && t === r.type ? ' selected' : '') + '>' + esc(t) + '</option>');
     });
+    opts.push('<option value="' + IGNORE_VAL + '"' + (r.ignored ? ' selected' : '') + '>忽略（排除统计）</option>');
     return opts.join('');
   }
 
   function zcSyncSum() {
-    var mapped = zcRows.filter(function (r) { return !!r.type; }).length;
-    zcSum.textContent = '共 ' + zcRows.length + ' 个分区，已映射 ' + mapped + ' 个';
+    var mapped = zcRows.filter(function (r) { return !r.ignored && !!r.type; }).length;
+    var ignored = zcRows.filter(function (r) { return !!r.ignored; }).length;
+    zcSum.textContent = '共 ' + zcRows.length + ' 个分区，已映射 ' + mapped + ' 个，已忽略 ' + ignored + ' 个';
   }
 
   function renderZoneCfg() {
@@ -693,8 +806,9 @@
       ? zcRows.map(function (r, i) {
         return '<div class="zone-row">' +
           '<span class="zone-name" title="' + esc(r.zone) + '">' + esc(r.zone) +
-          (r.inData ? '<span class="zone-tag">数据中</span>' : '') + '</span>' +
-          '<select class="zone-sel" data-i="' + i + '">' + zcOptions(r.type) + '</select>' +
+          (r.inData ? '<span class="zone-tag">数据中</span>' : '') +
+          (r.ignored ? '<span class="zone-tag off">已忽略</span>' : '') + '</span>' +
+          '<select class="zone-sel" data-i="' + i + '">' + zcOptions(r) + '</select>' +
           '</div>';
       }).join('')
       : '<div class="zone-empty">暂无可配置的分区，可在下方手动新增。</div>';
@@ -706,7 +820,7 @@
     return fetch(API + '/settings').then(readJson).then(function (j) {
       zcTypes = j.jobTypes || [];
       zcRows = (j.zones || []).map(function (z) {
-        return { zone: z.zone, type: z.type || '', inData: !!z.inData };
+        return { zone: z.zone, type: z.type || '', ignored: !!z.ignored, inData: !!z.inData };
       });
       renderZoneCfg();
     }).catch(function (e) {
@@ -721,8 +835,9 @@
     if (!el.classList || !el.classList.contains('zone-sel')) return;
     var r = zcRows[Number(el.getAttribute('data-i'))];
     if (!r) return;
-    r.type = el.value;
-    zcSyncSum();
+    r.ignored = el.value === IGNORE_VAL;
+    r.type = r.ignored ? '' : el.value;
+    renderZoneCfg();
   });
 
   function zcAdd() {
@@ -731,24 +846,27 @@
     var hit = false;
     zcRows.forEach(function (r) { if (r.zone === name) hit = true; });
     if (hit) { notice('分区「' + esc(name) + '」已在列表中。', 'ok'); zcNew.select(); return; }
-    zcRows.push({ zone: name, type: '', inData: false });
+    zcRows.push({ zone: name, type: '', ignored: false, inData: false });
     zcNew.value = '';
     renderZoneCfg();
   }
 
   function saveZoneCfg() {
-    var map = {};
-    zcRows.forEach(function (r) { if (r.type) map[r.zone] = r.type; });
+    var map = {}, ignore = [];
+    zcRows.forEach(function (r) {
+      if (r.ignored) ignore.push(r.zone);
+      else if (r.type) map[r.zone] = r.type;
+    });
     zcSave.disabled = true;
     fetch(API + '/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ map: map })
+      body: JSON.stringify({ map: map, ignore: ignore })
     }).then(readJson).then(function (j) {
       zcSave.disabled = false;
       var upd = (j.updated || []).length, skip = j.skipped || [], fail = (j.failed || []).length;
-      var msg = '已保存 ' + Object.keys(j.map || {}).length + ' 个分区的映射，并按新映射重算历史数据集：成功 ' +
-        upd + ' 条';
+      var msg = '已保存 ' + Object.keys(j.map || {}).length + ' 个分区的映射、' + (j.ignore || []).length +
+        ' 个忽略分区，并按新设置重算历史数据集：成功 ' + upd + ' 条';
       if (skip.length) msg += '，跳过 ' + skip.length + ' 条（数据集 #' + skip.join('、') +
         ' 上传时未保存原始明细，需重新上传该文件才能重算）';
       if (fail) msg += '，失败 ' + fail + ' 条';
@@ -803,12 +921,18 @@
   });
 
   /* ---------- 卡片工具：导出为图片 / 复制为图片（透视卡片可按分类选范围） ---------- */
-  var PIVOT_SCOPES = ['全部', '前场合流', '后场合流', '一体化'];
+  // match 为 null 表示整张卡片；含多项表示这几块合并成同一张图片
+  var PIVOT_SCOPES = [
+    { key: '全部', label: '全部（三块）', match: null },
+    { key: '前场合流', label: '前场合流', match: ['前场合流'] },
+    { key: '后场合流', label: '后场合流', match: ['后场合流'] },
+    { key: '一体化', label: '一体化', match: ['一体化'] },
+    { key: '后场+一体化', label: '后场合流＋一体化（同图）', match: ['后场合流', '一体化'] }
+  ];
 
   function menuWrap(label, act) {
     var items = PIVOT_SCOPES.map(function (s) {
-      return '<button type="button" data-act="' + act + '" data-scope="' + s + '">' +
-        (s === '全部' ? '全部（三块）' : s) + '</button>';
+      return '<button type="button" data-act="' + act + '" data-scope="' + s.key + '">' + s.label + '</button>';
     }).join('');
     return '<span class="menu-wrap"><button type="button" class="mini" data-menu="1" data-act="' + act + '">' +
       label + ' ▾</button><span class="menu">' + items + '</span></span>';
@@ -889,18 +1013,19 @@
     return new Promise(function (resolve) { canvas.toBlob(resolve, 'image/png'); });
   }
 
-  function exportPng(node) {
+  function exportPng(node, name) {
+    name = name || cardName(node);
     notice('正在生成图片…', 'ok');
     return captureCard(node).then(canvasToBlob).then(function (blob) {
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = cardName(node) + '.png';
+      a.download = name + '.png';
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-      notice('图片已下载：' + esc(cardName(node)) + '.png', 'ok');
+      notice('图片已下载：' + esc(name) + '.png', 'ok');
     }).catch(function (e) { notice('导出失败：' + esc(e.message || e), 'err'); throw e; });
   }
 
@@ -910,31 +1035,87 @@
       return Promise.reject(new Error('ClipboardItem 不可用'));
     }
     notice('正在生成图片…', 'ok');
-    return captureCard(node).then(canvasToBlob).then(function (blob) {
-      return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-    }).then(function () {
+
+    // 截图与 toBlob 是异步的，若等图片生成完再调 clipboard.write，用户激活（transient activation）
+    // 已过期，Safari 必定报 NotAllowedError、Chrome 大卡片也可能失败。
+    // 因此把「生成图片」的 Promise 直接交给 ClipboardItem 并在点击的同步流程内完成写入；
+    // 注意 Safari 只接受 Promise<Blob>，不接受已就绪的 Blob。
+    var blobPromise = captureCard(node).then(canvasToBlob).then(function (blob) {
+      if (!blob) throw new Error('生成图片失败（canvas 未产出图片数据）');
+      return blob;
+    });
+
+    var write;
+    try {
+      write = navigator.clipboard.write([new ClipboardItem({ 'image/png': blobPromise })]);
+    } catch (e) {
+      // 老浏览器不接受 Promise 值：退化为先等图片生成，再用 Blob 写入
+      write = blobPromise.then(function (blob) {
+        return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      });
+    }
+
+    return Promise.resolve(write).then(function () {
       notice('图片已复制到剪贴板，可直接粘贴（Ctrl+V）。', 'ok');
-    }).catch(function (e) { notice('复制失败：' + esc(e.message || e), 'err'); throw e; });
+    }).catch(function (e) {
+      notice('复制失败：' + esc(e.message || e) +
+        '。<br>可改用「导出为图片」，或直接在图表上右键选择「复制图片」。', 'err');
+      throw e;
+    });
   }
 
-  // 按范围取节点（透视卡片可选 前场 / 后场 / 一体化）；若该块处于折叠态则临时展开、截完还原
-  function runCapture(card, act, scope) {
-    var node = card;
-    var restore = null;
-    if (scope && scope !== '全部') {
-      Array.prototype.some.call(card.querySelectorAll('.pivot-block'), function (b) {
+  // 把多个块临时收进一个容器，便于截成同一张图片；返回容器与还原函数
+  function mergeNodes(nodes) {
+    var wrap = document.createElement('div');
+    nodes[0].parentNode.insertBefore(wrap, nodes[0]);
+    nodes.forEach(function (n) { wrap.appendChild(n); });
+    return {
+      node: wrap,
+      restore: function () {
+        var p = wrap.parentNode;
+        if (!p) return;                        // 期间整卡已重绘，无需还原
+        nodes.forEach(function (n) { p.insertBefore(n, wrap); });
+        p.removeChild(wrap);
+      }
+    };
+  }
+
+  // 按范围取节点（透视卡片可选 全部 / 单块 / 后场＋一体化合并）；折叠块临时展开、截完还原
+  function runCapture(card, act, scopeKey) {
+    var sc = null, i;
+    for (i = 0; i < PIVOT_SCOPES.length; i++) {
+      if (PIVOT_SCOPES[i].key === scopeKey) { sc = PIVOT_SCOPES[i]; break; }
+    }
+
+    var node = card, merged = null, name = null, expand = [];
+    if (sc && sc.match) {
+      var blocks = [];
+      Array.prototype.forEach.call(card.querySelectorAll('.pivot-block'), function (b) {
         var t = b.querySelector('.pivot-title');
-        if (t && t.textContent.indexOf(scope) >= 0) { node = b; return true; }
-        return false;
+        if (!t) return;
+        var txt = t.textContent;
+        for (var k = 0; k < sc.match.length; k++) {
+          if (txt.indexOf(sc.match[k]) >= 0) { blocks.push(b); break; }
+        }
       });
-      if (node.classList && node.classList.contains('collapsed')) {
-        node.classList.remove('collapsed');
-        restore = node;
+      blocks.forEach(function (b) {
+        if (b.classList.contains('collapsed')) { b.classList.remove('collapsed'); expand.push(b); }
+      });
+      if (blocks.length > 1) {
+        merged = mergeNodes(blocks);
+        node = merged.node;
+        name = cardName(card) + '_' + sc.match.join('+');
+      } else if (blocks.length === 1) {
+        node = blocks[0];
       }
     }
-    var p = (act === 'png') ? exportPng(node) : copyPng(node);
-    if (restore) {
-      Promise.resolve(p).catch(function () { }).then(function () { restore.classList.add('collapsed'); });
+
+    var p = (act === 'png') ? exportPng(node, name) : copyPng(node);
+    if (merged || expand.length) {
+      Promise.resolve(p).catch(function () { }).then(function () {
+        if (merged) merged.restore();
+        expand.forEach(function (b) { b.classList.add('collapsed'); });
+      });
     }
   }
 

@@ -91,13 +91,28 @@ body {
 }
 .menu button:hover { background: #eef4ff; color: var(--primary); }
 
-/* ---------- 提示条 ---------- */
+/* ---------- 提示：悬浮吐司（固定右下角浮层，不占文档流） ---------- */
 .notice {
-  margin: 14px 20px 0; padding: 10px 14px; border-radius: 9px;
+  position: fixed; right: 20px; bottom: 20px; z-index: 40;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 11px 38px 11px 14px; border-radius: 10px;
   background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: 13px;
+  line-height: 1.6; overflow-wrap: anywhere;
+  box-shadow: 0 12px 30px rgba(15, 40, 80, .22);
+  animation: notice-in .18s ease-out;
 }
 .notice.ok { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
 .notice.err { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.notice-close {
+  position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0;
+  border: 0; border-radius: 6px; background: none; cursor: pointer;
+  color: inherit; opacity: .55; font-size: 15px; line-height: 1;
+}
+.notice-close:hover { opacity: 1; background: rgba(15, 40, 80, .08); }
+@keyframes notice-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
 .hidden { display: none; }
 
 /* ---------- 主体 ---------- */
@@ -152,6 +167,8 @@ main { padding: 14px 20px 6px; }
 .chart { width: 100%; height: 250px; }
 /* 「作业类型 × 小时 效率」：类型多、数据点密，单独加高 */
 .chart.tall { height: 340px; }
+/* 人员工作时间图：一行一个「人·日」班次，行多需要更高 */
+.chart.xtall { height: 620px; }
 
 /* ---------- 表格 ---------- */
 /* 表格：不设内部滚动，整表铺开；overflow 让表头背景被圆角裁齐 */
@@ -228,6 +245,8 @@ td.eff-lo { color: #b45309; }
 .pivot-block.collapsed .table-wrap { display: none; }
 /* 透视列数随小时数变化，列多时在容器内横向滚动，避免撑出屏幕 */
 .pivot-block .table-wrap { overflow-x: auto; }
+/* 工作时间图明细列多，同样在容器内横向滚动 */
+.table-wrap.scroll-x { overflow-x: auto; }
 /* 透视表行多，行高压紧一点点（上下内边距 6px -> 4px） */
 .pivot-block th, .pivot-block td { padding-top: 4px; padding-bottom: 4px; }
 
@@ -398,6 +417,7 @@ footer {
   margin-left: 6px; padding: 0 5px; border-radius: 5px;
   background: #f1f5f9; color: var(--muted); font-size: 10.5px;
 }
+.zone-tag.off { background: #fef2f2; color: #b91c1c; }
 .zone-sel {
   width: 100%; padding: 5px 8px; border-radius: 8px;
   border: 1px solid var(--line); background: #fff; color: var(--txt);
@@ -433,8 +453,8 @@ footer {
 
 @media (max-width: 720px) {
   .topbar { flex-direction: column; align-items: flex-start; }
-  main, .topbar, .notice, footer { padding-left: 14px; padding-right: 14px; }
-  .notice { margin-left: 14px; margin-right: 14px; }
+  main, .topbar, footer { padding-left: 14px; padding-right: 14px; }
+  .notice { left: 14px; right: 14px; bottom: 14px; max-width: none; }
   .grid { grid-template-columns: 1fr; }
   .mask { padding: 10px; }
   .modal { max-height: 92vh; }

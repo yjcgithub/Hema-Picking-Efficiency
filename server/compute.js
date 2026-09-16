@@ -1,8 +1,9 @@
 /* 计算层：解析 xlsx，计算效率与全部统计口径（前端只负责渲染）
    效率 = Σ拣货行数 / Σ拣货时长(h)
-   作业类型 = IF(任务子类型=拆零拣打一体, "一体化", 前后场映射(拣货分区))
+   作业类型 = IF(拣货单类型=拣打一体, "一体化", 前后场映射(拣货分区))
    细分 = 作业类型 × 拣货分区
-   映射（拣货分区 -> 前后场分区）由调用方传入（来自数据库设置，可在页面「分区设置」修改）
+   映射（拣货分区 -> 前后场分区）由调用方传入（来自数据库设置，可在页面「分区设置」修改）；
+   「忽略分区」列表内的分区完全排除出统计，其明细条数单独记为 meta.ignored
 */
 const XLSX = require('xlsx');
 const CFG = require('./config');
@@ -33,9 +34,9 @@ function parseTime(v) {
 
 const dateStr = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 
-// 作业类型：子类型为「一体化」时优先；否则按映射表取前后场分区，未命中归入「未匹配分区」
-function jobType(part, sub, map) {
-  if (String(sub == null ? '' : sub).trim() === CFG.INTEGRATED_SUBTYPE) return '一体化';
+// 作业类型：拣货单类型为「一体化」时优先；否则按映射表取前后场分区，未命中归入「未匹配分区」
+function jobType(part, orderType, map) {
+  if (String(orderType == null ? '' : orderType).trim() === CFG.INTEGRATED_ORDER_TYPE) return '一体化';
   const m = map || CFG.DEFAULT_FRONT_BACK_MAP;
   const p = m[String(part == null ? '' : part).trim()];
   return p || CFG.UNMATCHED_TYPE;
@@ -45,6 +46,31 @@ function zoneCode(z) {
   const s = String(z == null ? '' : z).trim();
   const i = s.indexOf(' ');
   return i > 0 ? s.slice(0, i) : s;
+}
+
+/* 忽略分区：命中的「拣货分区」完全排除出统计。
+   按分区（zone）判定，先于作业类型：拣打一体的被忽略分区同样排除，不会混进「一体化」。
+   明细本身仍原样保存，改回设置后可直接重算恢复 */
+function splitIgnored(recs, ignore) {
+  const set = {};
+  (Array.isArray(ignore) ? ignore : []).forEach(z => {
+    const s = String(z == null ? '' : z).trim();
+    if (s) set[s] = 1;
+  });
+  if (!Object.keys(set).length) return { recs, ignored: 0 };
+
+  const kept = [];
+  let ignored = 0;
+  recs.forEach(r => { if (set[r.zone]) ignored++; else kept.push(r); });
+  return { recs: kept, ignored };
+}
+
+// 时间维度（拣货单标识）：取文件内全部明细的日期集合，不受忽略分区影响，
+// 否则某天明细全被忽略时时间维度会变化，重传同一文件会被判为新拣货单而重复入库
+function dateSetOf(recs) {
+  const out = [];
+  recs.forEach(r => { if (out.indexOf(r.date) < 0) out.push(r.date); });
+  return out.sort();
 }
 
 function sum(rs) {
@@ -327,8 +353,10 @@ function buildDataset(recs, meta) {
 
   return {
     meta: {
-      sourceFile: meta.sourceFile, dates, hours,
-      recordCount: recs.length, dropped: meta.dropped || 0
+      sourceFile: meta.sourceFile,
+      dates: meta.dates || dates,     // 时间维度：上传文件的完整日期集合（不受忽略分区影响）
+      hours,
+      recordCount: recs.length, dropped: meta.dropped || 0, ignored: meta.ignored || 0
     },
     totals: {
       rows: Math.round(H[0]), hours: r4(H[1]), eff: totalEff,
@@ -340,8 +368,100 @@ function buildDataset(recs, meta) {
     bySlot,
     jobTypeBySlot: { slots, series: seriesJTSlot, total: bySlot.map(d => d.eff), groups: groupsSlot, unweighted: uwSlot },
     personByHour: { hours, rows: personRows, groups },
-    stats: buildStats(recs, groups, byPerson, H)
+    stats: buildStats(recs, groups, byPerson, H),
+    timeline: buildTimeline(recs)
   };
+}
+
+/* 人员工作时间图：由拣货单的「拣货开始时间」反推在岗时段
+   - 按「人 × 日期」成组，每组即一个「人·日班次」
+   - 明细只保留半小时刻度（slot）与单笔时长，故每个刻度生成一段：
+       s = slot * 60（分钟，恒为 30 的整数倍）
+       e - s = 该刻度内单笔拣货时长的最大值（分钟）
+     相邻段间隔 <= MERGE(分钟) 时合并为一段
+   - 行级指标：first/last/span（首末与跨度）、busy（Σ段长）、idle（空档）、rate（在岗率）、maxGap（最大空档）
+   行按拣货效率（Σ行数 ÷ Σ有效作业时长）降序排列，效率相同再按 first 升序。 */
+const TIMELINE_MERGE_GAP = 1;
+
+function buildTimeline(recs) {
+  const order = [], g = new Map();
+  recs.forEach(r => {
+    const k = r.person + '\u0001' + r.date;
+    let e = g.get(k);
+    if (!e) { e = { person: r.person, date: r.date, list: [] }; g.set(k, e); order.push(k); }
+    e.list.push(r);
+  });
+
+  const rows = order.map(k => {
+    const grp = g.get(k);
+
+    // 1) 按半小时刻度分桶
+    const bk = new Map(), bOrder = [];
+    grp.list.forEach(r => {
+      let b = bk.get(r.slot);
+      if (!b) { b = { slot: r.slot, list: [] }; bk.set(r.slot, b); bOrder.push(r.slot); }
+      b.list.push(r);
+    });
+    bOrder.sort((a, b) => a - b);
+
+    // 2) 每个刻度生成一段
+    const segs0 = bOrder.map(slot => {
+      const list = bk.get(slot).list;
+      const s = Math.round(slot * 60);
+      const len = Math.max.apply(null, list.map(r => Math.round(r.hours * 60)));
+      const byType = {};
+      list.forEach(r => {
+        const t = byType[r.jobType] || (byType[r.jobType] = 0);
+        byType[r.jobType] = t + r.rows;
+      });
+      const totalRows = list.reduce((a, r) => a + r.rows, 0);
+      const tkeys = Object.keys(byType).sort((a, b) => byType[b] - byType[a]);
+      return {
+        s, e: s + len, type: tkeys[0],
+        rows: Math.round(totalRows), orders: list.length,
+        eff: len ? r2(totalRows / (len / 60)) : null
+      };
+    });
+
+    // 3) 合并相邻段（间隔 <= 1 分钟）
+    const merged = [];
+    segs0.forEach(sg => {
+      const prev = merged[merged.length - 1];
+      if (prev && sg.s - prev.e <= TIMELINE_MERGE_GAP) {
+        prev.e = Math.max(prev.e, sg.e);
+        prev.rows += sg.rows;
+        prev.orders += sg.orders;
+      } else merged.push(Object.assign({}, sg));
+    });
+    merged.forEach(sg => {
+      const len = sg.e - sg.s;
+      sg.eff = len ? r2(sg.rows / (len / 60)) : null;
+    });
+
+    // 4) 行级指标
+    const first = merged[0].s;
+    const last = merged[merged.length - 1].e;
+    const busy = merged.reduce((a, x) => a + (x.e - x.s), 0);
+    let maxGap = 0;
+    for (let i = 1; i < merged.length; i++) {
+      maxGap = Math.max(maxGap, merged[i].s - merged[i - 1].e);
+    }
+    const span = last - first;
+
+    return {
+      person: grp.person, date: grp.date,
+      first, last, span, busy, idle: span - busy,
+      rate: span ? r4(busy / span) : null, maxGap,
+      orders: merged.reduce((a, x) => a + x.orders, 0),
+      rows: merged.reduce((a, x) => a + x.rows, 0),
+      segs: merged
+    };
+  });
+
+  // 按拣货效率（Σ行数 ÷ Σ有效作业时长，即行/min）降序；有效作业时长为 0 的排最后
+  const effOf = r => (r.busy > 0 ? r.rows / r.busy : -1);
+  rows.sort((a, b) => (effOf(b) - effOf(a)) || (a.first - b.first));
+  return { mergeGap: TIMELINE_MERGE_GAP, rows };
 }
 
 // 组内「各人总计效率」的平均值 / 中位数，以及最接近它们的人员（透视表标注用）
@@ -443,14 +563,42 @@ function buildBoxplot(groups) {
 
 /* ---------- 解析入口 ---------- */
 
+/* 时间维度校验：上传文件以「拣货开始时间」的日期集合作为时间维度，覆盖/新增的匹配依据
+   - 整列没有任何可解析取值 -> 缺失有效时间字段
+   - 非空取值无法解析           -> 时间格式非法
+   空单元格沿用原有口径：该行作为无效明细被丢弃，不阻断上传 */
+function validateStartTime(matrix, col) {
+  let valid = 0;
+  for (let r = 1; r < matrix.length; r++) {
+    const row = matrix[r];
+    if (!row) continue;
+    const raw = row[col];
+    if (raw == null || String(raw).trim() === '') continue;
+    if (!parseTime(raw)) {
+      throw new Error('时间字段格式非法：第 ' + (r + 1) + ' 行「' + CFG.TIME_COLUMN + '」=' +
+        JSON.stringify(raw) + '，应为 YYYY-MM-DD HH:mm[:ss] 或 Excel 日期');
+    }
+    valid++;
+  }
+  if (!valid) {
+    throw new Error('上传文件缺少有效时间字段：「' + CFG.TIME_COLUMN + '」列没有任何可解析的时间值' +
+      '，无法确定拣货单的时间维度');
+  }
+}
+
 function buildFromMatrix(matrix, meta, map) {
   if (!matrix || !matrix.length) throw new Error('表格为空');
   const header = matrix[0].map(h => String(h == null ? '' : h).trim());
   const idx = {};
   header.forEach((h, i) => { if (!(h in idx)) idx[h] = i; });
 
+  if (!(CFG.TIME_COLUMN in idx)) {
+    throw new Error('上传文件缺少时间字段「' + CFG.TIME_COLUMN + '」，无法确定拣货单的时间维度');
+  }
   const missing = CFG.REQUIRED_COLUMNS.filter(n => !(n in idx));
   if (missing.length) throw new Error('上传文件缺少必需列：' + missing.join('、'));
+
+  validateStartTime(matrix, idx[CFG.TIME_COLUMN]);
 
   const recs = [];
   let dropped = 0;
@@ -460,19 +608,19 @@ function buildFromMatrix(matrix, meta, map) {
     const no = row[idx['拣货单号']];
     const person = row[idx['拣货人']];
     if (no == null || no === '' || person == null || String(person).trim() === '') { dropped++; continue; }
-    const t0 = parseTime(row[idx['拣货开始时间']]);
+    const t0 = parseTime(row[idx[CFG.TIME_COLUMN]]);
     const t1 = parseTime(row[idx['拣货完成时间']]);
     if (!t0 || !t1) { dropped++; continue; }
     const hrs = (t1 - t0) / 3600000;
     if (!(hrs > 0)) { dropped++; continue; }
     const zone = String(row[idx['拣货分区']] == null ? '' : row[idx['拣货分区']]).trim();
-    // sub（任务子类型）随明细一起保留，改映射后可只重算作业类型而不必重新上传
-    const sub = String(row[idx['任务子类型']] == null ? '' : row[idx['任务子类型']]).trim();
+    // orderType（拣货单类型）随明细一起保留，改映射后可只重算作业类型而不必重新上传
+    const orderType = String(row[idx['拣货单类型']] == null ? '' : row[idx['拣货单类型']]).trim();
     const h0 = t0.getHours();
     recs.push({
       date: dateStr(t0), hour: h0, slot: h0 + (t0.getMinutes() >= 30 ? 0.5 : 0),
-      jobType: jobType(zone, sub, map),
-      zone, sub, code: zoneCode(zone),
+      jobType: jobType(zone, orderType, map),
+      zone, orderType, code: zoneCode(zone),
       person: String(person).trim(),
       rows: toNumber(row[idx['拣货行数']]), hours: hrs
     });
@@ -481,19 +629,34 @@ function buildFromMatrix(matrix, meta, map) {
   return { recs, meta: { sourceFile: (meta && meta.sourceFile) || '上传文件', dropped } };
 }
 
-// 从 xlsx Buffer 解析：返回 { dataset, recs }
-function buildFromBuffer(buf, sourceFile, map) {
+// 从 xlsx Buffer 解析：返回 { dataset, recs }（recs 为未过滤的原始明细，供改设置后重算）
+function buildFromBuffer(buf, sourceFile, map, ignore) {
   const wb = XLSX.read(buf, { type: 'buffer', cellDates: true });
   const name = wb.SheetNames.indexOf('data') >= 0 ? 'data' : wb.SheetNames[0];
   const matrix = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null });
   const built = buildFromMatrix(matrix, { sourceFile }, map);
-  return { dataset: buildDataset(built.recs, built.meta), recs: built.recs };
+  const kept = splitIgnored(built.recs, ignore);
+  if (!kept.recs.length) {
+    throw new Error('全部有效明细的分区都被「忽略分区」排除，无数据可统计（请先在「分区设置」中取消忽略）');
+  }
+  return {
+    dataset: buildDataset(kept.recs, {
+      sourceFile, dropped: built.meta.dropped, ignored: kept.ignored,
+      dates: dateSetOf(built.recs)
+    }),
+    recs: built.recs
+  };
 }
 
-// 用新映射重算作业类型并重建数据集（改「分区设置」后调用）
-function rebuild(recs, meta, map) {
-  const mapped = recs.map(r => Object.assign({}, r, { jobType: jobType(r.zone, r.sub, map) }));
-  return buildDataset(mapped, meta);
+// 用新映射与忽略列表重算作业类型并重建数据集（改「分区设置」后调用）
+function rebuild(recs, meta, map, ignore) {
+  const mapped = recs.map(r => Object.assign({}, r, { jobType: jobType(r.zone, r.orderType, map) }));
+  const kept = splitIgnored(mapped, ignore);
+  if (!kept.recs.length) throw new Error('全部有效明细的分区都被「忽略分区」排除，无数据可统计');
+  return buildDataset(kept.recs, {
+    sourceFile: meta.sourceFile, dropped: meta.dropped || 0, ignored: kept.ignored,
+    dates: dateSetOf(mapped)
+  });
 }
 
 module.exports = { buildFromBuffer, buildFromMatrix, buildDataset, rebuild, jobType, zoneCode };
