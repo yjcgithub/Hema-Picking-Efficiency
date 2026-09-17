@@ -53,21 +53,20 @@
     return '<a href="' + ACCESS.domain + '" target="_blank" rel="noopener">域名访问 ' + ACCESS.domain + '</a>';
   }
 
-  /* 顶栏品牌区右侧（h1 右边）：常显当前访问方式；IP 访问时追加剪贴板限制说明与域名入口 */
+  /* 顶栏品牌区右侧（h1 右边）：常显当前访问方式；IP 访问的剪贴板限制说明与域名入口
+     由顶栏主行下方的红色提示条（#ipWarn）常显给出 */
   function renderAccess() {
     var el = document.getElementById('accessInfo');
-    if (!el) return;
-    var s = '当前访问方式：<b>' + esc(ACCESS.kind) + '</b>（' + esc(ACCESS.host) + '）';
-    if (ACCESS.kind === 'IP') {
-      s += ' ｜ 因浏览器限制 IP 访问时无法复制图片到剪贴板，请使用' + domainLink();
+    if (el) {
+      el.innerHTML = '当前访问方式：<b>' + esc(ACCESS.kind) + '</b>（' + esc(ACCESS.host) + '）';
     }
-    el.innerHTML = s;
-  }
-
-  /* 提示脚注：访问方式已常显在顶栏，此处仅在 IP 访问时补充上下文相关的剪贴板限制说明 */
-  function accessNote() {
-    if (ACCESS.kind !== 'IP') return '';
-    return '<div class="notice-access">因浏览器限制 IP 访问时无法复制图片到剪贴板，请使用' + domainLink() + '</div>';
+    var warn = document.getElementById('ipWarn');
+    if (warn) {
+      warn.innerHTML = ACCESS.kind === 'IP'
+        ? '因浏览器限制，IP访问时无法复制图片到剪贴板，请使用' + domainLink()
+        : '';
+      warn.classList.toggle('hidden', ACCESS.kind !== 'IP');
+    }
   }
 
   /* 顶部居中吐司提示：成功/进行中提示数秒后自动消失，
@@ -76,8 +75,7 @@
     if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
     if (!msg) { noticeEl.className = 'notice hidden'; noticeEl.innerHTML = ''; return; }
     noticeEl.className = 'notice ' + (type || '');
-    noticeEl.innerHTML = '<button type="button" class="notice-close" title="关闭">×</button>' +
-      msg + accessNote();
+    noticeEl.innerHTML = '<button type="button" class="notice-close" title="关闭">×</button>' + msg;
     if (type !== 'err') {
       noticeTimer = setTimeout(function () {
         noticeTimer = null;
@@ -1529,10 +1527,10 @@
   }
 
   function copyPng(node) {
-    // IP 访问 → 非安全上下文，浏览器不提供剪贴板写入，直接给出可操作的提示
+    // IP 访问 → 非安全上下文，浏览器不提供剪贴板写入；原因与域名入口由顶栏下方的红色提示条（#ipWarn）统一给出，
+    // 此处只提示可执行的替代方案，避免整句重复
     if (ACCESS.kind === 'IP') {
-      notice('因浏览器限制 IP 访问时无法复制图片到剪贴板，请使用' + domainLink() +
-        '；也可改用「导出为图片」', 'err');
+      notice('复制图片失败，可改用「导出为图片」', 'err');
       return Promise.reject(new Error('IP 访问不支持复制图片到剪贴板'));
     }
     if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || !navigator.clipboard.write) {

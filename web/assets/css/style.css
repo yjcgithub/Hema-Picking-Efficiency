@@ -32,6 +32,13 @@ body {
   top: 0;
   z-index: 20;
 }
+/* IP 访问限制提示条：位于顶栏主行下方（顶栏为纵向 flex），随顶栏一起吸顶常显 */
+.ip-warn {
+  padding: 7px 14px; border-radius: 9px;
+  background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+  font-size: 13px; text-align: center; overflow-wrap: anywhere;
+}
+.ip-warn a { color: inherit; font-weight: 700; }
 /* 品牌区右侧元信息：独立浅色信息块，上一行时间范围（与 h1 同字号），下一行数据来源 / 有效明细 / 访问方式 */
 .brand-meta {
   display: flex; flex-direction: column; gap: 2px; min-width: 0;
@@ -135,13 +142,6 @@ body {
 }
 .notice.ok { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
 .notice.err { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
-/* 脚注：当前访问方式（本地 / IP / 域名） */
-.notice-access {
-  margin-top: 7px; padding-top: 6px; border-top: 1px dashed currentColor;
-  font-size: 13px; opacity: .85;
-}
-.notice-access b { font-weight: 600; }
-.notice-access a, .notice a { color: inherit; font-weight: 600; }
 .notice-close {
   position: absolute; top: 7px; right: 7px; width: 26px; height: 26px; padding: 0;
   border: 0; border-radius: 7px; background: none; cursor: pointer;
