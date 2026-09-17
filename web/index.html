@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>门店拣货效率监控看板</title>
+<title>拣货效率计算统计工具</title>
 <link rel="stylesheet" href="assets/css/style.css">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
@@ -11,12 +11,26 @@
 <body>
 
 <header class="topbar">
+  <div class="topbar-row">
   <div class="brand">
     <div class="logo">盒</div>
-    <h1>门店拣货效率监控看板</h1>
+    <h1>拣货效率计算统计工具</h1>
+    <div class="brand-meta">
+      <div class="period-bar hidden" id="periodBar">
+        <span class="period-label">统计时间段</span><span class="period-range" id="periodRange"></span>
+      </div>
+      <div class="brand-meta-line">
+        <span id="metaSource"></span>
+        <span id="accessInfo"></span>
+      </div>
+    </div>
   </div>
   <div class="actions">
-    <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）">
+    <label class="date-wrap hidden" id="dateWrap" title="仅显示所选日期的数据；默认显示数据集内最新日期，其他日期可手动选择">
+      <span>日期</span>
+      <select class="select date-sel" id="dateSel"></select>
+    </label>
+    <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）。切换后所有汇总口径同步（卡片 / 图表 / 各表合计行）">
       <input type="checkbox" id="weightedToggle" checked>按工时加权
     </label>
     <div class="menu-wrap" id="historyWrap">
@@ -33,45 +47,72 @@
     <button class="btn" id="zoneCfgBtn">分区设置</button>
     <button class="btn" id="dataMgrBtn">数据管理</button>
   </div>
+  </div>
 </header>
 
 <div id="notice" class="notice hidden"></div>
 
 <main>
-  <div class="meta-bar" id="metaLine">加载中…</div>
   <section class="kpis" id="kpis"></section>
   <section class="kpis sub" id="kpisSub"></section>
 
   <section class="grid">
     <div class="card wide">
-      <h3>作业类型 × 小时 效率</h3>
+      <h3>效率总览</h3>
       <div class="chart tall" id="chartJtHour"></div>
     </div>
     <div class="card wide">
-      <h3>各小时效率趋势</h3>
+      <h3>各小时效率趋势（全场）</h3>
       <div class="chart" id="chartHour"></div>
     </div>
   </section>
 
+  <section class="card collapsible hidden collapsed" id="timeoutCard">
+    <h3 id="timeoutToggle" title="点击折叠 / 展开">
+      <span class="caret">▶</span>超时数统计
+      <small class="collapse-hint" id="timeoutHint">默认折叠 · 点击展开查看图表</small>
+    </h3>
+    <div class="card-body" id="timeoutBody">
+      <div class="stat-strip" id="timeoutStat"></div>
+      <div class="chart-sub">按小时 × 超时判责</div>
+      <div class="chart" id="chartTimeout"></div>
+      <div class="chart-sub">按小时 × 作业类型（前场 / 后场 / 一体化）</div>
+      <div class="chart" id="chartTimeoutType"></div>
+      <div class="pivot-block collapsed" id="timeoutPerson">
+        <div class="pivot-title" id="timeoutPersonToggle" title="点击折叠 / 展开">
+          <span class="caret">▶</span>
+          <span class="dot" style="background:#ef4444"></span>按人员统计
+          <small id="timeoutPersonSub"></small>
+        </div>
+        <div class="chart-sub">按人员 × 超时判责</div>
+        <div class="chart" id="chartTimeoutPerson"></div>
+        <div class="chart-sub">按人员 × 作业类型（前场 / 后场 / 一体化）</div>
+        <div class="chart" id="chartTimeoutPersonType"></div>
+        <div class="table-wrap"><table id="tableTimeoutPerson"></table></div>
+      </div>
+      <div class="note" id="timeoutNote"></div>
+    </div>
+  </section>
+
   <section class="card">
-    <h3>人员 × 小时 效率透视（行/h，按前场合流 / 后场合流 / 一体化 分为 3 块）</h3>
+    <h3>效率透视表（行/h，按前场合流 / 后场合流 / 一体化）</h3>
     <div id="pivotBlocks"></div>
   </section>
 
   <section class="card">
-    <h3>细分效率明细（作业类型 / 拣货分区）</h3>
+    <h3>拣货分区效率</h3>
     <div class="table-wrap">
       <table id="tableZone"></table>
     </div>
   </section>
 
   <section class="card">
-    <h3>人员效率明细（分两栏，点击表头可升/降序）</h3>
+    <h3>人员效率明细（点击表头可升/降序）</h3>
     <div class="two-col" id="tablePerson"></div>
   </section>
 
   <section class="card">
-    <h3>人员效率分布与稳定性（按各人总计效率，人均口径）</h3>
+    <h3>人员效率分布与稳定性（按各人总计效率）</h3>
     <div class="stat-strip" id="distStat"></div>
     <div class="two-col">
       <div>
@@ -105,7 +146,7 @@
   </section>
 
   <section class="card">
-    <h3>人员工作时间图（由拣货单起止时间反推的在岗时段）</h3>
+    <h3>人员工作时间图</h3>
     <div class="stat-strip" id="timelineStat"></div>
     <div class="chart xtall" id="chartTimeline"></div>
     <div class="sub-title gap">各「人·日」班次明细（按人员效率降序）</div>
@@ -115,8 +156,8 @@
 </main>
 
 <footer>
-  效率口径（顶栏开关统一切换，影响顶端卡片与「作业类型 × 小时 效率」图）：
-  人均 = 各人效率的算术平均；按工时加权 = Σ拣货行数 ÷ Σ拣货时长(h)（透视与明细固定此口径）。
+  效率口径（顶栏开关统一切换，影响顶端卡片、各图表与各表合计行）：
+  人均 = 各人效率的算术平均；按工时加权 = Σ拣货行数 ÷ Σ拣货时长(h)。
   拣货时长 = 拣货完成时间 − 拣货开始时间；作业类型由「拣货单类型」与「拣货分区→前后场分区」映射生成
   （映射可在顶栏「分区设置」中维护，保存后服务端按新映射重算历史数据集）。
   文件解析与计算在服务端完成。
@@ -186,8 +227,31 @@
   </div>
 </div>
 
+<!-- 今日暂无数据：全屏遮罩 + 背景模糊，正中给一张登录页样式的大提示卡 -->
+<div class="mask gate hidden" id="gateMask">
+  <div class="gate-card">
+    <div class="logo">拣</div>
+    <h2>拣货效率计算统计工具</h2>
+    <p class="gate-sub" id="gateTitle">今日暂无数据</p>
+    <p class="gate-msg" id="gateMsg"></p>
+    <label class="gate-upload" for="fileInput">上传拣货单.xlsx文件</label>
+    <!-- 历史数据集：与顶栏同一个下拉，选中即切到该数据集看历史 -->
+    <div class="menu-wrap gate-hist hidden" id="gateHistWrap">
+      <p class="gate-hist-title">历史数据</p>
+      <button type="button" class="select sel-btn" id="gateHistBtn" data-menu="1" title="历史数据集">
+        <span class="sel-l1">加载中…</span>
+        <span class="sel-l2"></span>
+      </button>
+      <div class="menu sel-menu" id="gateHistMenu"></div>
+    </div>
+    <div class="gate-act">
+      <button class="btn" id="gateDataMgr">数据管理</button>
+      <button class="btn" id="gateZoneCfg">分区设置</button>
+    </div>
+  </div>
+</div>
+
 <script src="assets/js/config.js"></script>
-<script src="assets/js/data.js"></script>
 <script src="assets/js/charts.js"></script>
 <script src="assets/js/app.js"></script>
 </body>

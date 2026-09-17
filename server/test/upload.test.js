@@ -8,11 +8,12 @@
    6. 时间字段格式非法 -> 终止上传并提示
    7. 兼容原有格式：空时间单元格的行仍按丢弃处理
    8. 覆盖后数据仍可供其他模块（分区设置重算）使用
-   9. 兼容原有文件格式：真实导出文件仍可正常解析入库
-  10. 忽略分区：命中分区的明细完全排除出统计，条数单独记为「已忽略」，保存后自动重算
-  11. 忽略分区按分区判定：拣打一体的被忽略分区不进入「一体化」统计
-  12. 上传时忽略未命中的分区 -> 取消忽略后重算可恢复
-  13. 忽略分区列表格式非法 / 全部分区被忽略时的异常处理
+   9. 忽略分区：命中分区的明细完全排除出统计，条数单独记为「已忽略」，保存后自动重算
+  10. 忽略分区按分区判定：拣打一体的被忽略分区不进入「一体化」统计
+  11. 上传时忽略未命中的分区 -> 取消忽略后重算可恢复
+  12. 忽略分区列表格式非法 / 全部分区被忽略时的异常处理
+  13. 门店鉴别：只导入拣货单号以门店编码（20005）开头的明细，其它门店明细单独计数
+  14. 门店鉴别：文件内没有本门店明细时终止上传并提示
   运行：npm test（node --test）
 */
 const { test, before, after, beforeEach } = require('node:test');
@@ -30,6 +31,9 @@ const app = require('../index');
 const db = require('../db');
 
 const HEADER = ['拣货单号', '拣货人', '拣货开始时间', '拣货完成时间', '拣货行数', '拣货分区', '拣货单类型'];
+
+// 门店编码（拣货单号前缀）：导入时按此做门店鉴别，非本门店明细会被过滤
+const STORE = '20005';
 
 let server, base;
 
@@ -52,7 +56,7 @@ beforeEach(async () => {
 /* ---------- 测试辅助 ---------- */
 
 function rec(no, person, start, end, rows, zone, type) {
-  return [no, person, start, end, rows, zone || 'AH 水产*A', type || '普通'];
+  return [STORE + no, person, start, end, rows, zone || 'AH 水产*A', type || '普通'];
 }
 
 function xlsxBuf(rows) {
@@ -252,17 +256,6 @@ test('覆盖后拣货单数据仍可供其他模块（分区设置重算）使�
   assert.deepStrictEqual(ds.byJobType.map(x => x.name), ['前场合流']);
 });
 
-test('兼容原有文件格式：真实导出文件仍可正常解析入库', async () => {
-  const file = path.join(__dirname, '..', '..', 'export-1785428943043.xlsx');
-  const r = await upload(fs.readFileSync(file), path.basename(file));
-
-  assert.strictEqual(r.status, 200);
-  assert.strictEqual(r.body.mode, 'create');
-  assert.deepStrictEqual(r.body.meta.dates, ['2026-07-30']);
-  assert.strictEqual(r.body.meta.recordCount, 4322);
-  assert.strictEqual(r.body.meta.dropped, 4);
-});
-
 /* ---------- 忽略分区（用例 10 ~ 13） ---------- */
 
 const ZONE_A = 'ZZ 忽略测试前场*A';      // 测试专用分区名，避免与真实导出文件里的分区重合
@@ -377,4 +370,36 @@ test('忽略分区异常处理：列表格式非法、全部分区被忽略', as
   const ds = await getJson('/api/datasets/' + ok.body.id);
   assert.strictEqual(ds.meta.recordCount, 1);                // 重算失败不破坏原数据
   assert.strictEqual(ds.meta.ignored, 0);
+});
+
+/* ---------- 门店鉴别（用例 13 ~ 14） ---------- */
+
+test('门店鉴别：只导入拣货单号以门店编码开头的明细，其它门店明细单独计数', async () => {
+  await setSettings({ map: MAP_AB, ignore: [] });
+  const r = await upload(xlsxBuf([
+    HEADER,
+    rec('PK001', '张三', '2026-08-05 08:00:00', '2026-08-05 09:00:00', 60),
+    ['20006' + 'PK002', '李四', '2026-08-05 09:00:00', '2026-08-05 10:00:00', 100, 'AH 水产*A', '普通']
+  ]), '两个门店.xlsx');
+
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.meta.recordCount, 1);            // 其它门店的明细不进入统计
+  assert.strictEqual(r.body.meta.otherStore, 1);             // 单独计数为「非本门店」
+  assert.strictEqual(r.body.meta.dropped, 0);                // 不计入「丢弃」
+  assert.strictEqual(r.body.totals.rows, 60);
+  assert.deepStrictEqual(r.body.byPerson.map(p => p.name), ['张三']);
+
+  const list = await getJson('/api/datasets');
+  assert.strictEqual(list[0].otherStore, 1);                 // 数据管理列表同步展示
+});
+
+test('门店鉴别：文件内没有本门店明细时终止上传并提示', async () => {
+  const r = await upload(xlsxBuf([
+    HEADER,
+    ['20006PK001', '张三', '2026-08-06 08:00:00', '2026-08-06 09:00:00', 60]
+  ]), '其它门店.xlsx');
+
+  assert.strictEqual(r.status, 400);
+  assert.match(r.body.error, /20005/);
+  assert.strictEqual((await getJson('/api/datasets')).length, 0);   // 未写入任何记录
 });

@@ -36,6 +36,37 @@
   var SPLIT = { lineStyle: { color: '#f1f5f9' } };
   /* 图例 / 系列的显示顺序（与透视分块一致） */
   var TYPE_ORDER = ['前场合流', '后场合流', '一体化', '未匹配分区'];
+  /* 超时判责的配色：服务端按超时单数降序返回，依次取色（判责条目多于配色时循环取用） */
+  var DUTY_COLORS = ['#ef4444', '#f59e0b', '#8b5cf6', '#0ea5e9', '#94a3b8'];
+
+  /* 超时堆积柱的通用悬浮提示：逐系列列出非零值，末尾给合计 */
+  function stackTip(ps) {
+    var sum = 0, lines = [];
+    ps.forEach(function (p) {
+      if (!p.value) return;
+      sum += p.value;
+      lines.push(p.marker + p.seriesName + '：<b>' + p.value + '</b> 单');
+    });
+    if (!sum) return ps[0].axisValue + '<br/>无超时单';
+    return '<b>' + ps[0].axisValue + '</b><br/>' + lines.join('<br/>') +
+      '<br/>合计：<b>' + sum + '</b> 单';
+  }
+
+  /* 超时堆积柱的系列（作业类型口径）：颜色复用作业类型配色，未匹配分区回落为灰色；
+     柱顶标数值，与「按判责」图保持同一观感 */
+  function typeStackSeries(types, stackName, width) {
+    return (types || []).map(function (s) {
+      return {
+        name: s.name, type: 'bar', stack: stackName, barMaxWidth: width,
+        itemStyle: { color: colorOf(s.name) },
+        label: {
+          show: true, fontSize: 10, color: '#475569',
+          formatter: function (p) { return p.value ? p.value : ''; }
+        },
+        data: s.data
+      };
+    });
+  }
 
   /* 工作时间图：一行 = 一个「人·日」班次的最小行高（px）
      行高不足时 ECharts 会自动抽稀纵轴标签（人员名会「消失」一部分），故取 18 保证标签完整可见 */
@@ -145,10 +176,12 @@
         itemGap: 14, itemWidth: 14, itemHeight: 8,
         textStyle: { fontSize: 11, color: '#64748b' }
       },
-      grid: { left: 56, right: 56, top: 34, bottom: 26 },
+      // grid.top 留足 44px：最高一根柱的柱顶行数标签不会被图例挡住
+      grid: { left: 56, right: 56, top: 44, bottom: 26 },
       xAxis: Object.assign({ type: 'category', data: hText }, AXIS),
       yAxis: [
-        { type: 'value', name: hUseW ? '行/h' : '行/h（人均）', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, axisLabel: AXIS.axisLabel, splitLine: SPLIT },
+        { type: 'value', name: hUseW ? '行/h' : '行/h（人均）', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, axisLabel: AXIS.axisLabel, splitLine: SPLIT,
+          max: function (v) { return Math.ceil(v.max * 1.12); } },   // 留出空间给整点数值
         { type: 'value', name: '行数', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, axisLabel: AXIS.axisLabel, splitLine: { show: false } }
       ],
       series: [
@@ -156,12 +189,31 @@
           name: '效率(行/h)', type: 'line', smooth: true, symbolSize: 6,
           data: hEff,
           itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5 },
-          areaStyle: { color: 'rgba(37,99,235,.10)' }
+          areaStyle: { color: 'rgba(37,99,235,.10)' },
+          // 整点顶点显示具体数值，半小时顶点不显示（与「作业类型 × 小时」保持一致）
+          label: {
+            show: true, position: 'top', distance: 5,
+            color: '#2563eb', fontSize: 10, fontWeight: 600,
+            formatter: function (p) {
+              if (p.value == null || (isSlot && hRows[p.dataIndex].slot % 1)) return '';
+              return fmt(p.value);
+            }
+          }
         },
         {
           name: '拣货行数', type: 'bar', yAxisIndex: 1, barWidth: 14,
           data: hRows.map(function (d) { return d.rows; }),
-          itemStyle: { color: 'rgba(148,163,184,.45)', borderRadius: [4, 4, 0, 0] }
+          itemStyle: { color: 'rgba(148,163,184,.45)', borderRadius: [4, 4, 0, 0] },
+          // 柱顶同样只在整点显示行数；柱色浅、效率线可能压过来，垫一层半透明白底保证可读
+          label: {
+            show: true, position: 'top', distance: 3,
+            color: '#64748b', fontSize: 10, fontWeight: 600,
+            backgroundColor: 'rgba(255,255,255,.78)', padding: [2, 3], borderRadius: 3,
+            formatter: function (p) {
+              if (p.value == null || (isSlot && hRows[p.dataIndex].slot % 1)) return '';
+              return Number(p.value).toLocaleString();
+            }
+          }
         }
       ]
     }, true);
@@ -337,6 +389,7 @@
         r.segs.forEach(function (sg) {
           if (!byType[sg.type]) { byType[sg.type] = []; tlNames.push(sg.type); }
           byType[sg.type].push({
+            // [行下标, 段起点, 段终点, 行数, 拣货单, 效率, 人员, 日期]
             value: [i, sg.s, sg.e, sg.rows, sg.orders, sg.eff, r.person, r.date]
           });
         });
@@ -460,6 +513,162 @@
         });
       });
     }
+
+    /* 5) 超时数统计（按「超时判责」细分的堆积柱状图）
+          仅当上传文件含「是否拣货超时」列时展示（服务端算好 data.timeout，否则为 null -> 隐藏整张卡片） */
+    var toCard = document.getElementById('timeoutCard');
+    if (toCard) toCard.classList.toggle('hidden', !data.timeout);
+    if (data.timeout) {
+      var to = data.timeout;
+      var dutyColor = {};
+      (to.duties || []).forEach(function (d, i) { dutyColor[d.name] = DUTY_COLORS[i % DUTY_COLORS.length]; });
+
+      var c7 = inst('chartTimeout');
+      if (c7) {
+        c7.setOption({
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: stackTip },
+          legend: {
+            data: (to.duties || []).map(function (d) { return d.name; }),
+            top: 0, left: 'center', itemGap: 14, itemWidth: 14, itemHeight: 8,
+            textStyle: { fontSize: 11, color: '#64748b' }
+          },
+          grid: { left: 56, right: 24, top: 40, bottom: 26 },
+          xAxis: Object.assign({
+            type: 'category', data: (to.hours || []).map(function (h) { return h + '点'; })
+          }, AXIS),
+          yAxis: Object.assign({
+            type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
+          }, { axisLabel: AXIS.axisLabel }),
+          series: (to.series || []).map(function (s) {
+            return {
+              name: s.name, type: 'bar', stack: 'timeout', barMaxWidth: 30,
+              itemStyle: { color: dutyColor[s.name] },
+              label: {
+                show: true, fontSize: 10, color: '#475569',
+                formatter: function (p) { return p.value ? p.value : ''; }
+              },
+              data: s.data
+            };
+          })
+        }, true);
+      }
+
+      /* 5b) 超时数统计 · 按小时 × 作业类型（前场 / 后场 / 一体化 / 未匹配分区）
+             与上图同源同刻度，只是换一个切分口径（判责 -> 前后场） */
+      var c7b = inst('chartTimeoutType');
+      if (c7b && (to.typeSeries || []).length) {
+        c7b.setOption({
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: stackTip },
+          legend: {
+            data: to.typeSeries.map(function (s) { return s.name; }),
+            top: 0, left: 'center', itemGap: 14, itemWidth: 14, itemHeight: 8,
+            textStyle: { fontSize: 11, color: '#64748b' }
+          },
+          grid: { left: 56, right: 24, top: 40, bottom: 26 },
+          xAxis: Object.assign({
+            type: 'category', data: (to.hours || []).map(function (h) { return h + '点'; })
+          }, AXIS),
+          yAxis: Object.assign({
+            type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
+          }, { axisLabel: AXIS.axisLabel }),
+          series: typeStackSeries(to.typeSeries, 'timeoutType', 30)
+        }, true);
+      }
+
+      var toStatEl = document.getElementById('timeoutStat');
+      if (toStatEl) {
+        var toTotal = to.total || 0;
+        var recN = (data.meta && data.meta.recordCount) || 0;
+        var peakH = null, peakN = 0;
+        (to.hourly || []).forEach(function (v, i) {
+          if (v > peakN) { peakN = v; peakH = (to.hours || [])[i]; }
+        });
+        var chipOf = function (k, v, unit) {
+          return '<div class="stat-chip"><div class="k">' + k + '</div><div class="v">' + v +
+            (unit ? '<small>' + unit + '</small>' : '') + '</div></div>';
+        };
+        toStatEl.innerHTML = [
+          chipOf('超时单数', toTotal.toLocaleString(), '单'),
+          chipOf('超时单占比', fmt(recN ? toTotal / recN * 100 : 0), '%'),
+          chipOf('超时最多时段', peakN ? peakH + '点' : '-', peakN ? peakN + ' 单' : '')
+        ].concat((to.duties || []).map(function (d) {
+          return chipOf(d.name, d.count.toLocaleString(), '单');
+        })).join('');
+      }
+
+      var toNoteEl = document.getElementById('timeoutNote');
+      if (toNoteEl) toNoteEl.textContent =
+        '超时判定：「是否拣货超时」列为「是」的明细计入（其余取值与空值都不算）；' +
+        '判责直接读取该明细的「超时判责」列，未填写的单独归为一组；' +
+        '作业类型与「人员 × 小时 效率透视」同一口径：拣货单类型为「一体化」的归入一体化，' +
+        '其余按「拣货分区」的前后场映射归入前场 / 后场，未命中的归「未匹配分区」；' +
+        '上传文件缺少「是否拣货超时」列时不展示本卡片。';
+
+      /* 6) 超时数统计 · 按人员（只列有超时单的人员；判责 / 作业类型两张图共用同一坐标与提示）
+            位于默认折叠的区块内，展开时由 app.js 调用 HEMA.charts.resize() 重新测量尺寸 */
+      var tpRows = to.byPerson || [];
+      // field: 该人的分组计数挂在哪个字段（duties / types）；colorOfName: 分组名 -> 颜色
+      var personOption = function (groups, field, colorOfName, stackName) {
+        return {
+          tooltip: {
+            trigger: 'axis', axisPointer: { type: 'shadow' },
+            formatter: function (ps) {
+              var r = tpRows[ps[0].dataIndex];
+              var sum = 0, lines = [];
+              ps.forEach(function (p) {
+                if (!p.value) return;
+                sum += p.value;
+                lines.push(p.marker + p.seriesName + '：<b>' + p.value + '</b> 单');
+              });
+              if (!sum) return '<b>' + r.person + '</b><br/>无超时单';
+              return '<b>' + r.person + '</b>（明细 ' + r.all + ' 条）<br/>' + lines.join('<br/>') +
+                '<br/>超时：<b>' + sum + '</b> 单（超时率 ' + fmt(r.rate * 100) + '%）';
+            }
+          },
+          legend: {
+            data: groups.map(function (g) { return g.name; }),
+            top: 0, left: 'center', itemGap: 14, itemWidth: 14, itemHeight: 8,
+            textStyle: { fontSize: 11, color: '#64748b' }
+          },
+          grid: { left: 56, right: 24, top: 40, bottom: 76 },
+          xAxis: Object.assign({
+            type: 'category', data: tpRows.map(function (r) { return r.person; }),
+            // 人员多时标签旋转并抽稀，避免文字互相压叠
+            axisLabel: { color: '#64748b', fontSize: 11, rotate: 45, hideOverlap: true }
+          }, AXIS),
+          yAxis: Object.assign({
+            type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
+          }, { axisLabel: AXIS.axisLabel }),
+          series: groups.map(function (g) {
+            return {
+              name: g.name, type: 'bar', stack: stackName, barMaxWidth: 26,
+              itemStyle: { color: colorOfName(g.name) },
+              data: tpRows.map(function (r) { return (r[field] && r[field][g.name]) || 0; })
+            };
+          })
+        };
+      };
+
+      var c8 = inst('chartTimeoutPerson');
+      if (c8 && tpRows.length) {
+        c8.setOption(personOption(to.duties || [], 'duties',
+          function (n) { return dutyColor[n]; }, 'timeoutPerson'), true);
+      }
+
+      /* 6b) 超时数统计 · 按人员 × 作业类型（前场 / 后场 / 一体化 / 未匹配分区） */
+      var c8b = inst('chartTimeoutPersonType');
+      if (c8b && tpRows.length && (to.types || []).length) {
+        c8b.setOption(personOption(to.types, 'types', colorOf, 'timeoutPersonType'), true);
+      }
+    }
+  };
+
+  /* 重新测量所有图表尺寸：折叠区块内的图表在隐藏状态下初始化只能拿到 0 尺寸，
+     展开后必须调用一次，否则画布宽高仍为 0、图表不可见 */
+  HEMA.charts.resize = function () {
+    Object.keys(instances).forEach(function (k) {
+      if (instances[k] && !instances[k].isDisposed()) instances[k].resize();
+    });
   };
 
   /* 切换效率口径：true = 按工时加权，false = 人均（由顶栏统一开关调用） */
@@ -468,9 +677,5 @@
     if (cache) HEMA.charts.render(cache);
   };
 
-  window.addEventListener('resize', function () {
-    Object.keys(instances).forEach(function (k) {
-      if (instances[k] && !instances[k].isDisposed()) instances[k].resize();
-    });
-  });
+  window.addEventListener('resize', HEMA.charts.resize);
 })(window);

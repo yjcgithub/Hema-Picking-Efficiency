@@ -1,19 +1,28 @@
 /* 控制层：调用后端 API（解析/计算在服务端），渲染 KPI / 图表 / 表格 */
 (function (global) {
   var HEMA = global.HEMA = global.HEMA || {};
-  var SAMPLE = global.HEMA_DATA;
   var API = (global.HEMA_CONFIG && global.HEMA_CONFIG.API_BASE) || '/api';
   var current = null;
+  var curDate = null;     // 当前展示日期；null = 取数据集内最新日期
   var weighted = true;    // 全局效率口径：true = 按工时加权（默认），false = 人均；由顶栏开关统一切换
 
   // 统一响应解析：后端未部署/地址配错时返回的是 HTML，给出可定位的错误
   function readJson(res) {
     return res.text().then(function (txt) {
-      if (!res.ok) throw new Error('HTTP ' + res.status + '（' + (res.url || '') + '）');
-      try { return JSON.parse(txt); } catch (e) {
+      var body = null;
+      try { body = JSON.parse(txt); } catch (e) { body = null; }
+      if (!res.ok) {
+        // 业务错误（如「暂无数据，请先上传拣货单」）：优先透出服务端给出的原因
+        var err = new Error((body && body.error) ||
+          'HTTP ' + res.status + '（' + (res.url || '') + '）');
+        err.status = res.status;
+        throw err;
+      }
+      if (!body) {
         throw new Error('接口未返回 JSON，请检查 API_BASE（当前 ' + API + '）或后端部署：' +
           (res.url || '') + ' → ' + txt.replace(/\s+/g, ' ').slice(0, 60));
       }
+      return body;
     });
   }
 
@@ -27,13 +36,48 @@
   var noticeEl = document.getElementById('notice');
   var noticeTimer = null;
 
-  /* 悬浮吐司提示（右下角浮层）：成功/进行中提示数秒后自动消失，
+  /* 访问方式判定（本地 / IP / 域名）：与 config.js 的 API_BASE 判定保持同一套规则。
+     纯 IP 访问时页面处于非安全上下文，浏览器禁用剪贴板 API，需引导改用域名。 */
+  var ACCESS = (function () {
+    var host = (global.location && global.location.hostname) || '';
+    if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1') {
+      return { kind: '本地', host: host || '-' };
+    }
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      return { kind: 'IP', host: host, domain: 'https://xl.yjmc.xyz/' };
+    }
+    return { kind: '域名', host: host || '-' };
+  })();
+
+  function domainLink() {
+    return '<a href="' + ACCESS.domain + '" target="_blank" rel="noopener">域名访问 ' + ACCESS.domain + '</a>';
+  }
+
+  /* 顶栏品牌区右侧（h1 右边）：常显当前访问方式；IP 访问时追加剪贴板限制说明与域名入口 */
+  function renderAccess() {
+    var el = document.getElementById('accessInfo');
+    if (!el) return;
+    var s = '当前访问方式：<b>' + esc(ACCESS.kind) + '</b>（' + esc(ACCESS.host) + '）';
+    if (ACCESS.kind === 'IP') {
+      s += ' ｜ 因浏览器限制 IP 访问时无法复制图片到剪贴板，请使用' + domainLink();
+    }
+    el.innerHTML = s;
+  }
+
+  /* 提示脚注：访问方式已常显在顶栏，此处仅在 IP 访问时补充上下文相关的剪贴板限制说明 */
+  function accessNote() {
+    if (ACCESS.kind !== 'IP') return '';
+    return '<div class="notice-access">因浏览器限制 IP 访问时无法复制图片到剪贴板，请使用' + domainLink() + '</div>';
+  }
+
+  /* 顶部居中吐司提示：成功/进行中提示数秒后自动消失，
      错误提示保留至手动关闭或被下一条覆盖 */
   function notice(msg, type) {
     if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
     if (!msg) { noticeEl.className = 'notice hidden'; noticeEl.innerHTML = ''; return; }
     noticeEl.className = 'notice ' + (type || '');
-    noticeEl.innerHTML = '<button type="button" class="notice-close" title="关闭">×</button>' + msg;
+    noticeEl.innerHTML = '<button type="button" class="notice-close" title="关闭">×</button>' +
+      msg + accessNote();
     if (type !== 'err') {
       noticeTimer = setTimeout(function () {
         noticeTimer = null;
@@ -96,10 +140,69 @@
       { label: '拣货人数', value: t.persons, unit: '人', foot: '参与拣货的人员' },
       { label: '有效明细', value: d.meta.recordCount.toLocaleString(), unit: '条',
         foot: '丢弃 ' + d.meta.dropped + ' 条（缺人/缺时间）' +
+          (d.meta.otherStore ? '，已过滤 ' + d.meta.otherStore + ' 条（非本门店）' : '') +
           (d.meta.ignored ? '，已忽略 ' + d.meta.ignored + ' 条（分区设置）' : '') }
     ];
     document.getElementById('kpis').innerHTML = main.map(kpiCard).join('');
     document.getElementById('kpisSub').innerHTML = sub.map(kpiCard).join('');
+  }
+
+  /* ---------- 表格排序（所有表格表头均可点击切换升/降序） ---------- */
+  // 每个表一份排序状态 { key, dir }（dir = 1 升序，-1 降序）；key 为 null 表示保持服务端给出的顺序
+  var SORTS = {};
+  function sortState(name, defKey, defDir) {
+    var st = SORTS[name];
+    if (!st) st = SORTS[name] = { key: defKey || null, dir: defDir || -1 };
+    return st;
+  }
+
+  /* 表头 HTML：cols = [{ key, label, text, cls }]；无 key 的列不可排序
+     text = 1 表示文本列（首次点击按升序，其余按降序） */
+  function theadHtml(cols, st) {
+    return '<thead><tr>' + cols.map(function (c) {
+      if (!c.key) return '<th' + (c.cls ? ' class="' + c.cls + '"' : '') + '>' + c.label + '</th>';
+      var mark = st && st.key === c.key ? (st.dir === 1 ? ' ▲' : ' ▼') : '';
+      return '<th class="sortable' + (c.cls ? ' ' + c.cls : '') + '" data-key="' + c.key + '"' +
+        (c.text ? ' data-text="1"' : '') + ' title="点击切换升/降序">' + c.label + mark + '</th>';
+    }).join('') + '</tr></thead>';
+  }
+
+  /* 按当前排序状态排序（返回新数组，不改动原数据）；getters = { key: 取值函数 }
+     空值恒排在末尾，文本按拼音比较 */
+  function sortRows(list, st, getters) {
+    var get = (st && st.key && getters) ? getters[st.key] : null;
+    if (!get) return list.slice();
+    return list.slice().sort(function (a, b) {
+      var va = get(a), vb = get(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === 'string' || typeof vb === 'string') {
+        return st.dir * String(va).localeCompare(String(vb), 'zh-Hans-CN');
+      }
+      return st.dir * (va - vb);
+    });
+  }
+
+  /* 分档标签（如「≥ 240」「0 – 60」）的起始数值：用于按区间大小排序 */
+  function labelNum(label) {
+    var m = String(label).match(/\d+(\.\d+)?/);
+    return m ? Number(m[0]) : null;
+  }
+
+  /* 表头点击排序（事件委托到表格容器）：容器内含多张表（如分两栏渲染）时同样有效 */
+  function bindSort(container, name, onSorted) {
+    if (!container) return;
+    container.addEventListener('click', function (ev) {
+      var el = ev.target;
+      while (el && el.tagName !== 'TH') el = el.parentNode;
+      if (!el || !el.tagName || String(el.className || '').indexOf('sortable') < 0) return;
+      var key = el.getAttribute('data-key');
+      var st = sortState(name);
+      if (st.key === key) st.dir = -st.dir;
+      else { st.key = key; st.dir = el.getAttribute('data-text') === '1' ? 1 : -1; }
+      onSorted();
+    });
   }
 
   /* ---------- 人员 × 小时 透视：按 前场合流 / 后场合流 / 一体化 分为 3 块 ---------- */
@@ -179,19 +282,35 @@
     var pb = d.personByHour, hours = pb.hours;
     var colors = (global.HEMA_CONFIG && global.HEMA_CONFIG.COLORS) || {};
     var collapsed = collapsedSet();
-    var th = ['拣货人'].concat(hours.map(function (h) { return h + '点'; })).concat(['总计']);
-    var head = '<thead><tr>' + th.map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead>';
-    var foot = '<tfoot><tr><td colspan="' + th.length + '" class="table-note">' +
-      '小计＝该范围内 Σ拣货行数 ÷ Σ拣货时长（按工时加权，不是各人效率的算术平均）；' +
+    /* 人均口径（顶栏口径开关未勾选时）：按作业类型给出各时段「各人效率的算术平均」 */
+    var uwHour = (d.jobTypeByHour && d.jobTypeByHour.unweighted) || null;
+
+    var cols = [{ key: 'person', label: '拣货人', text: 1 }]
+      .concat(hours.map(function (h) { return { key: 'h' + h, label: h + '点' }; }))
+      .concat([{ key: 'total', label: '总计' }]);
+    var pSt = sortState('pivot', null, -1);
+    var head = theadHtml(cols, pSt);
+    var foot = '<tfoot><tr><td colspan="' + cols.length + '" class="table-note">' +
+      '小计＝该范围内 Σ拣货行数 ÷ Σ拣货时长（按工时加权）；取消勾选顶栏「按工时加权」后，' +
+      '小计改为该范围内各人效率的算术平均（人均口径，随开关同步）；' +
       '「平均值 / 中位数」按各人总计效率统计，浅蓝 / 浅紫边框标出与之最接近的人员行；「-」表示该时段无记录。' +
       '</td></tr></tfoot>';
+    // 点击表头可排序：按人或按某个小时（或总计）的效率升降序
+    var getters = { person: function (r) { return r.person; }, total: function (r) { return r.total; } };
+    hours.forEach(function (h, i) { getters['h' + h] = function (r) { return r.data[i]; }; });
 
     var blocks = orderBlocks((pb.groups && pb.groups.length) ? pb.groups : fallbackGroups(pb));
 
     host.innerHTML = blocks.map(function (g) {
       var color = colors[g.type] || '#64748b';
       var isCol = collapsed.indexOf(g.type) >= 0;
-      var bvals = g.hourly.filter(function (v) { return v != null; });
+      var gs = g.stat || {};
+      /* 口径：勾选顶栏「按工时加权」用服务端给出的 Σ行数 ÷ Σ时长；
+         取消勾选改用各时段各人效率的算术平均（人均口径，随顶栏开关同步） */
+      var uwh = (!weighted && uwHour) ? uwHour[g.type] : null;
+      var hourly = (uwh && uwh.length === g.hourly.length) ? uwh : g.hourly;
+      var bTotal = (!weighted && gs.avg != null) ? gs.avg : g.total;
+      var bvals = hourly.filter(function (v) { return v != null; });
       var bmin = bvals.length ? Math.min.apply(null, bvals) : 0;
       var bmax = bvals.length ? Math.max.apply(null, bvals) : 0;
       var cell = function (v, tag) {
@@ -204,22 +323,21 @@
       var cellArr = function (arr) { return arr.map(function (v) { return cell(v); }).join(''); };
 
       // 平均值 / 中位数按「总计」列口径计算（服务端给出），对应行加边框并在右上角标注
-      var gs = g.stat || {};
       var avg = gs.avg == null ? null : gs.avg, med = gs.median == null ? null : gs.median;
 
-      var body = g.persons.map(function (r) {
+      var body = sortRows(g.persons, pSt, getters).map(function (r) {
         var tag = r.person === gs.medianPerson ? 'median' : (r.person === gs.avgPerson ? 'avg' : '');
         return '<tr class="person' + (tag ? ' near-' + tag : '') + '">' +
           '<td>' + esc(r.person) + '</td>' + cellArr(r.data) + cell(r.total, tag) + '</tr>';
       }).join('');
-      body += '<tr class="total"><td>小计</td>' + cellArr(g.hourly) + cell(g.total) + '</tr>';
+      body += '<tr class="total"><td>小计</td>' + cellArr(hourly) + cell(bTotal) + '</tr>';
 
       var target = TARGETS[g.type];
       return '<div class="pivot-block' + (isCol ? ' collapsed' : '') + '">' +
         '<div class="pivot-title" data-toggle="' + esc(g.type) + '" title="点击折叠 / 展开">' +
         '<span class="caret">' + (isCol ? '▶' : '▼') + '</span>' +
         '<span class="dot" style="background:' + color + '"></span>' + esc(g.type) +
-        '<small>整体 ' + fmt(g.total, 1) + ' 行/h · ' + g.rows.toLocaleString() + ' 行 · ' +
+        '<small>整体 ' + fmt(bTotal, 1) + ' 行/h · ' + g.rows.toLocaleString() + ' 行 · ' +
         fmt(g.hours, 2) + ' h · ' + g.persons.length + ' 人' +
         (target ? ' · 达标线 ' + target + ' 行/h' : '') +
         (avg == null ? '' : ' · <span class="dot avg"></span>平均 ' + fmt(avg, 1) + ' 行/h') +
@@ -230,44 +348,62 @@
     }).join('');
   }
 
-  /* ---------- 细分明细 ---------- */
+  /* ---------- 细分明细（表头可点击升/降序） ---------- */
+  var ZONE_COLS = [
+    { key: 'type', label: '作业类型', text: 1 },
+    { key: 'zone', label: '拣货分区', text: 1 },
+    { key: 'rows', label: '拣货行数' },
+    { key: 'hours', label: '时长(h)' },
+    { key: 'eff', label: '效率(行/h)' },
+    { key: 'share', label: '行数占比' }
+  ];
+  /* 人均口径下的「整体效率」（各人总计效率的算术平均）：顶栏取消勾选时与 KPI 卡保持一致 */
+  function meanEff(d) {
+    var all = personMean(d, null);
+    return all.avg == null ? d.totals.eff : all.avg;
+  }
+
+  var ZONE_GET = {
+    type: function (r) { return r.type; },
+    zone: function (r) { return r.zone; },
+    rows: function (r) { return r.rows; },
+    hours: function (r) { return r.hours; },
+    eff: function (r) { return (!weighted && r.avg != null) ? r.avg : r.eff; },
+    share: function (r) { return r.share; }
+  };
+
   function renderZoneTable(d) {
-    var th = ['作业类型', '拣货分区', '拣货行数', '时长(h)', '效率(行/h)', '行数占比'];
-    var html = '<thead><tr>' + th.map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead><tbody>';
-    d.byZone.forEach(function (r) {
+    var st = sortState('zone');
+    var html = theadHtml(ZONE_COLS, st) + '<tbody>';
+    sortRows(d.byZone, st, ZONE_GET).forEach(function (r) {
       html += '<tr><td>' + esc(r.type) + '</td><td>' + esc(r.zone) + '</td><td>' + r.rows + '</td><td>' +
-        fmt(r.hours, 4) + '</td><td>' + fmt(r.eff) + '</td><td>' + r.share + '%</td></tr>';
+        fmt(r.hours, 4) + '</td><td>' + fmt(ZONE_GET.eff(r)) + '</td><td>' + r.share + '%</td></tr>';
     });
     html += '<tr class="total"><td>合计</td><td></td><td>' + d.totals.rows + '</td><td>' +
-      fmt(d.totals.hours, 4) + '</td><td>' + fmt(d.totals.eff) + '</td><td>100%</td></tr></tbody>';
+      fmt(d.totals.hours, 4) + '</td><td>' + fmt(weighted ? d.totals.eff : meanEff(d)) +
+      '</td><td>100%</td></tr></tbody>';
     document.getElementById('tableZone').innerHTML = html;
   }
 
   /* ---------- 人员效率明细（表头可点击升降序） ---------- */
-  var personSort = { key: 'eff', dir: -1 };
   var PERSON_COLS = [
     { key: null, label: '排名' },
-    { key: 'name', label: '拣货人' },
+    { key: 'name', label: '拣货人', text: 1 },
     { key: 'rows', label: '拣货行数' },
     { key: 'hours', label: '时长(h)' },
     { key: 'eff', label: '效率(行/h)' }
   ];
+  var PERSON_GET = {
+    name: function (r) { return r.name; },
+    rows: function (r) { return r.rows; },
+    hours: function (r) { return r.hours; },
+    eff: function (r) { return r.eff; }
+  };
 
   function renderPersonTable(d) {
-    var list = d.byPerson.slice();
-    var k = personSort.key, dir = personSort.dir;
-    if (k) {
-      list.sort(function (a, b) {
-        var va = a[k], vb = b[k];
-        if (typeof va === 'string') return dir * va.localeCompare(vb, 'zh-Hans-CN');
-        return dir * (va - vb);
-      });
-    }
-    var head = '<thead><tr>' + PERSON_COLS.map(function (c) {
-      if (!c.key) return '<th>' + c.label + '</th>';
-      var mark = personSort.key === c.key ? (personSort.dir === 1 ? ' ▲' : ' ▼') : '';
-      return '<th class="sortable" data-key="' + c.key + '" title="点击切换升/降序">' + c.label + mark + '</th>';
-    }).join('') + '</tr></thead>';
+    var st = sortState('person', 'eff', -1);      // 默认：按效率降序
+    var list = sortRows(d.byPerson, st, PERSON_GET);
+    var head = theadHtml(PERSON_COLS, st);
 
     // 分两栏渲染，充分利用横向空间（行数多，单栏会又宽又空）
     var half = Math.ceil(list.length / 2);
@@ -279,10 +415,55 @@
       }).join('');
       if (pi === parts.length - 1) {
         body += '<tr class="total"><td></td><td>总计</td><td>' + d.totals.rows + '</td><td>' +
-          fmt(d.totals.hours, 4) + '</td><td>' + fmt(d.totals.eff) + '</td></tr>';
+          fmt(d.totals.hours, 4) + '</td><td>' +
+          fmt(weighted ? d.totals.eff : meanEff(d)) + '</td></tr>';
       }
       return '<div class="table-wrap"><table>' + head + '<tbody>' + body + '</tbody></table></div>';
     }).join('');
+  }
+
+  /* ---------- 超时卡片的「按人员统计」（默认折叠，点击标题展开） ---------- */
+  function renderTimeoutPerson(d) {
+    var table = document.getElementById('tableTimeoutPerson');
+    if (!table) return;
+    var to = (d && d.timeout) || null;
+    var sub = document.getElementById('timeoutPersonSub');
+    if (!to) { table.innerHTML = ''; if (sub) sub.textContent = ''; return; }
+    var rows = to.byPerson || [];
+    var duties = to.duties || [];
+    if (sub) sub.textContent = rows.length ? '共 ' + rows.length + ' 人有超时单' : '无超时单';
+
+    var cols = [
+      { key: 'person', label: '拣货人', text: 1 },
+      { key: 'timeout', label: '超时单数' },
+      { key: 'all', label: '明细条数' },
+      { key: 'rate', label: '超时率' }
+    ].concat(duties.map(function (du) { return { key: 'duty:' + du.name, label: du.name }; }));
+    var getters = {
+      person: function (r) { return r.person; },
+      timeout: function (r) { return r.timeout; },
+      all: function (r) { return r.all; },
+      rate: function (r) { return r.rate; }
+    };
+    var dutyOf = function (r, name) { return (r.duties && r.duties[name]) || 0; };
+    duties.forEach(function (du) { getters['duty:' + du.name] = function (r) { return dutyOf(r, du.name); }; });
+
+    var st = sortState('timeoutPerson', 'timeout', -1);
+    var list = sortRows(rows, st, getters);
+    var sum = function (f) { return rows.reduce(function (s, r) { return s + f(r); }, 0); };
+    var sumT = sum(function (r) { return r.timeout; }), sumAll = sum(function (r) { return r.all; });
+
+    var body = list.map(function (r) {
+      return '<tr><td>' + esc(r.person) + '</td><td>' + r.timeout + '</td><td>' + r.all + '</td><td>' +
+        fmt(r.rate * 100, 1) + '%</td>' +
+        duties.map(function (du) { return '<td>' + dutyOf(r, du.name) + '</td>'; }).join('') + '</tr>';
+    }).join('');
+    // 合计行放在 tbody 内（与其它表格一致，复用 tbody tr.total 的加粗底色），不参与排序
+    body += '<tr class="total"><td>合计</td><td>' + sumT + '</td><td>' + sumAll + '</td><td>' +
+      fmt(sumAll ? sumT / sumAll * 100 : 0, 1) + '%</td>' +
+      duties.map(function (du) { return '<td>' + sum(function (r) { return dutyOf(r, du.name); }) + '</td>'; }).join('') +
+      '</tr>';
+    table.innerHTML = theadHtml(cols, st) + '<tbody>' + body + '</tbody>';
   }
 
   /* ---------- 指标小卡 ---------- */
@@ -311,8 +492,21 @@
     ].join('');
 
     /* 效率分档：看「多少人落在哪一档」与各档贡献了多少行 */
-    var html = '<thead><tr><th>效率区间（行/h）</th><th>人数</th><th>人数占比</th><th>行数合计</th></tr></thead><tbody>';
-    (s.effBins || []).forEach(function (b) {
+    var binSt = sortState('effBin');
+    var binCols = [
+      { key: 'label', label: '效率区间（行/h）', text: 1 },
+      { key: 'n', label: '人数' },
+      { key: 'nshare', label: '人数占比' },
+      { key: 'rows', label: '行数合计' }
+    ];
+    var binGet = {
+      label: function (b) { return labelNum(b.label); },
+      n: function (b) { return b.n; },
+      nshare: function (b) { return n ? b.n / n : 0; },
+      rows: function (b) { return b.rows; }
+    };
+    var html = theadHtml(binCols, binSt) + '<tbody>';
+    sortRows(s.effBins || [], binSt, binGet).forEach(function (b) {
       html += '<tr><td>' + b.label + '</td><td>' + b.n + '</td><td>' +
         fmt(n ? b.n / n * 100 : 0, 1) + '%</td><td>' + b.rows.toLocaleString() + '</td></tr>';
     });
@@ -322,8 +516,24 @@
 
     /* 稳定性榜：波动最大 / 最稳定各 10 人（人数不足时全部列出） */
     var st = s.stability || [];
-    var head = '<thead><tr>' + ['拣货人', '主要作业类型', '记录小时数', '平均效率', '标准差', '变异系数']
-      .map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead>';
+    var stbSt = sortState('stability');
+    var stbCols = [
+      { key: 'person', label: '拣货人', text: 1 },
+      { key: 'type', label: '主要作业类型', text: 1 },
+      { key: 'n', label: '记录小时数' },
+      { key: 'avg', label: '平均效率' },
+      { key: 'sd', label: '标准差' },
+      { key: 'cv', label: '变异系数' }
+    ];
+    var stbGet = {
+      person: function (r) { return r.person; },
+      type: function (r) { return r.type; },
+      n: function (r) { return r.n; },
+      avg: function (r) { return r.avg; },
+      sd: function (r) { return r.sd; },
+      cv: function (r) { return r.cv; }
+    };
+    var head = theadHtml(stbCols, stbSt);
     var rowOf = function (r) {
       return '<tr><td>' + esc(r.person) + '</td><td>' + esc(r.type) + '</td><td>' + r.n + '</td><td>' +
         fmt(r.avg, 1) + '</td><td>' + fmt(r.sd, 1) + '</td><td>' + fmt(r.cv, 2) + '</td></tr>';
@@ -335,10 +545,12 @@
     if (!st.length) {
       body = '<tr><td colspan="6" class="dm-empty">暂无足够的每小时记录（每人需 ≥ 3 小时）</td></tr>';
     } else if (st.length <= 22) {
-      body = st.map(rowOf).join('');
+      body = sortRows(st, stbSt, stbGet).map(rowOf).join('');
     } else {
-      body = sec('波动最大（变异系数高，需关注）') + st.slice(-10).reverse().map(rowOf).join('') +
-        sec('最稳定（变异系数低）') + st.slice(0, 10).map(rowOf).join('');
+      // 分两组展示（组内可按各列排序；未选排序列时保持「波动大→小 / 稳定→波动大」的默认序）
+      body = sec('波动最大（变异系数高，需关注）') +
+        sortRows(st.slice(-10).reverse(), stbSt, stbGet).map(rowOf).join('') +
+        sec('最稳定（变异系数低）') + sortRows(st.slice(0, 10), stbSt, stbGet).map(rowOf).join('');
     }
     document.getElementById('tableStab').innerHTML = head + '<tbody>' + body + '</tbody>';
 
@@ -387,9 +599,23 @@
 
     /* 行数分档：人数占比看「多少人干得少」，行数占比看「产出集中在哪一档」 */
     var bins = (d.stats && d.stats.rowsBins) || [];
-    var html = '<thead><tr><th>行数区间</th><th>人数</th><th>人数占比</th><th>行数合计</th><th>行数占比</th>' +
-      '</tr></thead><tbody>';
-    bins.forEach(function (b) {
+    var rbSt = sortState('rowsBin');
+    var rbCols = [
+      { key: 'label', label: '行数区间', text: 1 },
+      { key: 'n', label: '人数' },
+      { key: 'nshare', label: '人数占比' },
+      { key: 'rows', label: '行数合计' },
+      { key: 'rshare', label: '行数占比' }
+    ];
+    var rbGet = {
+      label: function (b) { return labelNum(b.label); },
+      n: function (b) { return b.n; },
+      nshare: function (b) { return n ? b.n / n : 0; },
+      rows: function (b) { return b.rows; },
+      rshare: function (b) { return totalRows ? b.rows / totalRows : 0; }
+    };
+    var html = theadHtml(rbCols, rbSt) + '<tbody>';
+    sortRows(bins, rbSt, rbGet).forEach(function (b) {
       html += '<tr><td>' + b.label + '</td><td>' + b.n + '</td><td>' + fmt(b.n / n * 100, 1) + '%</td><td>' +
         b.rows.toLocaleString() + '</td><td>' + fmt(totalRows ? b.rows / totalRows * 100 : 0, 1) + '%</td></tr>';
     });
@@ -464,11 +690,34 @@
       chip('总在岗时长', fmt(sumSpan / 60, 2), 'h', '全部人·日 班次的在岗时长合计')
     ].join('');
 
-    /* 明细：每行一个「人·日」班次，与上方图表同序（按人员效率降序，见 sortTimelineRows） */
-    var head = '<thead><tr>' + ['拣货人', '日期', '首次拣货', '末次拣货', '在岗时长', '在岗率',
-      '有效作业', '空闲时长', '最大空档', '拣货单数']
-      .map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead>';
-    var body = rows.map(function (r) {
+    /* 明细：每行一个「人·日」班次，默认与上方图表同序（按人员效率降序，见 sortTimelineRows） */
+    var tlSt = sortState('timeline');
+    var tlCols = [
+      { key: 'person', label: '拣货人', text: 1 },
+      { key: 'date', label: '日期', text: 1 },
+      { key: 'first', label: '首次拣货' },
+      { key: 'last', label: '末次拣货' },
+      { key: 'span', label: '在岗时长' },
+      { key: 'rate', label: '在岗率' },
+      { key: 'busy', label: '有效作业' },
+      { key: 'idle', label: '空闲时长' },
+      { key: 'maxGap', label: '最大空档' },
+      { key: 'orders', label: '拣货单数' }
+    ];
+    var tlGet = {
+      person: function (r) { return r.person; },
+      date: function (r) { return r.date; },
+      first: function (r) { return r.first; },
+      last: function (r) { return r.last; },
+      span: function (r) { return r.span; },
+      rate: function (r) { return r.rate; },
+      busy: function (r) { return r.busy; },
+      idle: function (r) { return r.idle; },
+      maxGap: function (r) { return r.maxGap; },
+      orders: function (r) { return r.orders; }
+    };
+    var head = theadHtml(tlCols, tlSt);
+    var body = sortRows(rows, tlSt, tlGet).map(function (r) {
       return '<tr><td>' + esc(r.person) + '</td><td>' + esc(r.date) + '</td><td>' +
         clockOf(r.first) + '</td><td>' + clockOf(r.last) + '</td><td>' +
         fmt(r.span / 60, 2) + ' h</td><td>' + fmt(r.rate == null ? null : r.rate * 100, 1) + '%</td><td>' +
@@ -478,90 +727,183 @@
     tableEl.innerHTML = head + '<tbody>' + body + '</tbody>';
 
     if (noteEl) noteEl.textContent =
-      '反推方法：按「拣货人 × 日期」分组，把每笔拣货按「拣货开始时间」归入半小时刻度；' +
-      '每个刻度生成一段在岗区间（起点 = 刻度起点，长度 = 该刻度内单笔拣货时长的最大值），' +
-      '相邻段间隔不超过 ' + ((tl && tl.mergeGap) || 1) + ' 分钟时合并为一段。' +
+      '反推方法：按「拣货人 × 日期」分组，把每笔拣货单按其真实起止时间（当日 00:00 起的分钟数）取区间；' +
+      '上一笔结束到下一笔开始的间隔不超过 ' + ((tl && tl.mergeGap) || 2) + ' 分钟时，视为连续作业并合并为一段（重叠亦接续）。' +
       '在岗时长 = 末次拣货结束 − 首次拣货开始；有效作业 = 各段在岗区间时长之和（即在拣货的时间）；' +
       '空闲时长 = 在岗时长 − 有效作业；在岗率 = 有效作业 ÷ 在岗时长。' +
-      '由于只按半小时刻度取整，同一段连续在岗跨越多个刻度时会被拆成多段，故段数不等于实际作业次数；' +
       '在岗率偏低通常来自等单、备货、休息等未产生拣货记录的时间。';
+  }
+
+  /* ---------- 顶栏品牌区（h1 右侧）：时间范围 + 数据来源/有效明细 + 访问方式 ---------- */
+  /* 时间范围（大字，与 h1 同字号）：文件内最早开始 → 最晚结束；跨天时带出首末日期 */
+  function renderPeriod(m) {
+    var bar = document.getElementById('periodBar');
+    var rng = document.getElementById('periodRange');
+    if (!bar || !rng) return;
+    var p = m && m.period;
+    if (!p || !p.start || !p.end) { bar.classList.add('hidden'); rng.textContent = ''; return; }
+    rng.textContent = p.crossDay
+      ? p.dateStart + ' ' + p.start + ' → ' + p.dateEnd + ' ' + p.end
+      : p.dateStart + ' ' + p.start + ' – ' + p.end;
+    bar.classList.remove('hidden');
+  }
+
+  /* 小字行左半：数据来源 + 有效明细（无数据集时给出引导文案） */
+  function renderSource(m) {
+    var el = document.getElementById('metaSource');
+    if (!el) return;
+    el.textContent = m
+      ? '数据来源：' + (m.sourceFile || '-') +
+        ' ｜ 有效明细 ' + Number(m.recordCount || 0).toLocaleString() + ' 条'
+      : '当前无数据集，请先上传拣货单 xlsx。';
+  }
+
+  /* 日期下拉：默认取数据集内最新日期；只有多天数据时才需要手动切换 */
+  function renderDates(m) {
+    var wrap = document.getElementById('dateWrap');
+    var sel = document.getElementById('dateSel');
+    if (!wrap || !sel) return;
+    var dates = (m && m.dates) || [];
+    if (dates.length <= 1) { wrap.classList.add('hidden'); sel.innerHTML = ''; return; }
+    sel.innerHTML = dates.map(function (dt) {
+      return '<option value="' + esc(dt) + '"' + (dt === curDate ? ' selected' : '') + '>' +
+        esc(dt) + '</option>';
+    }).join('');
+    wrap.classList.remove('hidden');
   }
 
   /* ---------- 总渲染 ---------- */
   function render(d) {
     if (!d) { notice('没有可展示的数据', 'err'); return; }
     current = d;
-    var m = d.meta;
-    document.getElementById('metaLine').textContent =
-      (d.id ? '数据集 #' + d.id + ' ｜ ' : '') + '数据来源：' + m.sourceFile +
-      ' ｜ 日期：' + (m.dates.join('、') || '-') + ' ｜ 有效明细 ' + m.recordCount.toLocaleString() + ' 条';
+    var m = d.meta || {};
+    // 当前展示日期（服务端按 ?date= 过滤，默认给出数据集内最新日期）
+    curDate = m.date || (m.dates && m.dates.length ? m.dates[m.dates.length - 1] : null);
+    renderPeriod(m);
+    renderSource(m);
+    renderDates(m);
     renderKpis(d);
     renderPivotBlocks(d);
     renderZoneTable(d);
     renderPersonTable(d);
     renderDist(d);
     renderRowsStat(d);
+    renderTimeoutPerson(d);
     sortTimelineRows(d);   // 图表与下方「人·日 班次明细」共用同一排序（就地排序，保持数组引用）
     renderTimeline(d);
     HEMA.charts.render(d);
+    syncGate(d);           // 数据集内没有今天的日期时，提示「今日暂无数据」
   }
 
-  /* ---------- 历史数据集（顶栏自定义下拉：每项两行，第一行文件名、第二行元信息） ---------- */
+  /* 空视图（服务端尚无数据 / 数据集被全部删除 / 接口未连通 / 有数据集但都不含今天）：
+     latestMeta 非空表示「库里有数据集、但今天没单」，只借它的元信息组织遮罩文案（不渲染任何数据） */
+  function clearView(errMsg, latestMeta) {
+    current = null;
+    curDate = null;
+    // 无数据时顶栏第二行常驻引导文案
+    renderPeriod(null);
+    renderSource(null);
+    renderDates(null);
+    ['kpis', 'kpisSub', 'pivotBlocks', 'tableZone', 'tableEffBin', 'tableStab',
+      'tableRowsBin', 'tableTimeline', 'tableTimeoutPerson'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.innerHTML = '';
+    });
+    var tp = document.getElementById('tablePerson');
+    if (tp) tp.innerHTML = '';
+    // 重新取数后回到「默认折叠」初始态：否则上一份数据展开过时会被带过来
+    var tc = document.getElementById('timeoutCard');
+    if (tc) {
+      tc.classList.add('hidden', 'collapsed');
+      var tcCaret = tc.querySelector('.caret');
+      if (tcCaret) tcCaret.textContent = '▶';
+    }
+    var tpb = document.getElementById('timeoutPerson');
+    if (tpb) {
+      tpb.classList.add('collapsed');
+      var tpbCaret = tpb.querySelector('.caret');
+      if (tpbCaret) tpbCaret.textContent = '▶';
+    }
+    ['chartHour', 'chartJtHour', 'chartDist', 'chartTimeline',
+      'chartTimeout', 'chartTimeoutType', 'chartTimeoutPerson', 'chartTimeoutPersonType'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el || typeof echarts === 'undefined') return;
+      var inst = echarts.getInstanceByDom(el);
+      if (inst) inst.clear();
+    });
+    // 有数据集但都不含今天时传入最近一条的元信息：遮罩显示「今日暂无数据 + 最近日期」，
+    // 而不是退化成「暂无可用数据 / 当前没有任何数据集」（syncGate 只读 d.meta）
+    syncGate(latestMeta ? { meta: latestMeta } : null, errMsg);
+  }
+
+  /* ---------- 历史数据集（顶栏自定义下拉：每项两行，第一行日期、第二行文件名） ---------- */
   var selBtn = document.getElementById('historyBtn');
   var selMenu = document.getElementById('historyMenu');
-  var selItems = [];        // [{ id, file, sub }]
-  var selId = 'sample';     // 当前数据集 id；'sample' = 内置示例数据
+  var selItems = [];        // [{ id, dates, file }]
+  var selId = null;         // 当前数据集 id
 
+  // 第一行日期（该数据集内的日期集合），第二行「#id · 文件名」
   function selHtml(it) {
-    return '<span class="sel-l1">' + esc(it.file) + '</span>' +
-      '<span class="sel-l2">' + esc(it.sub) + '</span>';
+    return '<span class="sel-l1">' + esc(it.dates) + '</span>' +
+      '<span class="sel-l2">' + (it.id == null ? '' : '#' + esc(it.id) + ' · ') + esc(it.file) + '</span>';
   }
 
-  // 按钮文案跟随当前选中项，并标注列表项选中态
+  // 按钮文案跟随当前选中项，并标注列表项选中态（遮罩卡片内的同款按钮/列表一并同步）
   function syncHistory() {
     var cur = null;
     selItems.forEach(function (it) { if (String(it.id) === String(selId)) cur = it; });
-    selBtn.innerHTML = selHtml(cur || selItems[0] || { file: '内置示例数据', sub: '' });
-    Array.prototype.forEach.call(selMenu.querySelectorAll('.sel-item'), function (b) {
-      b.classList.toggle('on', b.getAttribute('data-id') === String(selId));
+    selBtn.innerHTML = selHtml(cur || selItems[0] || { dates: '暂无数据集', file: '请先上传拣货单 xlsx' });
+    if (gateHistBtn) gateHistBtn.innerHTML = selBtn.innerHTML;
+    if (gateHistWrap) gateHistWrap.classList.toggle('hidden', !selItems.length);
+    Array.prototype.forEach.call([selMenu, gateHistMenu], function (menu) {
+      if (!menu) return;
+      Array.prototype.forEach.call(menu.querySelectorAll('.sel-item'), function (b) {
+        b.classList.toggle('on', b.getAttribute('data-id') === String(selId));
+      });
     });
   }
 
   function renderHistoryMenu() {
-    selMenu.innerHTML = selItems.map(function (it) {
+    var html = selItems.map(function (it) {
       return '<button type="button" class="sel-item" data-id="' + esc(it.id) + '">' + selHtml(it) + '</button>';
     }).join('');
+    selMenu.innerHTML = html;
+    if (gateHistMenu) gateHistMenu.innerHTML = html;
     syncHistory();
   }
 
+  /* 按当前数据集 + 当前所选日期重新拉取（服务端按日期重算并只返回该日数据）；
+     id 为 null 时取最新数据集 */
+  function refetch(id) {
+    var url = id == null ? API + '/latest' : API + '/datasets/' + encodeURIComponent(id);
+    if (curDate) url += '?date=' + encodeURIComponent(curDate);
+    return fetch(url).then(readJson).then(function (ds) { render(ds); return ds; });
+  }
+
   function loadHistory(currentId, list) {
-    selId = currentId == null ? 'sample' : currentId;
+    selId = currentId == null ? null : currentId;
     syncHistory();
     var p = list ? Promise.resolve(list) : fetch(API + '/datasets').then(readJson);
     p.then(function (list) {
-      selItems = [{ id: 'sample', file: '内置示例数据', sub: '离线示例，无需后端' }];
-      list.forEach(function (x) {
-        selItems.push({
-          id: x.id, file: x.sourceFile,
-          sub: '#' + x.id + ' · ' + x.dates + ' · ' + fmt(x.eff) + ' 行/h'
-        });
+      selItems = [];
+      (list || []).forEach(function (x) {
+        selItems.push({ id: x.id, dates: x.dates, file: x.sourceFile });
       });
       renderHistoryMenu();
     }).catch(function () {
-      selItems = [{ id: 'sample', file: '内置示例数据', sub: '离线示例，无需后端' }];
+      selItems = [];
       renderHistoryMenu();
     });
   }
 
-  // 选择数据集（'sample' = 内置示例数据）
+  // 选择数据集：用户手动选定后，「今日暂无数据」遮罩本次访问内不再挡住这份数据
   function pickHistory(id) {
     selId = id;
+    gateDismissed = true;
     syncHistory();
-    if (id === 'sample') { render(SAMPLE); notice('已切换到内置示例数据。', 'ok'); return; }
-    fetch(API + '/datasets/' + id).then(readJson).then(function (ds) {
-      render(ds);
-      notice('已加载数据集 #' + id + '。', 'ok');
-    }).catch(function () { notice('加载数据集失败。', 'err'); });
+    refetch(id).then(function () {
+      notice('已加载数据集 #' + id, 'ok');
+    }).catch(function (e) { notice('加载数据集失败：' + esc(e.message || e), 'err'); });
   }
 
   selMenu.addEventListener('click', function (ev) {
@@ -580,15 +922,23 @@
       headers: { 'Content-Type': 'application/octet-stream' },
       body: file
     }).then(readJson).then(function (j) {
-      render(j);
+      // 上传响应含文件内全部日期；这里按默认口径重新拉取（只显示最新一天，其余由日期下拉手动选择）
+      var hasToday = (j.meta.dates || []).indexOf(todayStr()) >= 0;
+      // 上传前若正被「今日暂无数据」遮罩挡住，且这份数据含今天：渲染后播放遮罩退场 + 看板入场动画
+      introPending = !gateMask.classList.contains('hidden') && hasToday;
+      // 明确导入了不含今天的数据集：本次访问内不要让遮罩挡住刚导入的这份数据
+      if (!hasToday) gateDismissed = true;
+      curDate = null;
+      refetch(j.id);
       loadHistory(j.id);
       notice('已计算完成并' + (j.mode === 'overwrite' ? '覆盖更新' : '新增入库') +
         '（数据集 #' + j.id + '）：有效明细 ' +
         j.meta.recordCount.toLocaleString() + ' 条，丢弃 ' + j.meta.dropped +
-        ' 条' + (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
-        '，综合效率 ' + fmt(j.totals.eff) + ' 行/h。', 'ok');
+        ' 条' + (j.meta.otherStore ? '，已过滤 ' + j.meta.otherStore + ' 条（非本门店）' : '') +
+        (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
+        '，综合效率 ' + fmt(j.totals.eff) + ' 行/h', 'ok');
     }).catch(function (err) {
-      notice('上传失败：' + esc(err.message || err) + '<br>接口地址：' + esc(API + '/upload'), 'err');
+      notice('上传失败：' + esc(err.message || err), 'err');
     });
   }
 
@@ -629,9 +979,33 @@
 
   function renderDmTable() {
     var cur = current && current.id != null ? String(current.id) : '';
-    var head = '<thead><tr><th class="dm-ck"></th><th>ID</th><th>文件名</th><th>日期</th>' +
-      '<th>有效明细</th><th>丢弃</th><th>已忽略</th><th>综合效率(行/h)</th><th>上传时间</th><th>操作</th></tr></thead>';
-    var body = dmList.map(function (x) {
+    var dmSt = sortState('dm');
+    var dmCols = [
+      { key: null, label: '', cls: 'dm-ck' },
+      { key: 'id', label: 'ID' },
+      { key: 'file', label: '文件名', text: 1 },
+      { key: 'dates', label: '日期', text: 1 },
+      { key: 'recordCount', label: '有效明细' },
+      { key: 'dropped', label: '丢弃' },
+      { key: 'otherStore', label: '非本门店' },
+      { key: 'ignored', label: '已忽略' },
+      { key: 'eff', label: '综合效率(行/h)' },
+      { key: 'createdAt', label: '上传时间', text: 1 },
+      { key: null, label: '操作', cls: 'dm-act' }
+    ];
+    var dmGet = {
+      id: function (x) { return x.id; },
+      file: function (x) { return x.sourceFile; },
+      dates: function (x) { return x.dates; },
+      recordCount: function (x) { return x.recordCount; },
+      dropped: function (x) { return x.dropped; },
+      otherStore: function (x) { return x.otherStore; },
+      ignored: function (x) { return x.ignored; },
+      eff: function (x) { return x.eff; },
+      createdAt: function (x) { return x.createdAt; }
+    };
+    var head = theadHtml(dmCols, dmSt);
+    var body = sortRows(dmList, dmSt, dmGet).map(function (x) {
       var now = String(x.id) === cur;
       return '<tr class="' + (now ? 'now' : '') + '">' +
         '<td class="dm-ck"><input type="checkbox" class="dm-pick" value="' + x.id + '"></td>' +
@@ -640,6 +1014,7 @@
         '<td>' + esc(x.dates || '-') + '</td>' +
         '<td>' + (x.recordCount || 0).toLocaleString() + '</td>' +
         '<td>' + (x.dropped || 0) + '</td>' +
+        '<td>' + (x.otherStore || 0) + '</td>' +
         '<td>' + (x.ignored || 0) + '</td>' +
         '<td>' + fmt(x.eff) + '</td>' +
         '<td>' + dmTime(x.createdAt) + '</td>' +
@@ -666,20 +1041,20 @@
     });
   }
 
-  // 删除后：当前数据集仍在则只刷新列表，否则切到最新数据集（都没有则回内置示例）
+  // 删除后：当前数据集仍在则只刷新列表，否则切到最新数据集（都没有则显示空视图）
   function afterDelete(ids) {
     var curId = current && current.id != null ? String(current.id) : null;
     var curGone = curId != null && ids.some(function (x) { return String(x) === curId; });
-    notice('已删除 ' + ids.length + ' 条数据集。', 'ok');
+    notice('已删除 ' + ids.length + ' 条数据集', 'ok');
     if (!curGone) { loadDataMgr(curId); return; }
     fetch(API + '/latest').then(readJson).then(function (ds) {
       render(ds);
       loadDataMgr(ds.id);
-      notice('当前数据集已删除，已切换到最新数据集 #' + ds.id + '。', 'ok');
+      notice('当前数据集已删除，已切换到最新数据集 #' + ds.id, 'ok');
     }).catch(function () {
-      render(SAMPLE);
+      clearView('数据集已全部删除，请先上传拣货单 xlsx。');
       loadDataMgr(null);
-      notice('数据集已全部删除，已切换到内置示例数据。', 'ok');
+      notice('数据集已全部删除，请先上传拣货单 xlsx', 'ok');
     });
   }
 
@@ -721,26 +1096,25 @@
     var text;
     if (ids.length === 1) {
       var one = dmList.filter(function (x) { return String(x.id) === String(ids[0]); })[0];
-      text = '确认删除数据集 #' + ids[0] + (one ? '（' + one.sourceFile + '）' : '') + '？删除后不可恢复。';
+      text = '确认删除数据集 #' + ids[0] + (one ? '（' + one.sourceFile + '）' : '') + '？删除后不可恢复';
     } else {
-      text = '确认删除选中的 ' + ids.length + ' 条数据集？删除后不可恢复。';
+      text = '确认删除选中的 ' + ids.length + ' 条数据集？删除后不可恢复';
     }
     askConfirm(text, function () { removeThen(ids); });
   }
 
   function clearDatasets() {
-    if (!dmList.length) { notice('当前没有可删除的数据集。', 'ok'); return; }
-    askConfirm('确认清空全部 ' + dmList.length + ' 条数据集？删除后不可恢复。', function () {
+    if (!dmList.length) { notice('当前没有可删除的数据集', 'ok'); return; }
+    askConfirm('确认清空全部 ' + dmList.length + ' 条数据集？删除后不可恢复', function () {
       removeThen(dmList.map(function (x) { return String(x.id); }));
     });
   }
 
   function switchDataset(id) {
-    fetch(API + '/datasets/' + encodeURIComponent(id)).then(readJson).then(function (ds) {
-      render(ds);
+    refetch(id).then(function (ds) {
       loadDataMgr(ds.id);
-      notice('已加载数据集 #' + ds.id + '。', 'ok');
-    }).catch(function () { notice('加载数据集失败。', 'err'); });
+      notice('已加载数据集 #' + ds.id, 'ok');
+    }).catch(function () { notice('加载数据集失败', 'err'); });
   }
 
   function openDataMgr() { dmMask.classList.remove('hidden'); loadDataMgr(); }
@@ -842,10 +1216,10 @@
 
   function zcAdd() {
     var name = (zcNew.value || '').trim();
-    if (!name) { notice('请输入拣货分区名称。', 'err'); zcNew.focus(); return; }
+    if (!name) { notice('请输入拣货分区名称', 'err'); zcNew.focus(); return; }
     var hit = false;
     zcRows.forEach(function (r) { if (r.zone === name) hit = true; });
-    if (hit) { notice('分区「' + esc(name) + '」已在列表中。', 'ok'); zcNew.select(); return; }
+    if (hit) { notice('分区「' + esc(name) + '」已在列表中', 'ok'); zcNew.select(); return; }
     zcRows.push({ zone: name, type: '', ignored: false, inData: false });
     zcNew.value = '';
     renderZoneCfg();
@@ -870,15 +1244,13 @@
       if (skip.length) msg += '，跳过 ' + skip.length + ' 条（数据集 #' + skip.join('、') +
         ' 上传时未保存原始明细，需重新上传该文件才能重算）';
       if (fail) msg += '，失败 ' + fail + ' 条';
-      notice(msg + '。', fail ? 'err' : 'ok');
+      notice(msg, fail ? 'err' : 'ok');
       renderZoneCfg();
       // 重算只影响服务端数据：当前正查看的数据集需重新拉取才反映新映射
       var curId = current && current.id != null ? String(current.id) : null;
       loadDataMgr(curId);
       if (curId != null) {
-        fetch(API + '/datasets/' + encodeURIComponent(curId)).then(readJson).then(function (ds) {
-          if (String(ds.id) === curId) render(ds);
-        }).catch(function () { });
+        refetch(curId).catch(function () { });
       }
     }).catch(function (e) {
       zcSave.disabled = false;
@@ -897,16 +1269,139 @@
   zcSave.addEventListener('click', saveZoneCfg);
   zcMask.addEventListener('click', function (ev) { if (ev.target === zcMask) closeZoneCfg(); });
 
-  // 人员效率明细：点击表头切换升/降序
-  document.getElementById('tablePerson').addEventListener('click', function (ev) {
-    var el = ev.target;
-    while (el && el.tagName !== 'TH') el = el.parentNode;
-    if (!el || !el.className || String(el.className).indexOf('sortable') < 0) return;
-    var key = el.getAttribute('data-key');
-    if (personSort.key === key) personSort.dir = -personSort.dir;
-    else { personSort.key = key; personSort.dir = (key === 'name') ? 1 : -1; }
-    if (current) renderPersonTable(current);
+  /* ---------- 今日暂无数据：全屏遮罩（背景模糊）+ 正中提示卡 ---------- */
+  /* 打开页面时若数据集内还没有今天的日期，说明当天的拣货单尚未上传：
+     盖一层模糊遮罩并在正中给出登录页样式的提示卡，卡片内保留上传 / 历史数据集 / 数据管理 / 分区设置入口；
+     从卡片选一个历史数据集后遮罩关闭，本次访问内不再自动弹出（上传到今日数据后自动复位）。 */
+  var gateMask = document.getElementById('gateMask');
+  var gateTitle = document.getElementById('gateTitle');
+  var gateMsg = document.getElementById('gateMsg');
+  var gateHistWrap = document.getElementById('gateHistWrap');
+  var gateHistBtn = document.getElementById('gateHistBtn');
+  var gateHistMenu = document.getElementById('gateHistMenu');
+  var gateDismissed = false;
+  var introPending = false;   // 是否在本次渲染完成后播放「导入成功」动画（由上传成功时置位）
+
+  function todayStr() {
+    var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  /* d = 当前数据集（null 表示无数据集 / 接口未连通）；errMsg 仅在没有数据集时用于说明原因 */
+  function syncGate(d, errMsg) {
+    if (!gateMask) return;
+    var m = (d && d.meta) || {};
+    var dates = (m.dates && m.dates.length) ? m.dates : (m.date ? [m.date] : []);
+    var today = todayStr();
+    if (d && dates.indexOf(today) >= 0) {   // 今天已有数据：关闭遮罩，并允许下次缺数据时再提示
+      gateDismissed = false;
+      if (!gateMask.classList.contains('hidden')) {
+        // 遮罩正开着：说明是首次导入今日数据，播退场动画（内含看板入场）
+        if (introPending) { introPending = false; playGateOut(); }
+        else gateMask.classList.add('hidden');
+      } else if (introPending) {            // 遮罩此前已手动关闭：仍然播一遍看板入场，给出导入成功的反馈
+        introPending = false;
+        playDashIn();
+      }
+      return;
+    }
+    introPending = false;                   // 本次渲染里没有今日数据：上传标记作废，避免后续误播
+    if (!d) gateDismissed = false;          // 完全没有数据时背后没有任何内容可看，遮罩始终给提示
+    if (gateDismissed) {                    // 用户已手动看过历史数据集：本次访问内不再自动弹出
+      gateMask.classList.add('hidden');
+      return;
+    }
+    var last = dates.length ? dates[dates.length - 1] : '-';
+    gateTitle.textContent = d ? '今日（' + today + '）暂无数据' : '暂无可用数据';
+    gateMsg.innerHTML = d
+      ? '数据集内已有历史数据，最近日期为 <b>' + esc(last) + '</b>（' + esc(m.sourceFile || '-') + '）'
+      : esc(errMsg || '当前没有任何数据集，请先上传拣货单 xlsx');
+    gateMask.classList.remove('hidden');
+  }
+
+  /* 遮罩退场：卡片上弹收缩淡出、背景模糊消散，同时冒出绿勾成功徽标 + 冲击波 + 页面氛围光晕，看板错峰弹出 */
+  function playGateOut() {
+    if (gateMask.classList.contains('leaving')) return;
+    gateMask.classList.add('leaving');
+    document.body.classList.add('intro-flash');   // 页面氛围：蓝绿光晕自中心荡开
+    var burst = document.createElement('div');
+    burst.className = 'ok-burst';
+    burst.innerHTML =
+      '<div class="ring"></div><div class="ring r2"></div><div class="ring glow"></div>' +
+      '<svg viewBox="0 0 112 112" aria-hidden="true">' +
+      '<circle cx="56" cy="56" r="48"/><path d="M35 58 L50 73 L79 41"/></svg>';
+    document.body.appendChild(burst);
+    playDashIn();
+    setTimeout(function () {                       // 与 CSS gate-out .46s 对齐后再真正隐藏遮罩
+      gateMask.classList.remove('leaving');
+      gateMask.classList.add('hidden');
+    }, 460);
+    setTimeout(function () {                       // 徽标与氛围光晕播完自行清理，避免残留覆盖层
+      if (burst.parentNode) burst.parentNode.removeChild(burst);
+      document.body.classList.remove('intro-flash');
+    }, 1200);
+  }
+
+  /* 看板入场：顶栏 → KPI 卡片 → main 内各卡片依次升入（--intro-i 控制错峰），播完即摘掉类，不留残余 transform */
+  function playDashIn() {
+    var nodes = [document.querySelector('.topbar')]
+      .concat(Array.prototype.slice.call(document.querySelectorAll('#kpis .kpi, #kpisSub .kpi')))
+      .concat(Array.prototype.slice.call(document.querySelectorAll('main > .card')))
+      .filter(function (el) { return el && !el.classList.contains('hidden'); });
+    nodes.forEach(function (el, i) {
+      el.style.setProperty('--intro-i', i);
+      el.classList.add('intro');
+    });
+    setTimeout(function () {
+      nodes.forEach(function (el) {
+        el.classList.remove('intro');
+        el.style.removeProperty('--intro-i');
+      });
+    }, 1500);
+  }
+
+  gateHistMenu.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.sel-item') : null;
+    if (!btn) return;
+    closeMenus();
+    gateMask.classList.add('hidden');   // 先立即收掉遮罩，不等取数返回（gateDismissed 由 pickHistory 置位）
+    pickHistory(btn.getAttribute('data-id'));
   });
+  document.getElementById('gateDataMgr').addEventListener('click', function () { openDataMgr(); });
+  document.getElementById('gateZoneCfg').addEventListener('click', function () { openZoneCfg(); });
+
+  /* ---------- 各表格表头排序注册（点击表头切换升/降序） ---------- */
+  bindSort(document.getElementById('pivotBlocks'), 'pivot', function () { if (current) renderPivotBlocks(current); });
+  bindSort(document.getElementById('tableZone'), 'zone', function () { if (current) renderZoneTable(current); });
+  bindSort(document.getElementById('tablePerson'), 'person', function () { if (current) renderPersonTable(current); });
+  bindSort(document.getElementById('tableEffBin'), 'effBin', function () { if (current) renderDist(current); });
+  bindSort(document.getElementById('tableStab'), 'stability', function () { if (current) renderDist(current); });
+  bindSort(document.getElementById('tableRowsBin'), 'rowsBin', function () { if (current) renderRowsStat(current); });
+  bindSort(document.getElementById('tableTimeline'), 'timeline', function () { if (current) renderTimeline(current); });
+  bindSort(document.getElementById('tableTimeoutPerson'), 'timeoutPerson', function () { if (current) renderTimeoutPerson(current); });
+  bindSort(document.getElementById('dmTable'), 'dm', function () { renderDmTable(); });
+
+  /* 折叠开关通用绑定：toggleId 为标题元素、blockId 为被折叠的容器。
+     默认折叠、状态不记忆（每次进页面都从折叠开始）；展开后重测图表尺寸
+     —— 容器隐藏时 echarts 初始化只能拿到 0 尺寸，不重测画布仍是 0×0 */
+  function bindCollapse(toggleId, blockId) {
+    var tg = document.getElementById(toggleId);
+    if (!tg) return;
+    tg.addEventListener('click', function (ev) {
+      // 卡片标题同一行还挂着导出 / 复制按钮，点按钮时不应触发折叠
+      if (ev.target && ev.target.closest && ev.target.closest('.card-tools')) return;
+      var b = document.getElementById(blockId);
+      if (!b) return;
+      var collapsed = b.classList.toggle('collapsed');
+      var caret = tg.querySelector('.caret');
+      if (caret) caret.textContent = collapsed ? '▶' : '▼';
+      if (!collapsed && HEMA.charts.resize) HEMA.charts.resize();
+    });
+  }
+
+  // 超时数统计卡片 + 其内部「按人员统计」区块：均默认折叠
+  bindCollapse('timeoutToggle', 'timeoutCard');
+  bindCollapse('timeoutPersonToggle', 'timeoutPerson');
 
   // 透视分块：点击标题折叠 / 展开（状态记忆在 localStorage）
   document.getElementById('pivotBlocks').addEventListener('click', function (ev) {
@@ -968,8 +1463,12 @@
     var h3 = node.querySelector('h3');
     var t;
     if (h3) {
-      var ct = h3.querySelector('.card-title');
-      t = (ct || h3).textContent;   // 排除工具按钮文字
+      // 先克隆一份去掉折叠箭头与「点击展开」提示，避免混进文件名
+      var cl = (h3.querySelector('.card-title') || h3).cloneNode(true);
+      Array.prototype.forEach.call(cl.querySelectorAll('.caret, small'), function (n) {
+        n.parentNode.removeChild(n);
+      });
+      t = cl.textContent;   // 排除工具按钮文字
     } else {
       var pt = node.querySelector('.pivot-title');
       t = pt ? pt.textContent.replace(/[▼▶]/g, '').split('整体')[0].trim() : 'chart';
@@ -1030,8 +1529,14 @@
   }
 
   function copyPng(node) {
+    // IP 访问 → 非安全上下文，浏览器不提供剪贴板写入，直接给出可操作的提示
+    if (ACCESS.kind === 'IP') {
+      notice('因浏览器限制 IP 访问时无法复制图片到剪贴板，请使用' + domainLink() +
+        '；也可改用「导出为图片」', 'err');
+      return Promise.reject(new Error('IP 访问不支持复制图片到剪贴板'));
+    }
     if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || !navigator.clipboard.write) {
-      notice('当前浏览器不支持复制图片，请改用「导出为图片」。', 'err');
+      notice('当前浏览器不支持复制图片，请改用「导出为图片」', 'err');
       return Promise.reject(new Error('ClipboardItem 不可用'));
     }
     notice('正在生成图片…', 'ok');
@@ -1056,10 +1561,10 @@
     }
 
     return Promise.resolve(write).then(function () {
-      notice('图片已复制到剪贴板，可直接粘贴（Ctrl+V）。', 'ok');
+      notice('图片已复制到剪贴板，可直接粘贴（Ctrl+V）', 'ok');
     }).catch(function (e) {
       notice('复制失败：' + esc(e.message || e) +
-        '。<br>可改用「导出为图片」，或直接在图表上右键选择「复制图片」。', 'err');
+        '<br>可改用「导出为图片」，或直接在图表上右键选择「复制图片」', 'err');
       throw e;
     });
   }
@@ -1088,6 +1593,14 @@
     }
 
     var node = card, merged = null, name = null, expand = [];
+    // 卡片自身默认折叠时（超时数统计）先临时展开，否则截到的只有标题
+    var cardCollapsed = card.classList.contains('collapsed');
+    if (cardCollapsed) {
+      card.classList.remove('collapsed');
+      var cardCaret = card.querySelector('h3 .caret');
+      if (cardCaret) cardCaret.textContent = '▼';
+      if (HEMA.charts.resize) HEMA.charts.resize();
+    }
     if (sc && sc.match) {
       var blocks = [];
       Array.prototype.forEach.call(card.querySelectorAll('.pivot-block'), function (b) {
@@ -1111,10 +1624,16 @@
     }
 
     var p = (act === 'png') ? exportPng(node, name) : copyPng(node);
-    if (merged || expand.length) {
+    if (merged || expand.length || cardCollapsed) {
       Promise.resolve(p).catch(function () { }).then(function () {
         if (merged) merged.restore();
         expand.forEach(function (b) { b.classList.add('collapsed'); });
+        // 卡片本身的折叠态也要还原，截图后回到默认折叠
+        if (cardCollapsed) {
+          card.classList.add('collapsed');
+          var cc = card.querySelector('h3 .caret');
+          if (cc) cc.textContent = '▶';
+        }
       });
     }
   }
@@ -1147,27 +1666,71 @@
     }
   });
 
-  /* 顶栏口径开关（统一入口）：联动顶端卡片与「作业类型 × 小时 效率」图 */
+  /* 顶栏口径开关（统一入口）：勾选 = 按工时加权（Σ行数 ÷ Σ时长），不勾选 = 人均（各人效率算术平均）。
+     所有「按工时加权」的口径在此一处切换：KPI 卡、透视分块（含小计 / 整体）、各含合计行的表格、两张效率趋势图 */
   var weightedToggle = document.getElementById('weightedToggle');
   if (weightedToggle) weightedToggle.addEventListener('change', function () {
     weighted = weightedToggle.checked;
-    if (HEMA.charts.setWeighted) HEMA.charts.setWeighted(weighted);
-    if (current) renderKpis(current);
+    if (HEMA.charts.setWeighted) HEMA.charts.setWeighted(weighted);   // 效率趋势图 + 作业类型×小时图
+    if (current) {
+      renderKpis(current);
+      renderPivotBlocks(current);
+      renderZoneTable(current);
+      renderPersonTable(current);
+    }
   });
 
-  /* ---------- 启动：优先取服务端最新数据集 ---------- */
+  /* 顶栏日期下拉：隔天不显示前天（默认只显示数据集内最新日期），其余日期在这里手动选择 */
+  var dateSel = document.getElementById('dateSel');
+  if (dateSel) dateSel.addEventListener('change', function () {
+    curDate = dateSel.value || null;
+    if (!current) return;
+    refetch(current.id).catch(function (e) { notice('切换日期失败：' + esc(e.message || e), 'err'); });
+  });
+
+  /* ---------- 启动：只加载「含今天日期」的数据集；今天没单就不加载任何数据，只给遮罩提示 ---------- */
   injectCardTools();
+  renderAccess();
   if (typeof echarts === 'undefined') {
-    notice('图表库 ECharts 未加载（可能无外网）。页面其余内容仍可正常使用。', 'err');
+    notice('图表库 ECharts 未加载（可能无外网），页面其余内容仍可正常使用', 'err');
   }
-  fetch(API + '/latest').then(readJson).then(function (ds) {
-    render(ds);
-    loadHistory(ds.id);
-    notice('已加载服务端最新数据集（#' + ds.id + '）。', 'ok');
+  fetch(API + '/datasets').then(readJson).then(function (list) {
+    var today = todayStr();
+    // 列表按 id 倒序：只要某条数据集的日期集合里有今天就用它。今天的数据常不是最新一条
+    //（例如先传今日单、再补传历史单），只用 /latest 会误判成「今日暂无数据」
+    var hit = (list || []).filter(function (x) {
+      return String(x.dates == null ? '' : x.dates).split(',').indexOf(today) >= 0;
+    })[0];
+    if (!hit) {
+      // 今天没单：不回退加载 /latest（否则遮罩后面会偷偷渲染最近一天的数据）。
+      // 只把历史下拉填好供手动选择，并借日期最新的那条的元信息组织遮罩文案
+      var latest = (list || []).slice().sort(function (a, b) {
+        var la = String(a.dates == null ? '' : a.dates).split(',').pop() || '';
+        var lb = String(b.dates == null ? '' : b.dates).split(',').pop() || '';
+        return la < lb ? 1 : (la > lb ? -1 : 0);
+      })[0];
+      loadHistory(null, list);
+      clearView('', latest ? {
+        dates: String(latest.dates == null ? '' : latest.dates).split(',').filter(Boolean).sort(),
+        sourceFile: latest.sourceFile
+      } : null);
+      return;
+    }
+    return refetch(hit.id).then(function (ds) {
+      loadHistory(hit.id, list);
+      notice('已加载今日（' + today + '）数据集 #' + ds.id, 'ok');
+    });
   }).catch(function (err) {
-    render(SAMPLE);
+    // err.status 存在说明服务端已响应（如 404「暂无数据」），只有网络层失败才算「接口未连通」
+    var why = (err && err.message) || String(err);
     loadHistory(null);
-    notice('接口未连通：' + esc(err.message || err) + '。<br>当前 API_BASE：<b>' + esc(API) +
-      '</b>，已展示内置示例数据；上传将由服务端计算并入库。', 'err');
+    if (err && err.status) {
+      clearView(why);
+      notice(esc(why) + '（服务端已连通）', 'ok');
+    } else {
+      clearView('接口未连通：' + why + '。请确认服务端已启动。');
+      notice('接口未连通：' + esc(why) + '<br>当前 API_BASE：<b>' + esc(API) +
+        '</b>，请确认服务端已启动后再上传拣货单', 'err');
+    }
   });
 })(window);

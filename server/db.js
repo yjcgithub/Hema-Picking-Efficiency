@@ -23,6 +23,7 @@ db.exec(`
     record_count INTEGER,
     dropped      INTEGER,
     ignored      INTEGER,
+    other_store  INTEGER,
     eff          REAL,
     payload      TEXT NOT NULL,
     created_at   TEXT NOT NULL
@@ -36,8 +37,8 @@ db.exec(`
 `);
 
 // 旧库补列：recs 为解析后的原始明细（早期版本未保存），保存映射后重算依赖它；
-// ignored 为被「忽略分区」排除出统计的明细条数
-[['recs', 'TEXT'], ['ignored', 'INTEGER']].forEach(function (c) {
+// ignored 为被「忽略分区」排除出统计的明细条数；other_store 为按门店编码过滤掉的其它门店明细条数
+[['recs', 'TEXT'], ['ignored', 'INTEGER'], ['other_store', 'INTEGER']].forEach(function (c) {
   if (!db.prepare('PRAGMA table_info(datasets)').all().some(x => x.name === c[0])) {
     db.exec('ALTER TABLE datasets ADD COLUMN ' + c[0] + ' ' + c[1]);
   }
@@ -45,14 +46,15 @@ db.exec(`
 
 function insert(dataset, recs) {
   const info = db.prepare(
-    `INSERT INTO datasets (source_file, dates, record_count, dropped, ignored, eff, payload, recs, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO datasets (source_file, dates, record_count, dropped, ignored, other_store, eff, payload, recs, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     dataset.meta.sourceFile,
     dataset.meta.dates.join(','),
     dataset.meta.recordCount,
     dataset.meta.dropped,
     dataset.meta.ignored || 0,
+    dataset.meta.otherStore || 0,
     dataset.totals.eff,
     JSON.stringify(dataset),
     recs && recs.length ? JSON.stringify(recs) : null,
@@ -89,13 +91,14 @@ function findByDates(dates) {
 function overwrite(id, dataset, recs) {
   db.prepare(
     `UPDATE datasets SET source_file = ?, dates = ?, record_count = ?, dropped = ?, ignored = ?,
-            eff = ?, payload = ?, recs = ?, created_at = ? WHERE id = ?`
+            other_store = ?, eff = ?, payload = ?, recs = ?, created_at = ? WHERE id = ?`
   ).run(
     dataset.meta.sourceFile,
     dataset.meta.dates.join(','),
     dataset.meta.recordCount,
     dataset.meta.dropped,
     dataset.meta.ignored || 0,
+    dataset.meta.otherStore || 0,
     dataset.totals.eff,
     JSON.stringify(dataset),
     recs && recs.length ? JSON.stringify(recs) : null,
@@ -109,7 +112,7 @@ function overwrite(id, dataset, recs) {
 function list() {
   return db.prepare(
     `SELECT id, source_file AS sourceFile, dates, record_count AS recordCount,
-            dropped, ignored, eff, created_at AS createdAt
+            dropped, ignored, other_store AS otherStore, eff, created_at AS createdAt
        FROM datasets ORDER BY id DESC`
   ).all();
 }
@@ -155,12 +158,12 @@ function migrateRecs(recs) {
 
 // 重算所需的全部数据：原始明细 + meta 里 recs 之外的字段
 function rebuildTargets() {
-  return db.prepare('SELECT id, source_file AS sourceFile, dropped, recs FROM datasets ORDER BY id').all()
+  return db.prepare('SELECT id, source_file AS sourceFile, dropped, other_store AS otherStore, recs FROM datasets ORDER BY id').all()
     .map(r => {
-      if (!r.recs) return { id: r.id, sourceFile: r.sourceFile, dropped: r.dropped, recs: null };
+      if (!r.recs) return { id: r.id, sourceFile: r.sourceFile, dropped: r.dropped, otherStore: r.otherStore, recs: null };
       const recs = JSON.parse(r.recs);
       if (migrateRecs(recs)) db.prepare('UPDATE datasets SET recs = ? WHERE id = ?').run(JSON.stringify(recs), r.id);
-      return { id: r.id, sourceFile: r.sourceFile, dropped: r.dropped, recs };
+      return { id: r.id, sourceFile: r.sourceFile, dropped: r.dropped, otherStore: r.otherStore, recs };
     });
 }
 
@@ -169,15 +172,24 @@ function withoutRecs() {
   return db.prepare('SELECT id, source_file AS sourceFile, dropped FROM datasets WHERE recs IS NULL ORDER BY id').all();
 }
 
+// 单条数据集的原始明细（按日期筛选重算用；无明细返回 null）
+function recsOf(id) {
+  const row = db.prepare('SELECT recs FROM datasets WHERE id = ?').get(id);
+  if (!row || !row.recs) return null;
+  const recs = JSON.parse(row.recs);
+  migrateRecs(recs);
+  return recs;
+}
+
 function saveRecs(id, recs) {
   db.prepare('UPDATE datasets SET recs = ? WHERE id = ?').run(recs && recs.length ? JSON.stringify(recs) : null, id);
 }
 
 function updatePayload(id, dataset) {
   db.prepare(
-    `UPDATE datasets SET payload = ?, eff = ?, record_count = ?, dropped = ?, ignored = ?, dates = ? WHERE id = ?`
+    `UPDATE datasets SET payload = ?, eff = ?, record_count = ?, dropped = ?, ignored = ?, other_store = ?, dates = ? WHERE id = ?`
   ).run(JSON.stringify(dataset), dataset.totals.eff, dataset.meta.recordCount, dataset.meta.dropped,
-    dataset.meta.ignored || 0, dataset.meta.dates.join(','), id);
+    dataset.meta.ignored || 0, dataset.meta.otherStore || 0, dataset.meta.dates.join(','), id);
 }
 
 /* ---------- 键值设置 ---------- */
@@ -197,6 +209,6 @@ function setSetting(key, value) {
 
 module.exports = {
   insert, findByDates, overwrite, list, get, latest, remove, count,
-  rebuildTargets, withoutRecs, saveRecs, updatePayload,
+  rebuildTargets, withoutRecs, recsOf, saveRecs, updatePayload,
   getSetting, setSetting
 };

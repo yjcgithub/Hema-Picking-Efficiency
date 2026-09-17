@@ -1,14 +1,13 @@
-/* 门店拣货效率监控看板 - Node.js 后端
+/* 拣货效率计算统计工具 - Node.js 后端
    - 托管前端静态文件（../web）
    - CORS：前端与后端不同源时必需
    - BASE_PATH：反向代理子路径（如 nginx 把 https://api.yjmc.xyz/hpe/ 转到本服务）
    - POST /api/upload 上传 xlsx -> 解析并计算 -> 按时间维度覆盖/新增入库 -> 返回数据集
-   - GET  /api/latest /api/datasets /api/datasets/:id
+   - GET  /api/latest /api/datasets /api/datasets/:id（均支持 ?date=YYYY-MM-DD 只取某天）
    - GET  /api/settings 读取「拣货分区 -> 前后场分区」映射、忽略分区与数据集里出现过的分区
    - POST /api/settings 保存映射与忽略分区，并用新设置重算历史数据集
    - DELETE /api/datasets/:id
 */
-const fs = require('fs');
 const path = require('path');
 const express = require('express');
 
@@ -19,7 +18,6 @@ const db = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const WEB_DIR = path.join(__dirname, '..', 'web');
-const SEED_FILE = path.join(__dirname, '..', 'export-1785428943043.xlsx');
 // 例：BASE_PATH=/hpe 时，https://域名/hpe/api/latest 与 /api/latest 均可用
 const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
 
@@ -107,13 +105,42 @@ function rebuildAll(map, ignore) {
   db.rebuildTargets().forEach(t => {
     if (!t.recs || !t.recs.length) return;
     try {
-      db.updatePayload(t.id, compute.rebuild(t.recs, { sourceFile: t.sourceFile, dropped: t.dropped }, map, ignore));
+      db.updatePayload(t.id, compute.rebuild(t.recs,
+        { sourceFile: t.sourceFile, dropped: t.dropped, otherStore: t.otherStore }, map, ignore));
       updated.push(t.id);
     } catch (e) {
       failed.push({ id: t.id, error: e.message || String(e) });
     }
   });
   return { updated, skipped: db.withoutRecs().map(x => x.id), failed };
+}
+
+/* 出数范围：隔天不显示前天，默认只取数据集内最新日期，其他日期由前端日期下拉手动选择。
+   - 响应 meta.dates 仍是完整日期集合（下拉用），meta.date 为本次实际展示的日期
+   - 有原始明细的一律按最新口径重算：库里的 payload 是上传时算好的旧版，
+     直接返回会缺后加的字段（统计时间段 / 超时统计 / 分区人均等）
+   - 缺原始明细的老数据集、或重算失败：退回原 payload，只补 meta.date */
+function withDate(ds, date) {
+  if (!ds) return ds;
+  const dates = (ds.meta && ds.meta.dates) || [];
+  const pick = dates.indexOf(date) >= 0 ? date : (dates[dates.length - 1] || '');
+  if (!pick) return ds;
+  const recs = ds.id == null ? null : db.recsOf(ds.id);
+  if (!recs || !recs.length) {
+    ds.meta.date = pick;
+    return ds;
+  }
+  try {
+    const out = compute.rebuild(recs,
+      { sourceFile: ds.meta.sourceFile, dropped: ds.meta.dropped, otherStore: ds.meta.otherStore, dates },
+      currentMap(), currentIgnore(), pick);
+    out.id = ds.id;
+    out.meta.date = pick;
+    return out;
+  } catch (e) {
+    ds.meta.date = pick;
+    return ds;
+  }
 }
 
 router.get('/api/health', (req, res) => {
@@ -172,13 +199,17 @@ router.get('/api/datasets', (req, res) => {
 router.get('/api/latest', (req, res) => {
   const ds = db.latest();
   if (!ds) return res.status(404).json({ error: '暂无数据，请先上传拣货单' });
-  res.json(ds);
+  res.json(withDate(ds, req.query.date));
 });
 
 router.get('/api/datasets/:id', (req, res) => {
   const ds = db.get(req.params.id);
   if (!ds) return res.status(404).json({ error: '数据集不存在' });
-  res.json(ds);
+  try {
+    res.json(withDate(ds, req.query.date));
+  } catch (e) {
+    res.status(400).json({ error: e.message || String(e) });
+  }
 });
 
 // 上传：raw body 传 xlsx 字节，文件名通过 ?name= 或 x-filename 头传入
@@ -224,20 +255,8 @@ app.use(function (req, res) {
   });
 });
 
-// 直接运行时才启动监听与示例数据播种（被 require 时只导出 app，便于测试）
+// 直接运行时才启动监听（被 require 时只导出 app，便于测试）
 if (require.main === module) {
-  // 首次启动：若库为空且有示例导出文件，则初始化一条
-  if (db.count() === 0 && fs.existsSync(SEED_FILE)) {
-    try {
-      const built = compute.buildFromBuffer(fs.readFileSync(SEED_FILE), path.basename(SEED_FILE), currentMap(), currentIgnore());
-      db.insert(built.dataset, built.recs);
-      console.log('已用示例文件初始化数据集：' + path.basename(SEED_FILE) +
-        '（有效明细 ' + built.dataset.meta.recordCount + ' 条，综合效率 ' + built.dataset.totals.eff + ' 行/h）');
-    } catch (e) {
-      console.warn('示例数据初始化失败：' + e.message);
-    }
-  }
-
   app.listen(PORT, '0.0.0.0', () => {
     console.log('服务已启动： http://localhost:' + PORT +
       (BASE_PATH ? '  （子路径 ' + BASE_PATH + '）' : '') + '  静态目录 ' + WEB_DIR);

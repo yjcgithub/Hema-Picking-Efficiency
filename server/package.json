@@ -2,7 +2,7 @@
   "name": "hema-picking-efficiency-server",
   "version": "1.0.0",
   "private": true,
-  "description": "门店拣货效率监控看板 - Node.js 后端（解析 xlsx / 计算效率 / SQLite 存历史 / 托管前端）",
+  "description": "拣货效率计算统计工具 - Node.js 后端（解析 xlsx / 计算效率 / SQLite 存历史 / 托管前端）",
   "main": "index.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env index.js",
