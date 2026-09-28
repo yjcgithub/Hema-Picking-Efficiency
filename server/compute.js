@@ -393,6 +393,9 @@ function buildDataset(recs, meta) {
       .sort((a, b) => b.count - a.count);
     const duties = tally(dutyOf, tRecs);
     const types = tally(typeOf, tRecs);
+    // 按分区：超时单的分区分布（用于「超时 × 分区」图表）
+    const zoneOf = r => r.zone || CFG.UNMATCHED_TYPE;
+    const zones = tally(zoneOf, tRecs);
     // 按人员：只列出有超时单的人员（无超时的不必占表）；超时率 = 该人超时明细 ÷ 该人全部明细
     const tByPerson = groupBy(tRecs, r => r.person);
     const allByPerson = groupBy(recs, r => r.person);
@@ -411,6 +414,7 @@ function buildDataset(recs, meta) {
       hours,
       duties,
       types,
+      zones,
       byPerson,
       hourly: hours.map(h => tRecs.filter(r => r.hour === h).length),
       series: duties.map(d => ({
@@ -420,6 +424,10 @@ function buildDataset(recs, meta) {
       typeSeries: types.map(d => ({
         name: d.name,
         data: hours.map(h => tRecs.filter(r => r.hour === h && typeOf(r) === d.name).length)
+      })),
+      zoneSeries: zones.map(z => ({
+        name: z.name,
+        data: hours.map(h => tRecs.filter(r => r.hour === h && zoneOf(r) === z.name).length)
       }))
     };
   }
@@ -690,16 +698,20 @@ function buildFromMatrix(matrix, meta, map) {
     const h0 = t0.getHours();
     // 工作时间图用：当日起始分钟数 + 时长（分钟），保证「完成 − 开始」与 hrs 一致（精确到分钟）
     const t0m = Math.round(h0 * 60 + t0.getMinutes() + t0.getSeconds() / 60);
-    recs.push({
+    const rec = {
       date: dateStr(t0), hour: h0, slot: h0 + (t0.getMinutes() >= 30 ? 0.5 : 0),
       t0m, t1m: t0m + Math.round(hrs * 60),
       jobType: jobType(zone, orderType, map),
       zone, orderType, code: zoneCode(zone),
+      no: String(no).trim(),          // 拣货单号：增量获取合并去重的键
       person: String(person).trim(),
       rows: toNumber(row[idx['拣货行数']]), hours: hrs,
       timeout: tmIdx == null ? null : isTimeout(row[tmIdx]),
       duty: dutyIdx == null ? '' : String(row[dutyIdx] == null ? '' : row[dutyIdx]).trim()
-    });
+    };
+    // 来源标记：实时接口的明细才参与「增量追平」判定，手动上传的 xlsx 不会挡住增量获取
+    if (meta && meta.ums) rec.ums = true;
+    recs.push(rec);
   }
   if (!recs.length) {
     if (otherStore) {
@@ -745,4 +757,111 @@ function rebuild(recs, meta, map, ignore, date) {
   });
 }
 
-module.exports = { buildFromBuffer, buildFromMatrix, buildDataset, rebuild, jobType, zoneCode };
+/* ---------- 实时接口（ums listPickOrderForB2C）解析 ----------
+   接口字段与 xlsx「门店视角：拣货单」导出列一一对应，这里拼成同样的表头矩阵后
+   直接复用 buildFromMatrix，口径（门店筛选 / 丢弃计数 / 时间维度）与上传完全一致 */
+
+const UMS_COLUMNS = ['拣货单号', '拣货人', CFG.TIME_COLUMN, '拣货完成时间', '拣货行数',
+  '拣货分区', '拣货单类型', CFG.TIMEOUT_COLUMN, CFG.TIMEOUT_DUTY_COLUMN];
+
+function umsRow(it) {
+  return [
+    it.code,
+    it.operatorName || it.partnerName || it.workNumber,
+    it.startPickingDate,
+    it.endPickingDate,
+    it.pickLineNum,
+    it.partitionText || it.partitionCode,
+    it.pickOrderType,
+    it.pickTimeOutFlag ? CFG.TIMEOUT_YES : '否',
+    CFG.UMS_DUTY_MAP[String(it.overtimeJudgment == null ? '' : it.overtimeJudgment).trim()] || ''
+  ];
+}
+
+/* 取出明细：兼容单页响应 / 多页响应数组 / {list:[…]}
+   同一拣货单（id 或单号相同）只保留一条：翻页期间数据在变会产生重复页，重复计入会翻倍 */
+function umsItems(payload) {
+  const pages = Array.isArray(payload) ? payload : [payload];
+  const seen = {}, out = [];
+  pages.forEach(p => {
+    const list = (p && p.info && p.info.list) || (p && p.list) || [];
+    list.forEach(it => {
+      const key = String(it.id != null ? it.id : it.code);
+      if (seen[key]) return;
+      seen[key] = 1;
+      out.push(it);
+    });
+  });
+  return out;
+}
+
+function buildFromUms(payload, meta, map, ignore) {
+  const items = umsItems(payload);
+  if (!items.length) throw new Error('接口未返回任何拣货单明细（请确认时间段内有已完成的拣货单）');
+  const matrix = [UMS_COLUMNS].concat(items.map(umsRow));
+  const built = buildFromMatrix(matrix, { sourceFile: (meta && meta.sourceFile) || '实时接口', ums: true }, map);
+  const kept = splitIgnored(built.recs, ignore);
+  if (!kept.recs.length) {
+    throw new Error('全部有效明细的分区都被「忽略分区」排除，无数据可统计（请先在「分区设置」中取消忽略）');
+  }
+  return {
+    dataset: buildDataset(kept.recs, {
+      sourceFile: (meta && meta.sourceFile) || '实时接口',
+      dropped: built.meta.dropped, ignored: kept.ignored,
+      otherStore: built.meta.otherStore,
+      dates: dateSetOf(built.recs)
+    }),
+    recs: built.recs
+  };
+}
+
+/* 增量合并：把新拉取的明细并入已有明细，再按当前设置重建数据集。
+   键 = 拣货单号 + 拣货分区（同一单跨分区导出为多行，单号单独作键会误合并），同键以新数据覆盖。
+   opts.replaceDates（整段抓取完整时的日期集合）：这些日期的旧明细整条替换 ——
+   手动上传的旧数据没有单号、无法按单号合并，留着会与新抓到的同一单重复计数 */
+function mergeInto(oldRecs, built, prevMeta, ignore, opts) {
+  const key = r => {
+    const no = r && r.no != null ? String(r.no).trim() : '';
+    return no ? no + '\u0001' + String(r.zone == null ? '' : r.zone) : '';
+  };
+  const replace = {};
+  ((opts && opts.replaceDates) || []).forEach(d => { replace[d] = 1; });
+
+  const seen = {}, merged = [];
+  let replaced = 0;
+  (oldRecs || []).forEach(r => {
+    if (replace[r.date]) { replaced++; return; }
+    const k = key(r);
+    if (k && k in seen) return;
+    if (k) seen[k] = merged.length;
+    merged.push(r);
+  });
+
+  let added = 0;
+  (built.recs || []).forEach(r => {
+    const k = key(r);
+    if (k && k in seen) merged[seen[k]] = r;
+    else { if (k) seen[k] = merged.length; merged.push(r); added++; }
+  });
+
+  const kept = splitIgnored(merged, ignore);
+  if (!kept.recs.length) throw new Error('全部有效明细的分区都被「忽略分区」排除，无数据可统计');
+  const newMeta = built.dataset.meta;
+  return {
+    dataset: buildDataset(kept.recs, {
+      // 旧上传数据被整条替换后，数据来源改为本次实时接口
+      sourceFile: replaced ? newMeta.sourceFile : (prevMeta.sourceFile || newMeta.sourceFile),
+      dropped: (prevMeta.dropped || 0) + (newMeta.dropped || 0),
+      otherStore: (prevMeta.otherStore || 0) + (newMeta.otherStore || 0),
+      ignored: kept.ignored,
+      dates: dateSetOf(merged)
+    }),
+    recs: merged,
+    added: added,
+    replaced: replaced
+  };
+}
+
+module.exports = {
+  buildFromBuffer, buildFromMatrix, buildFromUms, buildDataset, mergeInto, rebuild, jobType, zoneCode
+};

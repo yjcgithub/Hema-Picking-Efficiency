@@ -60,6 +60,7 @@ function insert(dataset, recs) {
     recs && recs.length ? JSON.stringify(recs) : null,
     new Date().toISOString()
   );
+  knownCache = null;
   return Number(info.lastInsertRowid);
 }
 
@@ -87,6 +88,24 @@ function findByDates(dates) {
   return null;
 }
 
+/* 日期有交集的最新一条数据集（增量获取合并用）：
+   增量只取到区间内的部分日期时，时间维度会与已有数据集略有出入，
+   这里退一步按「有交集」找合并目标，避免把部分数据另起一条数据集 */
+function findByOverlap(dates) {
+  const want = {};
+  (dates || []).forEach(d => {
+    const s = String(d == null ? '' : d).trim();
+    if (s) want[s] = 1;
+  });
+  if (!Object.keys(want).length) return null;
+  const rows = db.prepare('SELECT id, source_file AS sourceFile, dates FROM datasets ORDER BY id DESC').all();
+  for (const r of rows) {
+    const ds = String(r.dates == null ? '' : r.dates).split(',');
+    if (ds.some(d => d && want[d.trim()])) return r;
+  }
+  return null;
+}
+
 // 覆盖更新：用新上传的数据完全替换该拣货单的全部字段（保留原 id，历史引用与前端选中态不变）
 function overwrite(id, dataset, recs) {
   db.prepare(
@@ -105,6 +124,7 @@ function overwrite(id, dataset, recs) {
     new Date().toISOString(),
     id
   );
+  knownCache = null;
   return id;
 }
 
@@ -133,7 +153,9 @@ function latest() {
 }
 
 function remove(id) {
-  return db.prepare('DELETE FROM datasets WHERE id = ?').run(id).changes;
+  const n = db.prepare('DELETE FROM datasets WHERE id = ?').run(id).changes;
+  knownCache = null;
+  return n;
 }
 
 function count() {
@@ -141,6 +163,23 @@ function count() {
 }
 
 /* ---------- 原始明细（重算用） ---------- */
+
+/* 实时接口已入库的拣货单号（增量获取的「追平点」判定：整页单号都已入库即认为追平）
+   只统计实时接口来的明细（rec.ums）：手动上传的 xlsx 里没有单号、也不该挡住增量获取
+   缓存随任意写操作失效，避免翻页时每页都解析全部明细 */
+let knownCache = null;
+
+function knownPickNos() {
+  if (knownCache) return knownCache;
+  const set = new Set();
+  for (const r of db.prepare('SELECT recs FROM datasets WHERE recs IS NOT NULL').all()) {
+    let recs;
+    try { recs = JSON.parse(r.recs); } catch (e) { continue; }
+    for (const x of recs) if (x && x.ums && x.no) set.add(String(x.no));
+  }
+  knownCache = set;
+  return set;
+}
 
 // 口径变更迁移：早期明细把「任务子类型」存在 sub 键下（一体化值为「拆零拣打一体」），
 // 现按「拣货单类型」判定（一体化值为「拣打一体」），读取时补齐并在库中固化
@@ -183,6 +222,7 @@ function recsOf(id) {
 
 function saveRecs(id, recs) {
   db.prepare('UPDATE datasets SET recs = ? WHERE id = ?').run(recs && recs.length ? JSON.stringify(recs) : null, id);
+  knownCache = null;
 }
 
 function updatePayload(id, dataset) {
@@ -190,6 +230,7 @@ function updatePayload(id, dataset) {
     `UPDATE datasets SET payload = ?, eff = ?, record_count = ?, dropped = ?, ignored = ?, other_store = ?, dates = ? WHERE id = ?`
   ).run(JSON.stringify(dataset), dataset.totals.eff, dataset.meta.recordCount, dataset.meta.dropped,
     dataset.meta.ignored || 0, dataset.meta.otherStore || 0, dataset.meta.dates.join(','), id);
+  knownCache = null;
 }
 
 /* ---------- 键值设置 ---------- */
@@ -208,7 +249,7 @@ function setSetting(key, value) {
 }
 
 module.exports = {
-  insert, findByDates, overwrite, list, get, latest, remove, count,
+  insert, findByDates, findByOverlap, overwrite, list, get, latest, remove, count, knownPickNos,
   rebuildTargets, withoutRecs, recsOf, saveRecs, updatePayload,
   getSetting, setSetting
 };

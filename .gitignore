@@ -6,6 +6,9 @@ node_modules/
 # 日志文件
 *.log
 
+# 静态资源指纹构建产物（由 server/build.js 生成，每次 npm start 自动重建）
+dist/
+
 # 临时调试脚本与中间产物（如 tmp_scan.js、tmp_probe*.json）
 tmp_*
 *.tmp

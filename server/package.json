@@ -6,6 +6,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env index.js",
+    "build": "node build.js",
     "test": "node --test"
   },
   "engines": {

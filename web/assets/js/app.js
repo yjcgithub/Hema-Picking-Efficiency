@@ -87,6 +87,8 @@
   noticeEl.addEventListener('click', function (ev) {
     if (ev.target && ev.target.classList.contains('notice-close')) {
       if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
+      // 上传进行中手动关闭：本次上传不再刷新提示条（结束后仍会给出最终结果）
+      if (upState) upState.hidden = true;
       noticeEl.className = 'notice hidden';
       noticeEl.innerHTML = '';
     }
@@ -95,8 +97,39 @@
   /* ---------- KPI：第一行 综合效率 + 各作业类型；第二行 规模指标（更小） ---------- */
   function kpiCard(c) {
     return '<div class="kpi"><div class="label">' + c.label + '</div>' +
-      '<div class="value">' + c.value + '<small>' + c.unit + '</small></div>' +
+      '<div class="value" data-num="' + esc(String(c.raw != null ? c.raw : c.value)) + '">' +
+        c.value + '<small>' + c.unit + '</small></div>' +
       '<div class="foot">' + c.foot + '</div></div>';
+  }
+
+  /* KPI 数字跳动动画：把 data-num 目标值在 500ms 内从 0 过渡到目标值 */
+  function animateKpiNumbers() {
+    var els = document.querySelectorAll('.kpi .value[data-num]');
+    var DURATION = 520;
+    for (var i = 0; i < els.length; i++) {
+      (function (el) {
+        var raw = el.getAttribute('data-num');
+        if (!raw) return;
+        var target = parseFloat(String(raw).replace(/,/g, ''));
+        if (isNaN(target)) return;
+        var small = el.querySelector('small');
+        var unitHtml = small ? small.outerHTML : '';
+        var isInt = raw.indexOf('.') < 0;
+        el.classList.add('counting');
+        var started = null;
+        function tick(ts) {
+          if (!started) started = ts;
+          var p = Math.min(1, (ts - started) / DURATION);
+          // ease-out-expo: 快起慢停
+          var ease = 1 - Math.pow(1 - p, 3);
+          var cur = target * ease;
+          el.innerHTML = (isInt ? Math.round(cur).toLocaleString() : cur.toFixed(2)) + unitHtml;
+          if (p < 1) requestAnimationFrame(tick);
+          else { el.innerHTML = (isInt ? target.toLocaleString() : target.toFixed(2)) + unitHtml; el.classList.remove('counting'); }
+        }
+        requestAnimationFrame(tick);
+      })(els[i]);
+    }
   }
 
   /* 人均（不加权）口径取数：各人「总计效率」的算术平均（服务端已算好，前端只取数） */
@@ -115,6 +148,7 @@
     var main = [
       {
         label: '综合效率', value: fmt(useAvg ? all.avg : t.eff), unit: '行/h',
+        raw: useAvg ? all.avg : t.eff,
         foot: useAvg ? '全员人均（' + all.n + ' 人）' : '全部作业类型加权'
       }
     ];
@@ -127,22 +161,24 @@
       var color = colors[j.name] || '#64748b';
       var ps = personMean(d, j.name);
       var scale = j.rows.toLocaleString() + ' 行 · ' + fmt(j.hours, 2) + ' h';
+      var val = !weighted && ps.avg != null ? ps.avg : j.eff;
       main.push({
         label: '<span class="dot" style="background:' + color + '"></span>' + esc(j.name),
-        value: fmt(!weighted && ps.avg != null ? ps.avg : j.eff), unit: '行/h',
+        value: fmt(val), unit: '行/h', raw: val,
         foot: !weighted && ps.avg != null ? ps.n + ' 人平均 · ' + scale : scale
       });
     });
     var sub = [
-      { label: '拣货行数', value: t.rows.toLocaleString(), unit: '行', foot: '有效明细合计' },
-      { label: '拣货人数', value: t.persons, unit: '人', foot: '参与拣货的人员' },
-      { label: '有效明细', value: d.meta.recordCount.toLocaleString(), unit: '条',
+      { label: '拣货行数', value: t.rows.toLocaleString(), unit: '行', raw: t.rows, foot: '有效明细合计' },
+      { label: '拣货人数', value: t.persons, unit: '人', raw: t.persons, foot: '参与拣货的人员' },
+      { label: '有效明细', value: d.meta.recordCount.toLocaleString(), unit: '条', raw: d.meta.recordCount,
         foot: '丢弃 ' + d.meta.dropped + ' 条（缺人/缺时间）' +
           (d.meta.otherStore ? '，已过滤 ' + d.meta.otherStore + ' 条（非本门店）' : '') +
           (d.meta.ignored ? '，已忽略 ' + d.meta.ignored + ' 条（分区设置）' : '') }
     ];
     document.getElementById('kpis').innerHTML = main.map(kpiCard).join('');
     document.getElementById('kpisSub').innerHTML = sub.map(kpiCard).join('');
+    animateKpiNumbers();
   }
 
   /* ---------- 表格排序（所有表格表头均可点击切换升/降序） ---------- */
@@ -226,12 +262,15 @@
   /* 达标值（行/h）：分块有达标线时按达标线分档，否则按块内相对色阶 */
   var TARGETS = { '后场合流': 280 };
 
-  /* 色阶锚点：沿用原配色（偏低暖色 → 达标绿），只把分档改为连续过渡 */
+  /* 色阶锚点：与「分区 × 小时效率热力图」visualMap.inRange.color 一致（7 档：红→黄→绿） */
   var HEAT_STOPS = [
-    { r: 0.0, rgb: [254, 226, 226] },   // #fee2e2 偏低
-    { r: 0.6, rgb: [254, 249, 195] },   // #fef9c3
-    { r: 0.8, rgb: [236, 252, 203] },   // #ecfccb
-    { r: 1.0, rgb: [220, 252, 231] }    // #dcfce7 达标
+    { r: 0.000, rgb: [254, 226, 226] },   // #fee2e2
+    { r: 0.167, rgb: [254, 243, 199] },   // #fef3c7
+    { r: 0.333, rgb: [254, 249, 195] },   // #fef9c3
+    { r: 0.500, rgb: [217, 249, 157] },   // #d9f99d
+    { r: 0.667, rgb: [167, 243, 208] },   // #a7f3d0
+    { r: 0.833, rgb: [110, 231, 183] },   // #6ee7b7
+    { r: 1.000, rgb: [52, 211, 153] }     // #34d399
   ];
 
   /* 平均值 / 中位数所在行右上角的标注 */
@@ -464,7 +503,43 @@
     table.innerHTML = theadHtml(cols, st) + '<tbody>' + body + '</tbody>';
   }
 
-  /* ---------- 指标小卡 ---------- */
+  /* ---------- 超时 × 分区统计 ---------- */
+  /* 分区配色表（与 charts.js ZONE_PALETTE 保持一致） */
+  var ZONE_PALETTE = ['#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed',
+    '#0891b2', '#db2777', '#65a30d', '#ea580c', '#4f46e5', '#0d9488', '#b91c1c'];
+
+  function renderTimeoutZone(d) {
+    var table = document.getElementById('tableTimeoutZone');
+    if (!table) return;
+    var to = (d && d.timeout) || null;
+    if (!to || !to.zones || !to.zones.length) { table.innerHTML = ''; return; }
+    var zones = to.zones || [];
+    var total = to.total || 0;
+    // 为每个分区分配颜色（按超时单数降序，与图表一致）
+    var zoneColorMap = {};
+    zones.forEach(function (z, i) { zoneColorMap[z.name] = ZONE_PALETTE[i % ZONE_PALETTE.length]; });
+
+    var st = sortState('timeoutZone', 'count', -1);
+    var cols = [
+      { key: 'name', label: '拣货分区', text: 1 },
+      { key: 'count', label: '超时单数' },
+      { key: 'share', label: '占比' }
+    ];
+    var getters = {
+      name: function (r) { return r.name; },
+      count: function (r) { return r.count; },
+      share: function (r) { return total ? r.count / total : 0; }
+    };
+    var list = sortRows(zones.slice(), st, getters);
+    var body = list.map(function (r) {
+      var color = zoneColorMap[r.name] || '#64748b';
+      return '<tr><td><span class="dot" style="background:' + color + ';width:8px;height:8px;margin-right:6px"></span>' +
+        esc(r.name) + '</td><td>' + r.count + '</td><td>' +
+        fmt(total ? r.count / total * 100 : 0, 1) + '%</td></tr>';
+    }).join('');
+    body += '<tr class="total"><td>合计</td><td>' + total + '</td><td>100%</td></tr>';
+    table.innerHTML = theadHtml(cols, st) + '<tbody>' + body + '</tbody>';
+  }
 
   /* 指标小卡（分布 / 集中度卡片顶部一行） */
   function chip(k, v, unit, tip) {
@@ -787,10 +862,27 @@
     renderDist(d);
     renderRowsStat(d);
     renderTimeoutPerson(d);
+    renderTimeoutZone(d);
     sortTimelineRows(d);   // 图表与下方「人·日 班次明细」共用同一排序（就地排序，保持数组引用）
     renderTimeline(d);
     HEMA.charts.render(d);
     syncGate(d);           // 数据集内没有今天的日期时，提示「今日暂无数据」
+    animateTableRows();    // 表格行交错入场
+  }
+
+  /* 表格行交错入场动画：给 tbody 内非合计行按顺序设置 --row-i，触发 CSS .row-in */
+  function animateTableRows() {
+    var tbodies = document.querySelectorAll('table tbody');
+    for (var t = 0; t < tbodies.length; t++) {
+      var rows = tbodies[t].querySelectorAll('tr:not(.total)');
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].classList.remove('row-in');
+        rows[i].style.setProperty('--row-i', String(i));
+        // 强制 reflow 以重新触发 animation
+        void rows[i].offsetWidth;
+        rows[i].classList.add('row-in');
+      }
+    }
   }
 
   /* 空视图（服务端尚无数据 / 数据集被全部删除 / 接口未连通 / 有数据集但都不含今天）：
@@ -822,7 +914,7 @@
       var tpbCaret = tpb.querySelector('.caret');
       if (tpbCaret) tpbCaret.textContent = '▶';
     }
-    ['chartHour', 'chartJtHour', 'chartDist', 'chartTimeline',
+    ['chartJtHour', 'chartDist', 'chartTimeline',
       'chartTimeout', 'chartTimeoutType', 'chartTimeoutPerson', 'chartTimeoutPersonType'].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el || typeof echarts === 'undefined') return;
@@ -912,38 +1004,512 @@
   });
 
   /* ---------- 上传（服务端解析+计算） ---------- */
+  /* 上传提示条：内嵌进度条 + 明细（大小 / 已传 / 速度 / 耗时）。
+     fetch 无法上报上传进度，故上传改用 XHR；上传期间提示条常驻不自动消失。
+     客户端上传阶段按字节推进，传完后进入「服务端解析计算」阶段（不确定进度）。 */
+  var upState = null;   // 当前上传状态；非空 = 有上传正在进行
+
+  function fmtBytes(n) {
+    if (!n) return '0 B';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+  }
+
+  function upPaint(t) {
+    if (upState !== t || t.hidden) return;
+    var sec = (Date.now() - t.startedAt) / 1000;
+    var computing = t.phase === 'compute';
+    var pct = computing ? 100 : t.pct;
+    var items = ['大小 ' + fmtBytes(t.size)];
+    if (computing) {
+      items.push('已上传 ' + fmtBytes(t.size), '服务端解析计算中…');
+    } else if (t.loaded) {
+      items.push('已上传 ' + fmtBytes(t.loaded));
+      if (sec > 0.3) items.push('速度 ' + fmtBytes(t.loaded / sec) + '/s');
+    }
+    if (sec > 0.3) items.push('已用 ' + sec.toFixed(1) + ' s');
+    noticeEl.className = 'notice ok upload';
+    noticeEl.innerHTML =
+      '<button type="button" class="notice-close" title="关闭">×</button>' +
+      '<div class="up-head">' +
+        '<span class="up-title">' + (computing ? '上传完成，正在由服务端计算 ' : '正在上传并计算 ') +
+          '<b>' + esc(t.name) + '</b></span>' +
+        '<span class="up-pct">' + pct + '%</span>' +
+      '</div>' +
+      '<div class="up-bar' + (computing ? ' indet' : '') + '"><i style="width:' + pct + '%"></i></div>' +
+      '<div class="up-meta">' + items.map(function (s) {
+        return '<span>' + s + '</span>';
+      }).join('') + '</div>';
+  }
+
   function upload(file) {
     if (file.size > 100 * 1024 * 1024) { notice('文件过大（>100MB）', 'err'); return; }
-    notice('正在上传并由服务端计算 ' + esc(file.name) + ' …', 'ok');
-    fetch(API + '/upload?name=' + encodeURIComponent(file.name), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: file
-    }).then(readJson).then(function (j) {
-      // 上传响应含文件内全部日期；这里按默认口径重新拉取（只显示最新一天，其余由日期下拉手动选择）
-      var hasToday = (j.meta.dates || []).indexOf(todayStr()) >= 0;
-      // 上传前若正被「今日暂无数据」遮罩挡住，且这份数据含今天：渲染后播放遮罩退场 + 看板入场动画
-      introPending = !gateMask.classList.contains('hidden') && hasToday;
-      // 明确导入了不含今天的数据集：本次访问内不要让遮罩挡住刚导入的这份数据
-      if (!hasToday) gateDismissed = true;
-      curDate = null;
-      refetch(j.id);
-      loadHistory(j.id);
-      notice('已计算完成并' + (j.mode === 'overwrite' ? '覆盖更新' : '新增入库') +
-        '（数据集 #' + j.id + '）：有效明细 ' +
-        j.meta.recordCount.toLocaleString() + ' 条，丢弃 ' + j.meta.dropped +
-        ' 条' + (j.meta.otherStore ? '，已过滤 ' + j.meta.otherStore + ' 条（非本门店）' : '') +
-        (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
-        '，综合效率 ' + fmt(j.totals.eff) + ' 行/h', 'ok');
-    }).catch(function (err) {
-      notice('上传失败：' + esc(err.message || err), 'err');
-    });
+    var t = {
+      name: file.name, size: file.size, phase: 'upload',
+      pct: 0, loaded: 0, startedAt: Date.now(), hidden: false
+    };
+    upState = t;
+    upPaint(t);
+    // 定时重绘：让「已用时长」在上传与计算阶段都持续走动
+    var tick = setInterval(function () { upPaint(t); }, 250);
+    function stop() { clearInterval(tick); if (upState === t) upState = null; }
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', API + '/upload?name=' + encodeURIComponent(file.name));
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      t.loaded = e.loaded;
+      t.pct = Math.min(99, Math.round(e.loaded / e.total * 100));  // 留出最后 1% 给服务端计算阶段
+      upPaint(t);
+    };
+    // 请求体发送完毕即进入计算阶段（服务端读完文件后才开始解析计算、再返回响应）
+    xhr.upload.onload = function () {
+      t.phase = 'compute'; t.loaded = t.size; t.pct = 100;
+      upPaint(t);
+    };
+    xhr.onerror = function () {
+      stop();
+      notice('上传失败：无法连接服务端（' + esc(API) + '），请确认后端已启动', 'err');
+    };
+    xhr.onload = function () {
+      stop();
+      // 复用 readJson 的错误文案：把 XHR 包成 fetch 的 Response 形状
+      var res = {
+        ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, url: API + '/upload',
+        text: function () { return Promise.resolve(xhr.responseText); }
+      };
+      readJson(res).then(function (j) {
+        // 上传响应含文件内全部日期；这里按默认口径重新拉取（只显示最新一天，其余由日期下拉手动选择）
+        var hasToday = (j.meta.dates || []).indexOf(todayStr()) >= 0;
+        // 上传前若正被「今日暂无数据」遮罩挡住，且这份数据含今天：渲染后播放遮罩退场 + 看板入场动画
+        introPending = !gateMask.classList.contains('hidden') && hasToday;
+        // 明确导入了不含今天的数据集：本次访问内不要让遮罩挡住刚导入的这份数据
+        if (!hasToday) gateDismissed = true;
+        curDate = null;
+        refetch(j.id);
+        loadHistory(j.id);
+        notice('已计算完成并' + (j.mode === 'overwrite' ? '覆盖更新' : '新增入库') +
+          '（数据集 #' + j.id + '）：有效明细 ' +
+          j.meta.recordCount.toLocaleString() + ' 条，丢弃 ' + j.meta.dropped +
+          ' 条' + (j.meta.otherStore ? '，已过滤 ' + j.meta.otherStore + ' 条（非本门店）' : '') +
+          (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
+          '，综合效率 ' + fmt(j.totals.eff) + ' 行/h', 'ok');
+      }).catch(function (err) {
+        notice('上传失败：' + esc(err.message || err), 'err');
+      });
+    };
+    xhr.send(file);
   }
 
   document.getElementById('fileInput').addEventListener('change', function (ev) {
     var f = ev.target.files && ev.target.files[0];
     if (f) upload(f);
     ev.target.value = '';
+  });
+
+  /* ---------- 实时获取（拣货单接口 listPickOrderForB2C） ----------
+     由后端带 Cookie 翻页拉取，走 compute.buildFromUms，入库口径与上传 xlsx 完全一致。
+     分页：index=0 为倒序第一页（最新），按 totalNum 自动探测总页数；
+     增量：从最新页往回取，遇到「整页单号都已入库」即停，只并入新增明细 */
+  var umsMask = document.getElementById('umsMask');
+  var umsSum = document.getElementById('umsSum');
+  var umsMetaEl = document.getElementById('umsMeta');
+  var umsBar = document.getElementById('umsBar');
+  var umsStartBtn = document.getElementById('umsStart');
+  var umsStartDate = document.getElementById('umsStartDate');
+  var umsEndDate = document.getElementById('umsEndDate');
+  var umsCookieWrap = document.getElementById('umsCookieWrap');
+  var umsCookieInput = document.getElementById('umsCookie');
+  var umsCookieState = document.getElementById('umsCookieState');
+  var umsCookieToggle = document.getElementById('umsCookieToggle');
+  var umsChip = document.getElementById('umsChip');
+  var umsIncChk = document.getElementById('umsIncremental');
+  var umsNumSel = document.getElementById('umsNum');
+  var umsAutoOn = document.getElementById('umsAutoOn');
+  var umsAutoMin = document.getElementById('umsAutoMin');
+  var umsAutoStateEl = document.getElementById('umsAutoState');
+  var umsCfg = { cookieSet: false, num: 100, numChoices: [50, 100, 200], auto: {}, lastFetch: null };
+  var umsRunning = false, umsT0 = 0, umsLast = null, umsTick = null, umsCookieShown = false;
+  var umsPrev = null;   // 上一次获取结果（成功 / 失败），首页角标据它显示
+
+  function umsIncremental() { return !!(umsIncChk && umsIncChk.checked); }
+
+  // 弹窗内的「每页条数 / 自动获取」设置与状态
+  function umsAutoPaint() {
+    var auto = umsCfg.auto || {};
+    var choices = umsCfg.numChoices || [50, 100, 200];
+    if (umsNumSel.options.length !== choices.length) {
+      umsNumSel.innerHTML = choices.map(function (n) { return '<option value="' + n + '">' + n + ' 条</option>'; }).join('');
+    }
+    umsNumSel.value = String(umsCfg.num || 100);
+    umsAutoOn.checked = !!auto.enabled;
+    if (document.activeElement !== umsAutoMin) umsAutoMin.value = auto.intervalMin || 30;
+
+    if (!umsCfg.cookieSet) {
+      umsAutoStateEl.className = 'ums-auto-state err';
+      umsAutoStateEl.textContent = '未保存 Cookie，自动获取不会执行';
+    } else if (!auto.enabled) {
+      umsAutoStateEl.className = 'ums-auto-state';
+      umsAutoStateEl.textContent = '自动获取已关闭';
+    } else if (!auto.at) {
+      umsAutoStateEl.className = 'ums-auto-state';
+      umsAutoStateEl.textContent = '等待首次执行（每 ' + (auto.intervalMin || 30) + ' 分钟）';
+    } else if (auto.ok) {
+      umsAutoStateEl.className = 'ums-auto-state ok';
+      umsAutoStateEl.textContent = '上次自动获取 ' + umsAgo(auto.at) + ' · 本次新增 ' + (auto.added || 0) + ' 条';
+    } else {
+      umsAutoStateEl.className = 'ums-auto-state err';
+      umsAutoStateEl.textContent = '上次自动获取失败 ' + umsAgo(auto.at) + '：' + auto.error;
+    }
+  }
+
+  // 保存设置（Cookie / 每页条数 / 自动获取），成功后用服务端返回值重绘
+  function umsSaveCfg(body) {
+    return fetch(API + '/ums/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(readJson).then(function (j) {
+      umsCfg = j;
+      umsSetCookieState(j.cookieSet);
+      umsAutoPaint();
+      return j;
+    });
+  }
+
+  // 距上次获取的时长
+  function umsAgo(iso) {
+    var t = Date.parse(iso);
+    if (!t) return '—';
+    var s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return s + ' 秒前';
+    if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+    if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+    return Math.floor(s / 86400) + ' 天前';
+  }
+
+  function umsClock(iso) {
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  // 首页角标：获取中显示进度与已用时长；空闲显示「上次获取 X 前 · N 条」
+  function umsChipPaint() {
+    if (!umsChip) return;
+    var autoTip = umsCfg.auto && umsCfg.auto.enabled ? '　自动获取：每 ' + umsCfg.auto.intervalMin + ' 分钟' : '';
+    if (autoTip && umsPrev && umsPrev.at) {
+      var left = Math.round((Date.parse(umsPrev.at) + umsCfg.auto.intervalMin * 60000 - Date.now()) / 1000);
+      autoTip += left > 0 ? '（' + left + ' 秒后）' : '（即将执行）';
+    }
+    if (umsStale) {                                  // 页面 JS 是旧版本：提示刷新，避免显示与数据不符
+      umsChip.className = 'ums-chip warn';
+      umsChip.textContent = '有新版本 · 点击刷新';
+      umsChip.title = '页面运行的仍是旧版本前端（' + umsBuild + '），点此刷新加载最新版本';
+      return;
+    }
+    if (umsRunning && umsLast) {
+      var sec = ((Date.now() - umsT0) / 1000).toFixed(0);
+      umsChip.className = 'ums-chip run';
+      umsChip.textContent = '获取中 · 已用 ' + sec + 's';
+      umsChip.title = '点击查看实时获取进度';
+      return;
+    }
+    if (umsPrev && umsPrev.ok) {
+      umsChip.className = 'ums-chip ok';
+      umsChip.textContent = '上次获取 ' + umsAgo(umsPrev.at) + ' · ' + (umsPrev.records || 0).toLocaleString() + ' 条';
+      umsChip.title = (umsPrev.label || '实时接口') + '　' + umsClock(umsPrev.at) +
+        (umsPrev.added ? '　新增 ' + umsPrev.added + ' 条' : '') + autoTip + '\n点击打开实时获取';
+    } else if (umsPrev) {
+      umsChip.className = 'ums-chip err';
+      umsChip.textContent = '上次获取失败 ' + umsAgo(umsPrev.at);
+      umsChip.title = (umsPrev.msg || '实时获取失败') + autoTip + '\n点击打开实时获取';
+    } else {
+      umsChip.className = 'ums-chip';
+      umsChip.textContent = '尚未实时获取';
+      umsChip.title = (autoTip ? autoTip.replace('　', '') + '\n' : '') + '点击打开实时获取';
+    }
+  }
+
+  // 每秒走动「距上次获取的时长」；每 5 秒拉一次服务端状态（后台自动获取的结果），保证角标与后端同步
+  var umsChipTicks = 0;
+  setInterval(function () {
+    umsChipPaint();
+    if (++umsChipTicks % 5 === 0) umsLoadCfg();
+    // 弹窗开着时顺带刷新「上次自动获取」状态文字
+    if (umsChipTicks % 5 === 2 && umsMask && !umsMask.classList.contains('hidden')) umsAutoPaint();
+  }, 1000);
+
+  function umsProg(pct, indet, items) {
+    umsBar.classList.remove('hidden');
+    umsBar.classList.toggle('indet', !!indet);
+    umsBar.firstElementChild.style.width = pct + '%';
+    umsMetaEl.innerHTML = (items || []).map(function (s) { return '<span>' + s + '</span>'; }).join('');
+  }
+
+  // 进度重绘（定时器驱动，让「已用时长」持续走动），同时刷新首页角标
+  function umsPaint() {
+    if (!umsLast) { umsChipPaint(); return; }
+    var sec = ((Date.now() - umsT0) / 1000).toFixed(0);
+    umsSum.textContent = '服务端获取中…';
+    umsProg(100, true, ['已用 ' + sec + ' s']);
+    umsChipPaint();
+  }
+
+  function umsProxy(s, e, incremental) {
+    return fetch(API + '/ums/fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        startDate: s, endDate: e, incremental: !!incremental,
+        cookie: (umsCookieInput.value || '').trim()
+      })
+    }).then(readJson);
+  }
+
+  // 入库成功后的收尾：与上传一致（遮罩退场动画 / 切到最新数据 / 刷新历史列表）
+  function umsAfterImport(j, label) {
+    umsPrev = {
+      ok: true, at: (j.last && j.last.at) || new Date().toISOString(),
+      records: j.meta.recordCount, added: j.added || 0, replaced: j.replaced || 0,
+      id: j.id, label: label
+    };
+    umsShownAt = umsPrev.at;   // 手动获取已自行刷新视图，避免下一轮轮询重复刷新
+    umsChipPaint();
+    if (j.mode === 'merge' && !j.added && !j.replaced) {
+      loadHistory(j.id);
+      notice('实时获取：无新增数据（区间内拣货单均已入库' + (j.reached ? '，已在最新页追平后提前结束' : '') + '）', 'ok');
+      return;
+    }
+    var hasToday = (j.meta.dates || []).indexOf(todayStr()) >= 0;
+    introPending = !gateMask.classList.contains('hidden') && hasToday;
+    if (!hasToday) gateDismissed = true;
+    curDate = null;
+    refetch(j.id);
+    loadHistory(j.id);
+    notice('实时获取完成并' + (j.mode === 'merge' ? '增量并入' : (j.mode === 'overwrite' ? '覆盖更新' : '新增入库')) +
+      '（数据集 #' + j.id + '，' + esc(label) + '）：有效明细 ' +
+      j.meta.recordCount.toLocaleString() + ' 条' +
+      (j.mode === 'merge' ? '（本次新增 ' + (j.added || 0) + ' 条' +
+        (j.replaced ? '，覆盖当天旧明细 ' + j.replaced + ' 条' : '') + '）' : '') +
+      '，丢弃 ' + j.meta.dropped +
+      ' 条' + (j.meta.otherStore ? '，已过滤 ' + j.meta.otherStore + ' 条（非本门店）' : '') +
+      (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
+      '，综合效率 ' + fmt(j.totals.eff) + ' 行/h', 'ok');
+  }
+
+  function umsStop() {
+    umsRunning = false;
+    umsStartBtn.disabled = false;
+    if (umsTick) { clearInterval(umsTick); umsTick = null; }
+  }
+
+  function umsRun() {
+    if (umsRunning) return;
+    var s = umsStartDate.value, e = umsEndDate.value || s;
+    if (!s) { notice('请先选择开始日期', 'err'); umsStartDate.focus(); return; }
+    if (e < s) { notice('结束日期不能早于开始日期', 'err'); return; }
+
+    var inc = umsIncremental();
+    var label = '实时接口 ' + s + (e === s ? '' : ' ~ ' + e) + (inc ? '（增量）' : '');
+    umsRunning = true;
+    umsStartBtn.disabled = true;
+    umsT0 = Date.now();
+    umsLast = { phase: 'proxy' };
+    umsPaint();
+    umsTick = setInterval(umsPaint, 300);
+
+    umsProxy(s, e, inc).then(function (j) {
+      umsStop();
+      umsLast = null;
+      umsBar.classList.add('hidden');
+      umsMetaEl.innerHTML = '';
+      umsSum.textContent = '已完成：' + label + '（共 ' + (j.pages || 1) + '/' + (j.totalPages || 1) + ' 页' +
+        (j.reached ? '，已追平提前结束' : '') + '）';
+      umsAfterImport(j, label);
+    }).catch(function (err) {
+      umsStop();
+      umsLast = null;
+      var msg = (err && err.message) || String(err);
+      umsPrev = { ok: false, at: new Date().toISOString(), msg: msg };
+      umsChipPaint();
+      umsBar.classList.add('hidden');
+      umsSum.textContent = '获取失败';
+      umsMetaEl.innerHTML = '<span>' + esc(msg) + '</span>';
+      notice('实时获取失败：' + esc(msg), 'err');
+    });
+  }
+
+  // 首页角标是否已反映的获取记录（服务端 lastFetch.at）；用来识别后台新写入的数据
+  var umsShownAt = null;
+
+  // 已提示过的「后台自动获取失败」时间点：同一次失败只弹一次；首屏不打扰
+  var umsAutoSeenAt = null;
+
+  // 页面当前运行的前端构建版本（app.<hash>.js）与服务端最新版本不一致时提示刷新，
+  // 避免「页面还是旧版本 JS」造成的显示与数据不符
+  function umsBuildId() {
+    var s = document.querySelector('script[src*="assets/js/app."]');
+    var m = s && /app\.([0-9a-f]{8})\.js/.exec(s.src || '');
+    return m ? m[1] : '';
+  }
+  var umsBuild = umsBuildId();
+  var umsStale = false;
+
+  /* 后台（自动获取 / 其它标签页）写入了新数据：当前正看这份数据集时自动刷新视图，
+     这样不用手动点「实时获取」也能看到最新数据与图表 */
+  function umsApplyServerFetch(lf) {
+    if (!lf || !lf.at || lf.at === umsShownAt) return;
+    var first = !umsShownAt;
+    umsShownAt = lf.at;
+    if (first || umsRunning || upState) return;      // 首屏加载 / 正在获取 / 正在上传：不打扰
+    var changed = (lf.added || 0) > 0 || (lf.replaced || 0) > 0;
+    var empty = !current;                            // 页面当前空着（如「今日暂无数据」遮罩）
+    if (!changed && !empty) return;                  // 数据没变：只更新角标
+    // 当前看的是别的数据集：只刷新历史菜单，不动当前视图
+    if (!empty && selId != null && String(selId) !== String(lf.id)) {
+      loadHistory(selId);
+      return;
+    }
+    var id = (empty || selId == null) ? null : selId; // 看最新就仍看最新
+    refetch(id).then(function () {
+      loadHistory(id);
+      if (changed) {
+        notice('实时数据已更新（数据集 #' + lf.id + '：新增 ' + (lf.added || 0) + ' 条' +
+          ((lf.replaced || 0) > 0 ? '，覆盖旧明细 ' + lf.replaced + ' 条' : '') + '）', 'ok');
+      }
+    }).catch(function (e) {
+      notice('自动刷新数据失败：' + esc((e && e.message) || e), 'err');
+    });
+  }
+
+  function umsLoadCfg() {
+    return fetch(API + '/ums/config', { cache: 'no-store' }).then(readJson).then(function (j) {
+      umsCfg = j;
+      umsStale = !!(j.build && umsBuild && j.build !== umsBuild);
+      umsSetCookieState(j.cookieSet);
+      umsAutoPaint();
+      // 后台自动获取失败：弹出提示并附上错误原因（同一次失败只提示一次；首屏不打扰）
+      var au = j.auto;
+      if (au && au.at && au.at !== umsAutoSeenAt) {
+        var firstAuto = umsAutoSeenAt === null;
+        umsAutoSeenAt = au.at;
+        if (!firstAuto && au.ok === false) {
+          notice('自动获取失败（' + umsClock(au.at) + '）：' + esc(au.error || '未知原因'), 'err');
+        }
+      }
+      // 首页角标：服务端记录比本地新（如后台自动获取刚跑过）时以服务端为准
+      var lf = j.lastFetch;
+      if (lf && lf.at && (!umsPrev || !umsPrev.at || Date.parse(lf.at) >= Date.parse(umsPrev.at))) {
+        umsPrev = {
+          ok: true, at: lf.at, records: lf.records || 0, added: lf.added || 0,
+          replaced: lf.replaced || 0, id: lf.id, label: lf.label
+        };
+      }
+      umsChipPaint();
+      umsApplyServerFetch(lf);
+    }).catch(function (e) {
+      umsCookieState.className = 'ums-cookie-state err';
+      umsCookieState.textContent = '接口配置读取失败：' + ((e && e.message) || e);
+    });
+  }
+
+  function umsSetCookieState(ok) {
+    umsCookieState.className = 'ums-cookie-state' + (ok ? ' ok' : '');
+    umsCookieState.textContent = ok ? '服务端已保存 Cookie' : '服务端未保存 Cookie';
+  }
+
+  function umsSyncCookie() {
+    umsCookieWrap.classList.toggle('hidden', !umsCookieShown);
+    umsCookieToggle.textContent = umsCookieShown ? '收起' : '设置';
+  }
+
+  // 打开「Cookie 设置」时从服务端拉取已保存的 Cookie 回填（用户手动改过则不覆盖）
+  var umsCookieDirty = false;
+  umsCookieInput.addEventListener('input', function () { umsCookieDirty = true; });
+  function umsLoadCookie() {
+    return fetch(API + '/ums/cookie', { cache: 'no-store' }).then(readJson).then(function (j) {
+      if (!umsCookieDirty && j && j.cookie) umsCookieInput.value = j.cookie;
+    }).catch(function () { /* 读取失败静默：不打扰正在编辑的用户 */ });
+  }
+
+  function openUms() {
+    var t = todayStr();
+    if (!umsStartDate.value) umsStartDate.value = t;
+    if (!umsEndDate.value) umsEndDate.value = t;
+    // 未保存 Cookie 时默认展开粘贴框（服务端代取必须先有 Cookie）
+    if (!umsCfg.cookieSet) umsCookieShown = true;
+    umsSyncCookie();
+    if (umsCookieShown) umsLoadCookie();
+    umsMask.classList.remove('hidden');
+    umsLoadCfg();
+  }
+  function closeUms() {
+    umsMask.classList.add('hidden');
+    umsCookieShown = false;   // 关闭后恢复折叠，下次打开从「设置」按钮进入
+    umsSyncCookie();
+  }
+
+  document.getElementById('umsBtn').addEventListener('click', openUms);
+  umsChip.addEventListener('click', function () {
+    if (umsStale) { location.reload(); return; }   // 旧版本前端：先刷新加载新版本
+    openUms();
+  });
+  umsChipPaint();
+  umsLoadCfg();   // 首页角标：读取服务端记录的「最近一次获取结果」
+  document.getElementById('umsClose').addEventListener('click', closeUms);
+  umsMask.addEventListener('click', function (ev) { if (ev.target === umsMask) closeUms(); });
+  umsStartBtn.addEventListener('click', umsRun);
+  umsCookieToggle.addEventListener('click', function () {
+    umsCookieShown = !umsCookieShown;
+    umsSyncCookie();
+    if (umsCookieShown) umsLoadCookie();   // 展开时回填服务端已保存的 Cookie
+  });
+  document.getElementById('umsCookieSave').addEventListener('click', function () {
+    var cookie = (umsCookieInput.value || '').trim();
+    if (!cookie) { notice('请先粘贴 Cookie', 'err'); return; }
+    umsSaveCfg({ cookie: cookie }).then(function () {
+      umsCookieInput.value = '';
+      umsCookieDirty = false;
+      umsCookieShown = false;
+      umsSyncCookie();
+      notice('接口 Cookie 已保存到服务端', 'ok');
+    }).catch(function (e) { notice('Cookie 保存失败：' + esc((e && e.message) || e), 'err'); });
+  });
+  document.getElementById('umsCookieClear').addEventListener('click', function () {
+    umsCookieInput.value = '';
+    umsCookieDirty = false;
+    umsSaveCfg({ cookie: '' })
+      .then(function () { notice('接口 Cookie 已清除', 'ok'); })
+      .catch(function (e) { notice('Cookie 清除失败：' + esc((e && e.message) || e), 'err'); });
+  });
+
+  // 使用说明：默认收起，点击标题展开 / 收起
+  var umsNoteToggle = document.getElementById('umsNoteToggle');
+  var umsNoteBody = document.getElementById('umsNoteBody');
+  umsNoteToggle.addEventListener('click', function () {
+    var nowHidden = umsNoteBody.classList.toggle('hidden');
+    umsNoteToggle.textContent = nowHidden ? '使用说明 ▸' : '使用说明 ▾';
+  });
+
+  // 每页条数 / 自动获取：改动即保存到服务端（自动获取由服务端常驻定时执行）
+  umsNumSel.addEventListener('change', function () {
+    umsSaveCfg({ num: Number(umsNumSel.value) })
+      .then(function (j) { notice('每页条数已设为 ' + j.num + ' 条', 'ok'); })
+      .catch(function (e) { notice('设置保存失败：' + esc((e && e.message) || e), 'err'); });
+  });
+  function umsSaveAuto() {
+    return umsSaveCfg({ auto: { enabled: umsAutoOn.checked, intervalMin: Number(umsAutoMin.value) || 30 } });
+  }
+  umsAutoOn.addEventListener('change', function () {
+    umsSaveAuto()
+      .then(function () { notice(umsAutoOn.checked ? '已开启自动获取（服务端常驻执行）' : '已关闭自动获取', 'ok'); })
+      .catch(function (e) { notice('设置保存失败：' + esc((e && e.message) || e), 'err'); });
+  });
+  umsAutoMin.addEventListener('change', function () {
+    umsSaveAuto()
+      .then(function (j) { notice('自动获取间隔已设为每 ' + j.auto.intervalMin + ' 分钟', 'ok'); })
+      .catch(function (e) { notice('设置保存失败：' + esc((e && e.message) || e), 'err'); });
   });
 
   /* ---------- 数据管理（顶栏按钮 → 弹窗）：切换查看 / 删除单条 / 批量删除 / 清空 ---------- */
@@ -1130,6 +1696,7 @@
     if (!dmMask.classList.contains('hidden')) { closeDataMgr(); return; }
     var zc = document.getElementById('zoneCfgMask');
     if (zc && !zc.classList.contains('hidden')) closeZoneCfg();
+    if (umsMask && !umsMask.classList.contains('hidden')) closeUms();
   });
   dmAll.addEventListener('change', function () {
     Array.prototype.forEach.call(dmTable.querySelectorAll('.dm-pick'), function (el) {
@@ -1367,6 +1934,7 @@
   });
   document.getElementById('gateDataMgr').addEventListener('click', function () { openDataMgr(); });
   document.getElementById('gateZoneCfg').addEventListener('click', function () { openZoneCfg(); });
+  document.getElementById('gateUms').addEventListener('click', function () { openUms(); });
 
   /* ---------- 各表格表头排序注册（点击表头切换升/降序） ---------- */
   bindSort(document.getElementById('pivotBlocks'), 'pivot', function () { if (current) renderPivotBlocks(current); });

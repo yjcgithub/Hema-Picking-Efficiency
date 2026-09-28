@@ -45,5 +45,38 @@ module.exports = {
   STORE_CODE: '20005',
 
   // 必需列
-  REQUIRED_COLUMNS: ['拣货单号', '拣货人', '拣货开始时间', '拣货完成时间', '拣货行数', '拣货分区', '拣货单类型']
+  REQUIRED_COLUMNS: ['拣货单号', '拣货人', '拣货开始时间', '拣货完成时间', '拣货行数', '拣货分区', '拣货单类型'],
+
+  /* ---------- 实时拣货单接口（ums）：后端带 Cookie 拉取 ---------- */
+  UMS_URL: 'https://ums.hemaos.com/out/PickOrderManager/listPickOrderForB2C.json',
+  UMS_PAGE_SIZE: 100,                     // 默认每页条数（接口 num，index=0 为倒序第一页）
+  UMS_NUM_CHOICES: [50, 100, 200],        // 「每页条数」可选项（页面里设置，存 settings 表）
+  UMS_EXTRA_QUERY: { pickOperateType: '3' },
+  UMS_TIMEOUT_MS: 20000,                  // 单页请求超时
+  UMS_MAX_PAGES: 400,                     // 分页保护上限（100 × 400 = 4 万条）
+  UMS_AUTO_MIN_INTERVAL: 1,               // 自动获取最小间隔（分钟）
+  UMS_AUTO_MAX_INTERVAL: 1440,            // 自动获取最大间隔（分钟）
+
+  // 超时判责：接口英文编码 -> 报表中文口径（与 xlsx 导出一致）
+  UMS_DUTY_MAP: {
+    OPERATOR_RESPONSIBLE: '小二责任',
+    STATION_RESPONSIBLE: '档口责任',
+    NO_RESPONSIBLE: '无法判责'
+  },
+
+  // 设置表里保存接口 Cookie 用的键名（服务端代取时使用）
+  UMS_COOKIE_KEY: 'umsCookie',
+
+  // 设置表里保存「最近一次实时获取结果」的键名（首页角标显示 状态 + 距上次获取的时长）
+  UMS_LAST_KEY: 'umsLastFetch',
+
+  // 每页条数（num）设置
+  UMS_NUM_KEY: 'umsNum',
+
+  // 自动获取设置 { enabled, intervalMin } 与最近一次自动执行结果
+  UMS_AUTO_KEY: 'umsAuto',
+  UMS_AUTO_STATE_KEY: 'umsAutoState',
+
+  // 油猴脚本同步（在 ums 页面内用登录态取数后回传）最近一次结果
+  UMS_AGENT_STATE_KEY: 'umsAgentState'
 };

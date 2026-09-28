@@ -15,15 +15,6 @@
   <div class="brand">
     <div class="logo">盒</div>
     <h1>拣货效率计算统计工具</h1>
-    <div class="brand-meta">
-      <div class="period-bar hidden" id="periodBar">
-        <span class="period-label">统计时间段</span><span class="period-range" id="periodRange"></span>
-      </div>
-      <div class="brand-meta-line">
-        <span id="metaSource"></span>
-        <span id="accessInfo"></span>
-      </div>
-    </div>
   </div>
   <div class="actions">
     <label class="date-wrap hidden" id="dateWrap" title="仅显示所选日期的数据；默认显示数据集内最新日期，其他日期可手动选择">
@@ -44,9 +35,22 @@
       上传拣货单 xlsx
       <input type="file" id="fileInput" accept=".xlsx,.xls" hidden>
     </label>
+    <button class="btn" id="umsBtn" title="按日期范围从拣货单接口实时获取，与上传同口径入库">实时获取</button>
     <button class="btn" id="zoneCfgBtn">分区设置</button>
     <button class="btn" id="dataMgrBtn">数据管理</button>
   </div>
+  </div>
+  <!-- 顶栏信息条：独立整行，含「统计时间段 + 数据来源 / 有效明细 / 访问方式」
+       与标题行分离，避免与右侧控件互相挤压（与 app.js 通过 id 关联） -->
+  <div class="brand-meta">
+    <div class="period-bar hidden" id="periodBar">
+      <span class="period-label">统计时间段</span><span class="period-range" id="periodRange"></span>
+    </div>
+    <div class="brand-meta-line">
+      <span id="metaSource"></span>
+      <span id="accessInfo"></span>
+      <button type="button" class="ums-chip" id="umsChip" title="点击打开实时获取">尚未实时获取</button>
+    </div>
   </div>
   <div class="ip-warn hidden" id="ipWarn"></div>
 </header>
@@ -57,15 +61,16 @@
   <section class="kpis" id="kpis"></section>
   <section class="kpis sub" id="kpisSub"></section>
 
-  <section class="grid">
-    <div class="card wide">
-      <h3>效率总览</h3>
-      <div class="chart tall" id="chartJtHour"></div>
-    </div>
-    <div class="card wide">
-      <h3>各小时效率趋势（全场）</h3>
-      <div class="chart" id="chartHour"></div>
-    </div>
+  <section class="card">
+    <h3>效率总览 · 各小时效率趋势</h3>
+    <div class="chart tall" id="chartJtHour"></div>
+  </section>
+
+  <!-- 分区×小时热力图 -->
+  <section class="card">
+    <h3>分区 × 小时效率热力图</h3>
+    <div class="chart tall" id="chartZoneHeat"></div>
+    <div class="note" id="zoneHeatNote"></div>
   </section>
 
   <section class="card collapsible hidden collapsed" id="timeoutCard">
@@ -79,6 +84,9 @@
       <div class="chart" id="chartTimeout"></div>
       <div class="chart-sub">按小时 × 作业类型（前场 / 后场 / 一体化）</div>
       <div class="chart" id="chartTimeoutType"></div>
+      <div class="chart-sub">按小时 × 拣货分区</div>
+      <div class="chart" id="chartTimeoutZone"></div>
+      <div class="table-wrap"><table id="tableTimeoutZone"></table></div>
       <div class="pivot-block collapsed" id="timeoutPerson">
         <div class="pivot-title" id="timeoutPersonToggle" title="点击折叠 / 展开">
           <span class="caret">▶</span>
@@ -228,6 +236,72 @@
   </div>
 </div>
 
+<!-- 实时获取：按日期范围由服务端带 Cookie 从拣货单接口翻页拉取，入库口径与上传一致 -->
+<div class="mask hidden" id="umsMask">
+  <div class="modal narrow">
+    <div class="modal-head">
+      <h3>实时获取拣货单</h3>
+      <button type="button" class="modal-x" id="umsClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-bar">
+      <span class="modal-sum" id="umsSum">选择日期范围后开始获取</span>
+      <span class="grow"></span>
+      <button type="button" class="btn primary" id="umsStart">开始获取</button>
+    </div>
+    <div class="modal-body">
+      <section class="ums-card">
+        <h4 class="ums-card-title">取数条件</h4>
+        <div class="ums-form">
+          <label class="ums-field">开始日期<input type="date" id="umsStartDate"></label>
+          <label class="ums-field">结束日期<input type="date" id="umsEndDate"></label>
+          <label class="ums-radio" title="从最新页往回取，遇到「整页拣货单号都已入库」即停，只把新增明细并入已有数据集；取消勾选则整段区间全量重取">
+            <input type="checkbox" id="umsIncremental" checked>增量获取
+          </label>
+          <label class="ums-field" title="接口参数 num：每次请求返回的条数，影响翻页次数">每页条数<select id="umsNum"></select></label>
+        </div>
+        <div class="up-bar hidden" id="umsBar"><i></i></div>
+        <div class="up-meta" id="umsMeta"></div>
+      </section>
+      <section class="ums-card">
+        <h4 class="ums-card-title">自动获取</h4>
+        <div class="ums-auto">
+          <label class="ums-radio" title="服务端每隔 N 分钟自动增量获取「当天」数据，浏览器不用开着">
+            <input type="checkbox" id="umsAutoOn">自动获取
+          </label>
+          <label class="ums-field">间隔<input type="number" id="umsAutoMin" min="1" max="1440" step="1">分钟</label>
+          <span class="ums-auto-state" id="umsAutoState"></span>
+        </div>
+      </section>
+      <section class="ums-card">
+        <div class="ums-card-head">
+          <h4 class="ums-card-title">接口 Cookie</h4>
+          <span class="ums-cookie-state" id="umsCookieState"></span>
+          <button type="button" class="mini" id="umsCookieToggle">设置</button>
+        </div>
+        <div class="ums-cookie hidden" id="umsCookieWrap">
+          <textarea id="umsCookie" placeholder="粘贴已登录浏览器的 Cookie：F12 → Network → 任意请求 → Request Headers → Cookie（整行内容）"></textarea>
+          <div class="ums-cookie-bar">
+            <button type="button" class="btn" id="umsCookieSave">保存到服务端</button>
+            <button type="button" class="btn" id="umsCookieClear">清除</button>
+          </div>
+        </div>
+      </section>
+      <div class="ums-note">
+        <button type="button" class="ums-note-toggle" id="umsNoteToggle">使用说明 ▸</button>
+        <div class="note hidden" id="umsNoteBody">
+          入库口径与上传 xlsx 完全一致（按「拣货开始时间」的日期集合覆盖 / 新增）：<br>
+          · 由后端带 Cookie 请求拣货单接口，需要先保存一次 Cookie（登录态过期后需重新粘贴）。<br>
+          · 分页：<b>index 是页码（0 起，倒序第一页 = 最新）</b>，按 totalNum 自动探测总页数，每页条数可设置（单日约 4000 条）。<br>
+          · 增量获取：从最新页往回取，遇到「整页拣货单号都已入库」即停，只把新增明细并入已有数据集，重复拉取不会翻倍。<br>
+          · 自动获取：服务端按设置的间隔自动增量获取「当天」数据（需已保存 Cookie，且服务端保持运行）。<br>
+          · 油猴脚本（推荐）：UMS 登录态是 HttpOnly Cookie，脚本读不到，所以脚本改为在本页面内用登录态取数后回传 ——
+          安装 <b>userscript/hema-pick-sync.user.js</b> 后，后端不再需要 Cookie，也能自动同步（保持 ums 页面标签开着即可）。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 今日暂无数据：全屏遮罩 + 背景模糊，正中给一张登录页样式的大提示卡 -->
 <div class="mask gate hidden" id="gateMask">
   <div class="gate-card">
@@ -246,6 +320,7 @@
       <div class="menu sel-menu" id="gateHistMenu"></div>
     </div>
     <div class="gate-act">
+      <button class="btn" id="gateUms">实时获取</button>
       <button class="btn" id="gateDataMgr">数据管理</button>
       <button class="btn" id="gateZoneCfg">分区设置</button>
     </div>

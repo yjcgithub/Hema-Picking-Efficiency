@@ -38,6 +38,9 @@
   var TYPE_ORDER = ['前场合流', '后场合流', '一体化', '未匹配分区'];
   /* 超时判责的配色：服务端按超时单数降序返回，依次取色（判责条目多于配色时循环取用） */
   var DUTY_COLORS = ['#ef4444', '#f59e0b', '#8b5cf6', '#0ea5e9', '#94a3b8'];
+  /* 超时分区配色：每个分区独立色相，避免与判责色混淆 */
+  var ZONE_PALETTE = ['#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed',
+    '#0891b2', '#db2777', '#65a30d', '#ea580c', '#4f46e5', '#0d9488', '#b91c1c'];
 
   /* 超时堆积柱的通用悬浮提示：逐系列列出非零值，末尾给合计 */
   function stackTip(ps) {
@@ -145,81 +148,11 @@
     cache = data;
     if (typeof echarts === 'undefined') return;
 
-    /* 1) 各小时效率趋势（半小时刻度；旧数据无半小时时退回整点小时）
-          效率线随顶栏口径开关切换：人均（各人效率算术平均）/ 按工时加权；tooltip 附带另一种口径对照 */
-    var rows = (data.bySlot && data.bySlot.length) ? data.bySlot : null;
-    var isSlot = !!rows;
-    var hRows = rows || data.byHour;
-    var hText = hRows.map(function (d) { return isSlot ? slotText(d.slot) : d.hour + '点'; });
-    // 人均口径序列与刻度对齐：半小时取 jobTypeBySlot.unweighted，整点取 jobTypeByHour.unweighted
-    var hUw = isSlot
-      ? (data.jobTypeBySlot && data.jobTypeBySlot.unweighted)
-      : (data.jobTypeByHour && data.jobTypeByHour.unweighted);
-    var hAvg = uwOf(hUw, '整体');
-    var hUseW = weighted || !hAvg;                           // 无人员分块时只能画加权
-    var hEff = hUseW ? hRows.map(function (d) { return d.eff; }) : hAvg;
-    var c1 = inst('chartHour');
-    if (c1) c1.setOption({
-      tooltip: {
-        trigger: 'axis',
-        formatter: function (ps) {
-          var i = ps[0].dataIndex, d = hRows[i];
-          var other = hUseW ? (hAvg ? hAvg[i] : null) : d.eff;
-          return hText[i] + '（' + (hUseW ? '加权' : '人均') + '）' +
-            '<br/>效率：<b>' + fmt(hEff[i]) + '</b> 行/h' +
-            (other == null ? '' : '（' + (hUseW ? '人均 ' : '加权 ') + fmt(other) + '）') +
-            '<br/>行数：' + d.rows + '<br/>时长：' + d.hours + ' h';
-        }
-      },
-      legend: {
-        data: ['效率(行/h)', '拣货行数'], top: 0, left: 'center',
-        itemGap: 14, itemWidth: 14, itemHeight: 8,
-        textStyle: { fontSize: 11, color: '#64748b' }
-      },
-      // grid.top 留足 44px：最高一根柱的柱顶行数标签不会被图例挡住
-      grid: { left: 56, right: 56, top: 44, bottom: 26 },
-      xAxis: Object.assign({ type: 'category', data: hText }, AXIS),
-      yAxis: [
-        { type: 'value', name: hUseW ? '行/h' : '行/h（人均）', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, axisLabel: AXIS.axisLabel, splitLine: SPLIT,
-          max: function (v) { return Math.ceil(v.max * 1.12); } },   // 留出空间给整点数值
-        { type: 'value', name: '行数', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, axisLabel: AXIS.axisLabel, splitLine: { show: false } }
-      ],
-      series: [
-        {
-          name: '效率(行/h)', type: 'line', smooth: true, symbolSize: 6,
-          data: hEff,
-          itemStyle: { color: '#2563eb' }, lineStyle: { width: 2.5 },
-          areaStyle: { color: 'rgba(37,99,235,.10)' },
-          // 整点顶点显示具体数值，半小时顶点不显示（与「作业类型 × 小时」保持一致）
-          label: {
-            show: true, position: 'top', distance: 5,
-            color: '#2563eb', fontSize: 10, fontWeight: 600,
-            formatter: function (p) {
-              if (p.value == null || (isSlot && hRows[p.dataIndex].slot % 1)) return '';
-              return fmt(p.value);
-            }
-          }
-        },
-        {
-          name: '拣货行数', type: 'bar', yAxisIndex: 1, barWidth: 14,
-          data: hRows.map(function (d) { return d.rows; }),
-          itemStyle: { color: 'rgba(148,163,184,.45)', borderRadius: [4, 4, 0, 0] },
-          // 柱顶同样只在整点显示行数；柱色浅、效率线可能压过来，垫一层半透明白底保证可读
-          label: {
-            show: true, position: 'top', distance: 3,
-            color: '#64748b', fontSize: 10, fontWeight: 600,
-            backgroundColor: 'rgba(255,255,255,.78)', padding: [2, 3], borderRadius: 3,
-            formatter: function (p) {
-              if (p.value == null || (isSlot && hRows[p.dataIndex].slot % 1)) return '';
-              return Number(p.value).toLocaleString();
-            }
-          }
-        }
-      ]
-    }, true);
-
-    /* 2) 作业类型 × 小时 效率（半小时刻度，半小时顶点不显示数值）
-          默认人均（各人效率算术平均），可勾选切为按工时加权；tooltip 附带另一种口径对照 */
+    /* 1) 效率总览 · 各小时效率趋势（合并为一张图）
+          x 轴为半小时刻度（旧数据无半小时时退回整点小时）
+          左轴：各作业类型效率线 + 整体效率线（灰虚线），随顶栏口径开关切换：人均 / 按工时加权
+          右轴：拣货行数柱；tooltip 附带另一种口径对照 */
+    var hRows = (data.bySlot && data.bySlot.length) ? data.bySlot : (data.byHour || []);
     var c4 = inst('chartJtHour');
     if (c4) {
       var jb = (data.jobTypeBySlot && data.jobTypeBySlot.slots && data.jobTypeBySlot.slots.length)
@@ -257,6 +190,22 @@
         data: pick('整体', jb.total),
         itemStyle: { color: '#94a3b8' }, lineStyle: { width: 1.6, type: 'dashed' }
       });
+      // 拣货行数柱（右轴）：与效率线共用同一时间刻度；旧数据集长度不一致时按索引缺省为 null
+      series.push({
+        name: '拣货行数', type: 'bar', yAxisIndex: 1, barWidth: 14,
+        data: xs.map(function (_, i) { return hRows[i] ? hRows[i].rows : null; }),
+        itemStyle: { color: 'rgba(148,163,184,.35)', borderRadius: [4, 4, 0, 0] },
+        // 柱顶只在整点显示行数；柱色浅、效率线可能压过来，垫一层半透明白底保证可读
+        label: {
+          show: true, position: 'top', distance: 3,
+          color: '#64748b', fontSize: 10, fontWeight: 600,
+          backgroundColor: 'rgba(255,255,255,.78)', padding: [2, 3], borderRadius: 3,
+          formatter: function (p) {
+            if (p.value == null || (jSlot && xs[p.dataIndex] % 1)) return '';
+            return Number(p.value).toLocaleString();
+          }
+        }
+      });
       c4.setOption({
         tooltip: {
           trigger: 'axis',
@@ -264,6 +213,11 @@
             var i = ps[0].dataIndex;
             var lines = [xName(i) + '（' + (useW ? '加权' : '人均') + '）'];
             ps.forEach(function (p) {
+              if (p.seriesName === '拣货行数') {
+                if (p.value != null) lines.push(p.marker + '拣货行数：<b>' + Number(p.value).toLocaleString() + '</b>');
+                if (hRows[i]) lines.push('时长：' + hRows[i].hours + ' h');
+                return;
+              }
               var uwArr = uwOf(uw, p.seriesName);
               var o = useW ? (uwArr ? uwArr[i] : null)
                            : (wt[p.seriesName] ? wt[p.seriesName][i] : null);
@@ -273,13 +227,17 @@
             return lines.join('<br/>');
           }
         },
-        legend: { top: 0, right: 8, textStyle: { fontSize: 11, color: '#64748b' } },
-        grid: { left: 56, right: 24, top: 46, bottom: 30 },
-        xAxis: Object.assign({ type: 'category', boundaryGap: false, data: xs.map(function (_, i) { return xName(i); }) }, AXIS),
-        yAxis: Object.assign({
-          type: 'value', name: useW ? '行/h' : '行/h（人均）', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, splitLine: SPLIT,
-          max: function (v) { return Math.ceil(v.max * 1.12); }   // 留出空间给峰值数值
-        }, { axisLabel: AXIS.axisLabel }),
+        // 图例项较多（各作业类型 + 整体 + 拣货行数），grid.top 留足 56px 供其换行
+        legend: { top: 0, left: 'center', itemGap: 14, itemWidth: 14, itemHeight: 8, textStyle: { fontSize: 11, color: '#64748b' } },
+        grid: { left: 56, right: 56, top: 56, bottom: 30 },
+        xAxis: Object.assign({ type: 'category', boundaryGap: true, data: xs.map(function (_, i) { return xName(i); }) }, AXIS),
+        yAxis: [
+          Object.assign({
+            type: 'value', name: useW ? '行/h' : '行/h（人均）', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, splitLine: SPLIT,
+            max: function (v) { return Math.ceil(v.max * 1.12); }   // 留出空间给峰值数值
+          }, { axisLabel: AXIS.axisLabel }),
+          { type: 'value', name: '行数', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, axisLabel: AXIS.axisLabel, splitLine: { show: false } }
+        ],
         series: series
       }, true);
     }
@@ -660,6 +618,95 @@
       if (c8b && tpRows.length && (to.types || []).length) {
         c8b.setOption(personOption(to.types, 'types', colorOf, 'timeoutPersonType'), true);
       }
+
+      /* 6c) 超时数统计 · 按分区（堆叠柱：x=小时，系列=分区，每分区独立颜色） */
+      var c8c = inst('chartTimeoutZone');
+      if (c8c && (to.zoneSeries || []).length) {
+        var zoneColorMap = {};
+        (to.zones || []).forEach(function (z, i) { zoneColorMap[z.name] = ZONE_PALETTE[i % ZONE_PALETTE.length]; });
+        c8c.setOption({
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: stackTip },
+          legend: {
+            data: to.zoneSeries.map(function (s) { return s.name; }),
+            top: 0, left: 'center', itemGap: 14, itemWidth: 14, itemHeight: 8,
+            textStyle: { fontSize: 11, color: '#64748b' }
+          },
+          grid: { left: 56, right: 24, top: 40, bottom: 26 },
+          xAxis: Object.assign({
+            type: 'category', data: (to.hours || []).map(function (h) { return h + '点'; })
+          }, AXIS),
+          yAxis: Object.assign({
+            type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
+          }, { axisLabel: AXIS.axisLabel }),
+          series: to.zoneSeries.map(function (s, i) {
+            return {
+              name: s.name, type: 'bar', stack: 'timeoutZone', barMaxWidth: 30,
+              itemStyle: { color: zoneColorMap[s.name] || ZONE_PALETTE[i % ZONE_PALETTE.length] },
+              label: {
+                show: true, fontSize: 10, color: '#475569',
+                formatter: function (p) { return p.value ? p.value : ''; }
+              },
+              data: s.data
+            };
+          })
+        }, true);
+      }
+    }
+
+    /* 8) 分区 × 小时效率热力图 */
+    var c10 = inst('chartZoneHeat');
+    if (c10 && data.zoneByHour) {
+      var zh = data.zoneByHour;
+      var zhHours = (zh.hours || []).map(function (h) { return h + '点'; });
+      // y 轴：分区名列表（倒序，使第一个分区显示在最下方）
+      var zhSeries = zh.series || [];
+      var zhNames = zhSeries.map(function (s) { return s.name; }).reverse();
+      var zhTotal = zhNames.length;
+      // 收集所有非 null 值以计算 min/max
+      var zhVals = [];
+      zhSeries.forEach(function (s) { (s.data || []).forEach(function (v) { if (v != null) zhVals.push(v); }); });
+      var zhMin = zhVals.length ? Math.min.apply(null, zhVals) : 0;
+      var zhMax = zhVals.length ? Math.max.apply(null, zhVals) : 100;
+      // 构造热力图数据 [xIndex, yIndex, value]（y 倒序映射）
+      var heatData = [];
+      zhSeries.forEach(function (s, yi) {
+        (s.data || []).forEach(function (v, xi) {
+          if (v != null) heatData.push([xi, zhTotal - 1 - yi, round2(v)]);
+        });
+      });
+
+      c10.setOption({
+        tooltip: {
+          formatter: function (p) {
+            return '<b>' + zhNames[p.value[1]] + '</b> · ' + zhHours[p.value[0]] +
+              '<br/>效率：<b>' + fmt(p.value[2]) + '</b> 行/h';
+          }
+        },
+        grid: { left: 140, right: 80, top: 10, bottom: 46 },
+        xAxis: Object.assign({
+          type: 'category', data: zhHours, splitArea: { show: true }
+        }, AXIS),
+        yAxis: Object.assign({
+          type: 'category', data: zhNames,
+          axisLabel: { color: '#475569', fontSize: 11, width: 120, overflow: 'truncate' }
+        }, {}),
+        visualMap: {
+          min: zhMin, max: zhMax, calculable: true,
+          orient: 'vertical', right: 6, top: 'center',
+          inRange: { color: ['#fee2e2', '#fef3c7', '#fef9c3', '#d9f99d', '#a7f3d0', '#6ee7b7', '#34d399'] },
+          textStyle: { color: '#64748b', fontSize: 11 }
+        },
+        series: [{
+          type: 'heatmap', data: heatData,
+          label: { show: true, fontSize: 10, color: '#334155', formatter: function (p) { return fmt(p.value[2], 0); } },
+          emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'rgba(37,99,235,.35)' } }
+        }]
+      }, true);
+
+      var zhNote = document.getElementById('zoneHeatNote');
+      if (zhNote) zhNote.textContent =
+        '颜色越深（绿）效率越高，越浅（红）效率越低；空白表示该分区在该时段无拣货记录。' +
+        '分区名格式为「作业类型 · 分区代码」。悬停查看具体数值。';
     }
   };
 

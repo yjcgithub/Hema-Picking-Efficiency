@@ -3,8 +3,9 @@
 从盒马门店「门店视角：拣货单」导出文件（xlsx）解析拣货明细，按作业类型 / 分区 / 人员 / 时段计算效率指标，并以看板形式呈现的可视化系统。
 
 - **服务端**：解析 xlsx、计算全部统计口径、SQLite 保存历史数据集、托管前端静态文件
-- **前端**：纯静态页面（无需构建），只负责渲染服务端算好的结果
+- **前端**：纯静态页面（源码无需构建，发布时由 `server/build.js` 生成内容哈希指纹）
 - **口径唯一**：所有统计在服务端 `compute.js` 中实现，前端只负责渲染，避免前后端各写一套导致口径漂移
+- **改完即生效**：静态资源按内容哈希命名 + 入口 HTML 禁缓存，用户无需手动清缓存，详见 [CACHE.md](CACHE.md)
 
 ---
 
@@ -43,15 +44,16 @@
 ```
 Hema-Picking-Efficiency/
 ├── server/                       # 后端（npm 工程根目录）
-│   ├── index.js                  # HTTP 入口：路由、CORS、路径归一化、静态托管
+│   ├── index.js                  # HTTP 入口：路由、CORS、路径归一化、静态托管与缓存头
+│   ├── build.js                  # 静态资源指纹构建：web/ → dist/（内容哈希 + 引用改写 + manifest）
 │   ├── compute.js                # 计算层：xlsx 解析 + 全部统计口径
 │   ├── db.js                     # 存储层：SQLite（datasets / settings）
 │   ├── config.js                 # 口径参数：作业类型字典、默认前后场映射、必需列
-│   ├── package.json              # 依赖与脚本（start / test）
+│   ├── package.json              # 依赖与脚本（start / build / test）
 │   ├── .env                      # 端口、子路径等环境变量（npm start 自动加载）
 │   ├── data/hema.db              # SQLite 库文件（运行时生成）
-│   └── test/upload.test.js       # 上传与忽略分区测试（13 个用例）
-├── web/                          # 前端静态资源（由 Express 直接托管）
+│   └── test/static.test.js       # 静态资源缓存方案测试（8 个用例）
+├── web/                          # 前端源码（开发时编辑这里）
 │   ├── index.html                # 页面结构
 │   ├── assets/
 │   │   ├── css/style.css
@@ -59,6 +61,11 @@ Hema-Picking-Efficiency/
 │   │       ├── config.js         # 前端配置：API 地址、配色
 │   │       ├── charts.js         # 图表封装
 │   │       └── app.js            # 视图逻辑
+├── dist/                         # 构建产物（gitignored，启动/构建时自动生成）
+│   ├── index.html                # 入口，引用已改写为指纹路径
+│   ├── manifest.json             # 原始路径 → 指纹路径
+│   └── assets/…/xxx.<hash8>.js   # 指纹资源
+├── CACHE.md                      # 静态资源缓存方案（构建 / 服务器配置 / 验证 / 排查）
 ├── .gitignore
 └── README.md
 ```
@@ -105,6 +112,7 @@ npm test
 | `BASE_PATH` | 空 | 反向代理子路径前缀，如 `/hpe`。设置后 `/hpe/api/latest` 与 `/api/latest` 均可用 |
 | `ALLOW_ORIGIN` | `*` | CORS 允许来源，可按需收紧为前端域名 |
 | `HEMA_DB_PATH` | `server/data/hema.db` | SQLite 库文件路径（测试用独立库） |
+| `HEMA_STATIC` | `auto` | 静态资源托管方式：`auto` 启动时构建指纹资源到 `dist/` 并托管（失败回落源目录）；`dist` 只托管已构建产物（需先 `npm run build`）；`web` 直接托管源目录（未指纹化兜底）。详见 [CACHE.md](CACHE.md) |
 
 ---
 
@@ -233,6 +241,25 @@ location /hpe/ {
 
 **注意**：前端 `web/assets/js/config.js` 中的 `API_BASE` 目前按访问来源自动选择后端地址，并写入了固定的域名 / IP（`api.yjmc.xyz`、`8.137.63.172`）。部署到其他环境时需在此处调整。
 
+### 静态资源发布与缓存
+
+前端源码放在 `web/`，发布时由 `server/build.js` 构建到 `dist/` 并托管：资源文件名插入内容哈希（`app.js → app.c9005a48.js`），入口 HTML 保持文件名但禁止缓存。
+
+| 资源 | 响应头 | 效果 |
+|------|--------|------|
+| `index.html` | `Cache-Control: no-store` | 每次访问都回源，永远拿到最新 HTML 与最新指纹路径 |
+| `*.{hash8}.js/css/png…` | `public, max-age=31536000, immutable` + 强 ETag | 内容没变零请求；内容一变文件名即变，必然重新下载 |
+| 其它（`manifest.json` 等） | `no-cache` | 可缓存但每次协商，未变返回 304 |
+
+```powershell
+cd server
+npm start            # HEMA_STATIC=auto（默认）：启动时自动重建 dist/ 后托管
+# 或
+npm run build        # 显式构建，打印 原始路径 -> 指纹路径 清单
+```
+
+改完 `web/` 下的文件后**重启服务**即可，用户无需手动清缓存。反向代理（nginx / Apache）需**透传上游缓存头且不要缓存 HTML**，完整配置示例、浏览器验证步骤与故障排查见 [CACHE.md](CACHE.md)。
+
 ---
 
 ## 常见问题
@@ -241,7 +268,7 @@ location /hpe/ {
 反向代理子路径与 `BASE_PATH` 不一致。按响应中的 `hint` 处理：要么用 `BASE_PATH=前缀` 启动服务，要么把 nginx 的 `proxy_pass` 改为末尾带 `/` 的形式。
 
 **Q：修改了前端文件但没有生效？**
-前端无构建步骤，靠 `express.static` 的 ETag 协商缓存，刷新页面即可。但修改 `server/*.js` 后**必须重启服务**。
+前端静态资源按内容哈希命名，入口 HTML 为 `no-store`，正常刷新（无需清缓存、无需 Ctrl+F5）即可加载最新版本。注意两点：① `HEMA_STATIC=auto` 时构建发生在**服务启动阶段**，改完 `web/` 下的文件后需**重启服务**（或先 `npm run build`）；② 修改 `server/*.js` 后**必须重启服务**。若仍不生效，按 [CACHE.md](CACHE.md) 的「故障排查」逐项检查（多为 nginx / CDN 覆盖了上游 `Cache-Control`）。
 
 **Q：保存分区设置后部分数据集没有更新？**
 早期数据集未保存原始明细，无法重算，会出现在返回值的 `skipped` 中，重新上传对应文件即可。
