@@ -443,24 +443,64 @@ function umsClampInterval(v) {
   return Math.min(CFG.UMS_AUTO_MAX_INTERVAL, Math.max(CFG.UMS_AUTO_MIN_INTERVAL, n));
 }
 
-// 自动获取设置：开关 + 间隔分钟
+// 自动获取设置：开关 + 间隔分钟 + 每日执行时段（均为当天时间点，如 07:00 ~ 22:30）
 function umsAutoCfg() {
   const a = db.getSetting(CFG.UMS_AUTO_KEY) || {};
-  return { enabled: !!a.enabled, intervalMin: umsClampInterval(a.intervalMin) };
+  return {
+    enabled: !!a.enabled,
+    intervalMin: umsClampInterval(a.intervalMin),
+    timeStart: a.timeStart || '',   // 空 = 不限，格式 HH:MM，如 '07:00'
+    timeEnd: a.timeEnd || ''        // 空 = 不限，格式 HH:MM，如 '22:30'
+  };
 }
 
-// 最近一次自动获取结果（供页面展示）
+// 检查当前时间是否在配置的执行时段内（东八区）；未设时段 = 全天
+function umsInTimeWindow(cfg) {
+  if (!cfg.timeStart && !cfg.timeEnd) return true;
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const cur = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const [sh, sm] = (cfg.timeStart || '00:00').split(':').map(Number);
+  const [eh, em] = (cfg.timeEnd || '23:59').split(':').map(Number);
+  return cur >= (sh * 60 + sm) && cur <= (eh * 60 + em);
+}
+
+// 最近一次自动获取结果（供页面展示）；failures/nextMin 为连续失败次数与退避后的下次间隔，
+// nextAt 为排期好的下次执行时间（页面据此在临近触发前显示倒计时），
+// cfgInterval 为排期时使用的「设置里的间隔」，用来判断用户改过间隔后是否需要重新排期
 function umsAutoState() {
   const s = db.getSetting(CFG.UMS_AUTO_STATE_KEY) || {};
   return {
     at: s.at || null, ok: s.ok == null ? null : !!s.ok,
-    error: s.error || '', records: s.records || 0, added: s.added || 0
+    error: s.error || '', records: s.records || 0, added: s.added || 0,
+    failures: s.failures || 0, nextMin: s.nextMin || 0,
+    nextAt: s.nextAt || null, cfgInterval: s.cfgInterval || 0
   };
 }
 
 // 当天日期：接口数据与门店都按东八区计时
 function umsToday() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/* ---------- 防风控：取数冷却（手动 / 自动 / 脚本共用同一窗口） ----------
+   每次「尝试取数」（不论成功失败）都记一次时间，两次取数间隔不得小于
+   CFG.UMS_FETCH_COOLDOWN_SEC 秒，避免连续点按或自动与手动叠加触发接口风控 */
+
+// 记录一次取数尝试
+function umsMarkTry() {
+  db.setSetting(CFG.UMS_LAST_TRY_KEY, new Date().toISOString());
+}
+
+// 冷却状态：waitSec > 0 表示还在冷却中，禁止再次取数
+function umsCooldownInfo() {
+  const sec = CFG.UMS_FETCH_COOLDOWN_SEC;
+  const at = db.getSetting(CFG.UMS_LAST_TRY_KEY) || '';
+  const t = at ? Date.parse(at) : 0;
+  return {
+    sec: sec,
+    at: at || null,
+    waitSec: t ? Math.max(0, Math.ceil((t + sec * 1000 - Date.now()) / 1000)) : 0
+  };
 }
 
 // 页面用配置（Cookie 只回布尔，不回原文）
@@ -472,9 +512,20 @@ function umsConfigPayload() {
     numChoices: CFG.UMS_NUM_CHOICES,
     auto: Object.assign(umsAutoCfg(), umsAutoState()),
     agent: db.getSetting(CFG.UMS_AGENT_STATE_KEY) || null,
-    lastFetch: db.getSetting(CFG.UMS_LAST_KEY) || null
+    lastFetch: db.getSetting(CFG.UMS_LAST_KEY) || null,
+    cooldown: umsCooldownInfo()
   };
 }
+
+// 防风控：随机停顿指定毫秒区间（翻页间隔用，避免连续快速请求被 UMS 判定为异常流量）
+function umsSleep(ms) {
+  return new Promise(function (r) { setTimeout(r, ms); });
+}
+
+/* Cookie 失效（登录态过期）时的统一指引：手动跑一次油猴脚本即会重新读取并保存 Cookie。
+   放在错误信息开头，页面弹窗与自动获取失败提示都能直接看到。 */
+const UMS_COOKIE_HINT = 'Cookie 已失效（登录态过期）：请打开盒马工作台页面，点右下角插件面板里的'
+  + '「立即同步」手动同步一次，脚本会重新读取并保存 Cookie';
 
 // 逐页拉取直到取满 totalNum；incremental 时遇到「整页单号都已入库」提前结束
 // 返回 { info: { list, totalNum }, pages, totalPages, reached, complete }
@@ -486,6 +537,7 @@ async function umsFetchAll(startDate, endDate, cookie, opts) {
   const known = o.incremental ? db.knownPickNos() : null;
   const list = [];
   let index = 0, total = 0, pages = 0, totalPages = 0, reached = false, complete = false;
+  umsMarkTry();                                     // 记录本次取数尝试，开始与其他取数共用冷却窗口
   for (;;) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), CFG.UMS_TIMEOUT_MS);
@@ -500,7 +552,13 @@ async function umsFetchAll(startDate, endDate, cookie, opts) {
     } finally {
       clearTimeout(timer);
     }
-    if (!resp.ok) throw new Error('接口返回 HTTP ' + resp.status);
+    if (!resp.ok) {
+      // 401 / 403：登录态问题，直接给出手动同步一次的指引
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error(UMS_COOKIE_HINT + '（接口返回 HTTP ' + resp.status + '）');
+      }
+      throw new Error('接口返回 HTTP ' + resp.status);
+    }
     const text = await resp.text();
     let json;
     try {
@@ -512,9 +570,10 @@ async function umsFetchAll(startDate, endDate, cookie, opts) {
         throw new Error('接口被限流：UMS 返回「亲~人太多，被挤爆了！」（请求过于频繁），本次未取到数据，稍后会自动重试');
       }
       if (/登录|login|passport|sso/i.test(text)) {
-        throw new Error('登录已失效：接口返回的是登录页而非数据，请在「实时获取」弹窗里更新 Cookie' + (snippet ? '（' + snippet + '）' : ''));
+        // 登录页整页都是 HTML/CSS 噪声，不回片段，只给「手动同步一次」的指引
+        throw new Error(UMS_COOKIE_HINT);
       }
-      throw new Error('接口未返回 JSON（多为登录已失效，请更新 Cookie）' + (snippet ? '：' + snippet : ''));
+      throw new Error('接口未返回 JSON，可能是 Cookie 失效：' + UMS_COOKIE_HINT + (snippet ? '（' + snippet + '）' : ''));
     }
     if (json.code !== 200 || !json.info) {
       throw new Error('接口返回异常：' + JSON.stringify(json).slice(0, 200));
@@ -529,6 +588,9 @@ async function umsFetchAll(startDate, endDate, cookie, opts) {
     index++;                                        // index 是页码（index=0 为倒序第一页），逐页 +1
     if (!got.length || list.length >= total) { complete = true; break; }
     if (pages >= CFG.UMS_MAX_PAGES) break;
+    // 防风控：翻页之间随机停顿 300~900ms，避免高频连续请求触发限流
+    await umsSleep(CFG.UMS_PAGE_GAP_MIN_MS +
+      Math.round(Math.random() * (CFG.UMS_PAGE_GAP_MAX_MS - CFG.UMS_PAGE_GAP_MIN_MS)));
   }
   return { info: { list: list, totalNum: total }, pages: pages, totalPages: totalPages, reached: reached, complete: complete };
 }
@@ -578,6 +640,7 @@ router.post('/api/ums/agent/data', express.json({ limit: '100mb' }), (req, res) 
   umsBusy = true;
   const range = startDate + ' ~ ' + endDate;
   try {
+    umsMarkTry();                                   // 脚本同步同样占用冷却窗口
     const complete = !!body.complete;
     const label = '浏览器脚本 ' + range + (complete ? '' : '（增量）');
     const built = compute.buildFromUms(body.pages, { sourceFile: label }, currentMap(), currentIgnore());
@@ -630,6 +693,14 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), async (req, res) =
     return res.status(400).json({ error: '未配置接口 Cookie，无法获取（请在弹窗中粘贴一次 Cookie 后重试）' });
   }
   if (umsBusy) return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
+  // 冷却：距上次取数（含自动获取 / 脚本同步）不足冷却时长时拒绝，避免触发接口风控
+  const cd = umsCooldownInfo();
+  if (cd.waitSec > 0) {
+    return res.status(429).json({
+      error: '冷却中：为避免触发接口风控，请 ' + cd.waitSec + ' 秒后再试（自动获取同样计入冷却）',
+      waitSec: cd.waitSec
+    });
+  }
   umsBusy = true;
   try {
     res.json(await umsRunFetch(startDate, endDate, incremental, cookie));
@@ -640,10 +711,32 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), async (req, res) =
   }
 });
 
-/* ---------- 自动获取：服务端按固定间隔轮询，每次取「当天」数据增量并入 ----------
+/* ---------- 自动获取：服务端按间隔轮询，每次取「当天」数据增量并入 ----------
    与手动获取共用 umsRunFetch；上一轮未跑完（umsBusy）时跳过本轮；
-   未配置 Cookie 时直接跳过（页面里会提示）；每次尝试都记 umsAutoState.at，
-   失败的间隔内不重试，避免刷接口 */
+   未配置 Cookie 时直接跳过（页面里会提示）；每次尝试都记 umsAutoState.at。
+   防风控：间隔加随机抖动，连续失败按指数退避（上限 UMS_BACKOFF_MAX_MIN 分钟）。
+   排期固定写入 umsAutoState.nextAt —— 服务端据此判断是否到点，页面据此显示倒计时 */
+
+// 防风控：间隔抖动系数（±CFG.UMS_INTERVAL_JITTER），避免固定时刻规律打点
+function umsJitter() {
+  return 1 + (Math.random() * 2 - 1) * CFG.UMS_INTERVAL_JITTER;
+}
+
+// 本次应等待的间隔（分钟）：连续失败时按指数退避
+function umsAutoWaitMin(auto, st) {
+  const fails = st.failures || 0;
+  return fails > 0
+    ? Math.min(CFG.UMS_BACKOFF_MAX_MIN, auto.intervalMin * Math.pow(2, fails))
+    : auto.intervalMin;
+}
+
+// 下次执行时间（ms）：优先用已排期的时间；配置间隔变了（或从未排期）则按当前间隔重算
+function umsAutoNextAt(auto, st) {
+  const t = st.nextAt ? Date.parse(st.nextAt) : 0;
+  if (t && st.cfgInterval === auto.intervalMin) return t;
+  const last = st.at ? Date.parse(st.at) : 0;
+  return last ? last + umsAutoWaitMin(auto, st) * 60000 : Date.now();   // 从未跑过：立即执行
+}
 
 async function umsAutoTick() {
   if (umsBusy) return;
@@ -651,25 +744,37 @@ async function umsAutoTick() {
   if (!auto.enabled) return;
   const cookie = umsCookie();
   if (!cookie) return;
+  // 不在执行时段内：跳过（不更新 at，到点后自然会触发）
+  if (!umsInTimeWindow(auto)) return;
   const st = umsAutoState();
-  const last = st.at ? Date.parse(st.at) : 0;
-  if (last && Date.now() - last < auto.intervalMin * 60000) return;
+  const fails = st.failures || 0;
+  if (Date.now() < umsAutoNextAt(auto, st)) return;   // 未到排期时间
+  // 与手动获取共用冷却窗口：距上次取数（含手动 / 脚本）不足冷却时长时跳过本轮
+  if (umsCooldownInfo().waitSec > 0) return;
 
   const day = umsToday();
   umsBusy = true;
   try {
     const out = await umsRunFetch(day, day, true, cookie);
+    const at = new Date();
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
-      at: new Date().toISOString(), ok: true, error: '',
-      records: out.meta.recordCount, added: out.added || 0
+      at: at.toISOString(), ok: true, error: '',
+      records: out.meta.recordCount, added: out.added || 0,
+      failures: 0, nextMin: auto.intervalMin, cfgInterval: auto.intervalMin,
+      nextAt: new Date(at.getTime() + auto.intervalMin * 60000 * umsJitter()).toISOString()
     });
     console.log('[自动获取] ' + day + '：明细 ' + out.meta.recordCount + ' 条，本次新增 ' + (out.added || 0) + ' 条');
   } catch (e) {
+    const nf = fails + 1;
+    const nextMin = Math.min(CFG.UMS_BACKOFF_MAX_MIN, auto.intervalMin * Math.pow(2, nf));
+    const at = new Date();
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
-      at: new Date().toISOString(), ok: false,
-      error: String(e.message || e).slice(0, 160), records: 0, added: 0
+      at: at.toISOString(), ok: false,
+      error: String(e.message || e).slice(0, 160), records: 0, added: 0,
+      failures: nf, nextMin: nextMin, cfgInterval: auto.intervalMin,
+      nextAt: new Date(at.getTime() + nextMin * 60000 * umsJitter()).toISOString()
     });
-    console.warn('[自动获取] ' + day + ' 失败：' + (e.message || e));
+    console.warn('[自动获取] ' + day + ' 失败（连续 ' + nf + ' 次，' + nextMin + ' 分钟后重试）：' + (e.message || e));
   } finally {
     umsBusy = false;
   }
@@ -695,9 +800,15 @@ router.post('/api/ums/config', express.json({ limit: '32kb' }), (req, res) => {
     db.setSetting(CFG.UMS_NUM_KEY, Number(body.num));
   }
   if (body.auto && typeof body.auto === 'object') {
+    function clampTime(v) {
+      v = String(v || '').trim();
+      return /^\d{1,2}:\d{2}$/.test(v) ? v : '';
+    }
     db.setSetting(CFG.UMS_AUTO_KEY, {
       enabled: !!body.auto.enabled,
-      intervalMin: umsClampInterval(body.auto.intervalMin)
+      intervalMin: umsClampInterval(body.auto.intervalMin),
+      timeStart: clampTime(body.auto.timeStart),
+      timeEnd: clampTime(body.auto.timeEnd)
     });
   }
   res.json(umsConfigPayload());

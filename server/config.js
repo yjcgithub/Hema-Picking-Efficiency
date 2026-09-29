@@ -57,6 +57,13 @@ module.exports = {
   UMS_AUTO_MIN_INTERVAL: 1,               // 自动获取最小间隔（分钟）
   UMS_AUTO_MAX_INTERVAL: 1440,            // 自动获取最大间隔（分钟）
 
+  /* ---------- 防风控：请求节流与退避 ---------- */
+  UMS_PAGE_GAP_MIN_MS: 300,               // 翻页之间的最小停顿
+  UMS_PAGE_GAP_MAX_MS: 900,               // 翻页之间的最大停顿（每次随机取值）
+  UMS_INTERVAL_JITTER: 0.15,              // 自动获取间隔抖动比例（±15%，避免固定整点打点）
+  UMS_BACKOFF_MAX_MIN: 60,                // 连续失败后的最大退避间隔（分钟）
+  UMS_FETCH_COOLDOWN_SEC: 60,             // 取数冷却：两次取数（手动 / 自动 / 脚本）之间的最小间隔秒数
+
   // 超时判责：接口英文编码 -> 报表中文口径（与 xlsx 导出一致）
   UMS_DUTY_MAP: {
     OPERATOR_RESPONSIBLE: '小二责任',
@@ -69,6 +76,9 @@ module.exports = {
 
   // 设置表里保存「最近一次实时获取结果」的键名（首页角标显示 状态 + 距上次获取的时长）
   UMS_LAST_KEY: 'umsLastFetch',
+
+  // 设置表里保存「最近一次取数尝试」时间的键名（含失败；手动 / 自动 / 脚本共用同一冷却窗口）
+  UMS_LAST_TRY_KEY: 'umsLastTryAt',
 
   // 每页条数（num）设置
   UMS_NUM_KEY: 'umsNum',

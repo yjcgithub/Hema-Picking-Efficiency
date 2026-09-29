@@ -1125,16 +1125,40 @@
   var umsCookieState = document.getElementById('umsCookieState');
   var umsCookieToggle = document.getElementById('umsCookieToggle');
   var umsChip = document.getElementById('umsChip');
+  var umsManualBtn = document.getElementById('umsManual');
   var umsIncChk = document.getElementById('umsIncremental');
   var umsNumSel = document.getElementById('umsNum');
   var umsAutoOn = document.getElementById('umsAutoOn');
   var umsAutoMin = document.getElementById('umsAutoMin');
   var umsAutoStateEl = document.getElementById('umsAutoState');
+  var umsAutoStart = document.getElementById('umsAutoStart');
+  var umsAutoEnd = document.getElementById('umsAutoEnd');
   var umsCfg = { cookieSet: false, num: 100, numChoices: [50, 100, 200], auto: {}, lastFetch: null };
   var umsRunning = false, umsT0 = 0, umsLast = null, umsTick = null, umsCookieShown = false;
   var umsPrev = null;   // 上一次获取结果（成功 / 失败），首页角标据它显示
+  var umsCdUntil = 0;   // 取数冷却截止时间戳（与服务端 60 秒窗口对应，手动 / 自动共用）
+  var umsCdSec = 60;    // 冷却时长（秒），由服务端配置返回
+
+  // Cookie 失效 / 未保存时的统一指引：跑一次油猴脚本即会重新读取并保存 Cookie
+  var UMS_COOKIE_HINT = '请打开盒马工作台页面，点右下角插件面板里的「立即同步」手动同步一次，脚本会重新读取并保存 Cookie';
 
   function umsIncremental() { return !!(umsIncChk && umsIncChk.checked); }
+
+  // 自动获取的每日执行时段（HH:MM ~ HH:MM）；未设置返回空串
+  function umsAutoWindow(auto) {
+    auto = auto || (umsCfg.auto || {});
+    return (auto.timeStart || auto.timeEnd)
+      ? (auto.timeStart || '00:00') + ' ~ ' + (auto.timeEnd || '23:59') : '';
+  }
+  // 当前是否在时段内（按本机时间判断，仅用于提示；实际执行由服务端按东八区判断）
+  function umsAutoActive(auto) {
+    auto = auto || (umsCfg.auto || {});
+    if (!auto.timeStart && !auto.timeEnd) return true;
+    var d = new Date();
+    var cur = d.getHours() * 60 + d.getMinutes();
+    var a1 = (auto.timeStart || '00:00').split(':'), a2 = (auto.timeEnd || '23:59').split(':');
+    return cur >= (+a1[0] * 60 + +a1[1]) && cur <= (+a2[0] * 60 + +a2[1]);
+  }
 
   // 弹窗内的「每页条数 / 自动获取」设置与状态
   function umsAutoPaint() {
@@ -1146,22 +1170,31 @@
     umsNumSel.value = String(umsCfg.num || 100);
     umsAutoOn.checked = !!auto.enabled;
     if (document.activeElement !== umsAutoMin) umsAutoMin.value = auto.intervalMin || 30;
+    if (umsAutoStart && document.activeElement !== umsAutoStart) umsAutoStart.value = auto.timeStart || '';
+    if (umsAutoEnd && document.activeElement !== umsAutoEnd) umsAutoEnd.value = auto.timeEnd || '';
+
+    var win = umsAutoWindow(auto);
+    var range = win ? '（时段 ' + win + '）' : '（全天）';
 
     if (!umsCfg.cookieSet) {
       umsAutoStateEl.className = 'ums-auto-state err';
-      umsAutoStateEl.textContent = '未保存 Cookie，自动获取不会执行';
+      umsAutoStateEl.textContent = '未保存 Cookie，自动获取不会执行。' + UMS_COOKIE_HINT;
     } else if (!auto.enabled) {
       umsAutoStateEl.className = 'ums-auto-state';
-      umsAutoStateEl.textContent = '自动获取已关闭';
+      umsAutoStateEl.textContent = '自动获取已关闭' + range;
+    } else if (!umsAutoActive(auto)) {
+      umsAutoStateEl.className = 'ums-auto-state';
+      umsAutoStateEl.textContent = '当前在时段外，已暂停（时段 ' + win + '）';
     } else if (!auto.at) {
       umsAutoStateEl.className = 'ums-auto-state';
-      umsAutoStateEl.textContent = '等待首次执行（每 ' + (auto.intervalMin || 30) + ' 分钟）';
+      umsAutoStateEl.textContent = '等待首次执行（每 ' + (auto.intervalMin || 30) + ' 分钟）' + range;
     } else if (auto.ok) {
       umsAutoStateEl.className = 'ums-auto-state ok';
-      umsAutoStateEl.textContent = '上次自动获取 ' + umsAgo(auto.at) + ' · 本次新增 ' + (auto.added || 0) + ' 条';
+      umsAutoStateEl.textContent = '上次自动获取 ' + umsAgo(auto.at) + ' · 新增 ' + (auto.added || 0) + ' 条' + range;
     } else {
       umsAutoStateEl.className = 'ums-auto-state err';
-      umsAutoStateEl.textContent = '上次自动获取失败 ' + umsAgo(auto.at) + '：' + auto.error;
+      umsAutoStateEl.textContent = '上次自动获取失败 ' + umsAgo(auto.at) + '：' + auto.error +
+        (auto.nextMin ? '（' + auto.nextMin + ' 分钟后重试）' : '');
     }
   }
 
@@ -1178,12 +1211,13 @@
     });
   }
 
-  // 距上次获取的时长
+  // 距上次获取的时长（10 分钟以内按「X 分 Y 秒」显示，便于确认自动获取是否在跑）
   function umsAgo(iso) {
     var t = Date.parse(iso);
     if (!t) return '—';
     var s = Math.max(0, Math.floor((Date.now() - t) / 1000));
     if (s < 60) return s + ' 秒前';
+    if (s < 600) return Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒前';
     if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
     if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
     return Math.floor(s / 86400) + ' 天前';
@@ -1194,14 +1228,22 @@
     return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false });
   }
 
+  // 自动获取临近触发的倒计时秒数：只在服务端排期的下次执行前 10 秒内返回，其余返回 0
+  function umsAutoCountdown() {
+    var auto = umsCfg.auto || {};
+    if (!auto.enabled || !auto.nextAt) return 0;
+    var left = Math.ceil((Date.parse(auto.nextAt) - Date.now()) / 1000);
+    return left > 0 && left <= 10 ? left : 0;
+  }
+
   // 首页角标：获取中显示进度与已用时长；空闲显示「上次获取 X 前 · N 条」
+  // 自动获取只显示开关状态（开 / 关），临近触发前 10 秒追加倒计时；其余细节在弹窗内查看
   function umsChipPaint() {
     if (!umsChip) return;
-    var autoTip = umsCfg.auto && umsCfg.auto.enabled ? '　自动获取：每 ' + umsCfg.auto.intervalMin + ' 分钟' : '';
-    if (autoTip && umsPrev && umsPrev.at) {
-      var left = Math.round((Date.parse(umsPrev.at) + umsCfg.auto.intervalMin * 60000 - Date.now()) / 1000);
-      autoTip += left > 0 ? '（' + left + ' 秒后）' : '（即将执行）';
-    }
+    var autoOn = !!(umsCfg.auto && umsCfg.auto.enabled);
+    var cdSec = umsAutoCountdown();
+    var autoText = ' · 自动获取：' + (autoOn ? '开' : '关') + (cdSec ? ' · ' + cdSec + ' 秒后获取' : '');
+    var autoTip = '　自动获取：' + (autoOn ? '已开启' : '已关闭');
     if (umsStale) {                                  // 页面 JS 是旧版本：提示刷新，避免显示与数据不符
       umsChip.className = 'ums-chip warn';
       umsChip.textContent = '有新版本 · 点击刷新';
@@ -1217,24 +1259,64 @@
     }
     if (umsPrev && umsPrev.ok) {
       umsChip.className = 'ums-chip ok';
-      umsChip.textContent = '上次获取 ' + umsAgo(umsPrev.at) + ' · ' + (umsPrev.records || 0).toLocaleString() + ' 条';
+      umsChip.textContent = '上次获取 ' + umsAgo(umsPrev.at) + ' · ' +
+        (umsPrev.records || 0).toLocaleString() + ' 条' + autoText;
       umsChip.title = (umsPrev.label || '实时接口') + '　' + umsClock(umsPrev.at) +
         (umsPrev.added ? '　新增 ' + umsPrev.added + ' 条' : '') + autoTip + '\n点击打开实时获取';
     } else if (umsPrev) {
       umsChip.className = 'ums-chip err';
-      umsChip.textContent = '上次获取失败 ' + umsAgo(umsPrev.at);
+      umsChip.textContent = '上次获取失败 ' + umsAgo(umsPrev.at) + autoText;
       umsChip.title = (umsPrev.msg || '实时获取失败') + autoTip + '\n点击打开实时获取';
     } else {
       umsChip.className = 'ums-chip';
-      umsChip.textContent = '尚未实时获取';
-      umsChip.title = (autoTip ? autoTip.replace('　', '') + '\n' : '') + '点击打开实时获取';
+      umsChip.textContent = '尚未实时获取' + autoText;
+      umsChip.title = autoTip.replace('　', '') + '\n点击打开实时获取';
     }
   }
 
-  // 每秒走动「距上次获取的时长」；每 5 秒拉一次服务端状态（后台自动获取的结果），保证角标与后端同步
+  // 顶栏「手动获取」按钮：获取中 / 冷却倒计时（与自动获取共用）时禁用
+  function umsManualPaint() {
+    if (!umsManualBtn) return;
+    if (umsRunning) {
+      umsManualBtn.disabled = true;
+      umsManualBtn.textContent = '获取中…';
+      umsManualBtn.title = '正在获取，请稍候';
+      return;
+    }
+    var left = umsCdLeft();
+    if (left > 0) {
+      umsManualBtn.disabled = true;
+      umsManualBtn.textContent = '冷却 ' + left + ' 秒';
+      umsManualBtn.title = '为避免触发接口风控，与自动获取共用 ' + umsCdSec + ' 秒冷却，剩 ' + left + ' 秒';
+      return;
+    }
+    umsManualBtn.disabled = false;
+    umsManualBtn.textContent = '手动获取';
+    umsManualBtn.title = '立即增量获取「当天」拣货单（与自动获取共用 ' + umsCdSec + ' 秒冷却）';
+  }
+
+  // 顶栏「手动获取」：抓「当天」增量数据，未保存 Cookie 时引导到弹窗
+  umsManualBtn.addEventListener('click', function () {
+    if (umsRunning) { notice('正在获取中，请稍候', 'err'); return; }
+    var left = umsCdLeft();
+    if (left > 0) {
+      notice('冷却中：为避免触发接口风控，请 ' + left + ' 秒后再试（自动获取同样计入冷却）', 'err');
+      return;
+    }
+    if (!umsCfg.cookieSet) {
+      notice('未保存接口 Cookie。' + UMS_COOKIE_HINT, 'err');
+      openUms();
+      return;
+    }
+    var t = todayStr();
+    umsRun(t, t, true);   // 当天 + 增量，与自动获取口径一致
+  });
+
+  // 每隔一秒走动「距上次获取的时长」；每 5 秒拉一次服务端状态（后台自动获取的结果），保证角标与后端同步
   var umsChipTicks = 0;
   setInterval(function () {
     umsChipPaint();
+    umsManualPaint();
     if (++umsChipTicks % 5 === 0) umsLoadCfg();
     // 弹窗开着时顺带刷新「上次自动获取」状态文字
     if (umsChipTicks % 5 === 2 && umsMask && !umsMask.classList.contains('hidden')) umsAutoPaint();
@@ -1304,22 +1386,35 @@
     if (umsTick) { clearInterval(umsTick); umsTick = null; }
   }
 
-  function umsRun() {
-    if (umsRunning) return;
-    var s = umsStartDate.value, e = umsEndDate.value || s;
+  // 取数冷却剩余秒数（本地推算，服务端每 5 秒回填一次以保证一致）
+  function umsCdLeft() {
+    return umsCdUntil ? Math.max(0, Math.ceil((umsCdUntil - Date.now()) / 1000)) : 0;
+  }
+
+  // 开始获取；s/e/inc 省略时取弹窗里的日期范围与「增量」勾选
+  function umsRun(s, e, inc) {
+    if (umsRunning) { notice('正在获取中，请稍候', 'err'); return; }
+    var left = umsCdLeft();
+    if (left > 0) {
+      notice('冷却中：为避免触发接口风控，请 ' + left + ' 秒后再试（自动获取同样计入冷却）', 'err');
+      return;
+    }
+    if (!s) s = umsStartDate.value;
+    if (!e) e = umsEndDate.value || s;
     if (!s) { notice('请先选择开始日期', 'err'); umsStartDate.focus(); return; }
     if (e < s) { notice('结束日期不能早于开始日期', 'err'); return; }
 
-    var inc = umsIncremental();
-    var label = '实时接口 ' + s + (e === s ? '' : ' ~ ' + e) + (inc ? '（增量）' : '');
+    var incFlag = inc == null ? umsIncremental() : !!inc;
+    var label = '实时接口 ' + s + (e === s ? '' : ' ~ ' + e) + (incFlag ? '（增量）' : '');
     umsRunning = true;
     umsStartBtn.disabled = true;
+    umsCdUntil = Date.now() + umsCdSec * 1000;   // 冷却窗口与服务端一致，含自动获取
     umsT0 = Date.now();
     umsLast = { phase: 'proxy' };
     umsPaint();
     umsTick = setInterval(umsPaint, 300);
 
-    umsProxy(s, e, inc).then(function (j) {
+    umsProxy(s, e, incFlag).then(function (j) {
       umsStop();
       umsLast = null;
       umsBar.classList.add('hidden');
@@ -1388,6 +1483,11 @@
       umsCfg = j;
       umsStale = !!(j.build && umsBuild && j.build !== umsBuild);
       umsSetCookieState(j.cookieSet);
+      // 取数冷却：以服务端为准往前推（只延长不缩短，避免在途响应把倒计时拉回）
+      var cd = j.cooldown || {};
+      umsCdSec = cd.sec || umsCdSec;
+      if (cd.waitSec > 0) umsCdUntil = Math.max(umsCdUntil, Date.now() + cd.waitSec * 1000);
+      umsManualPaint();
       umsAutoPaint();
       // 后台自动获取失败：弹出提示并附上错误原因（同一次失败只提示一次；首屏不打扰）
       var au = j.auto;
@@ -1456,10 +1556,11 @@
     openUms();
   });
   umsChipPaint();
+  umsManualPaint();
   umsLoadCfg();   // 首页角标：读取服务端记录的「最近一次获取结果」
   document.getElementById('umsClose').addEventListener('click', closeUms);
   umsMask.addEventListener('click', function (ev) { if (ev.target === umsMask) closeUms(); });
-  umsStartBtn.addEventListener('click', umsRun);
+  umsStartBtn.addEventListener('click', function () { umsRun(); });
   umsCookieToggle.addEventListener('click', function () {
     umsCookieShown = !umsCookieShown;
     umsSyncCookie();
@@ -1499,7 +1600,12 @@
       .catch(function (e) { notice('设置保存失败：' + esc((e && e.message) || e), 'err'); });
   });
   function umsSaveAuto() {
-    return umsSaveCfg({ auto: { enabled: umsAutoOn.checked, intervalMin: Number(umsAutoMin.value) || 30 } });
+    return umsSaveCfg({ auto: {
+      enabled: umsAutoOn.checked,
+      intervalMin: Number(umsAutoMin.value) || 30,
+      timeStart: umsAutoStart ? umsAutoStart.value : '',
+      timeEnd: umsAutoEnd ? umsAutoEnd.value : ''
+    } });
   }
   umsAutoOn.addEventListener('change', function () {
     umsSaveAuto()
@@ -1511,6 +1617,8 @@
       .then(function (j) { notice('自动获取间隔已设为每 ' + j.auto.intervalMin + ' 分钟', 'ok'); })
       .catch(function (e) { notice('设置保存失败：' + esc((e && e.message) || e), 'err'); });
   });
+  umsAutoStart.addEventListener('change', umsSaveAuto);
+  umsAutoEnd.addEventListener('change', umsSaveAuto);
 
   /* ---------- 数据管理（顶栏按钮 → 弹窗）：切换查看 / 删除单条 / 批量删除 / 清空 ---------- */
   var dmMask = document.getElementById('dataMgrMask');

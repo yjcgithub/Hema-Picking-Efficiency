@@ -50,6 +50,7 @@
       <span id="metaSource"></span>
       <span id="accessInfo"></span>
       <button type="button" class="ums-chip" id="umsChip" title="点击打开实时获取">尚未实时获取</button>
+      <button type="button" class="ums-manual" id="umsManual" title="立即增量获取「当天」拣货单（与自动获取共用 60 秒冷却）">手动获取</button>
     </div>
   </div>
   <div class="ip-warn hidden" id="ipWarn"></div>
@@ -265,11 +266,15 @@
       <section class="ums-card">
         <h4 class="ums-card-title">自动获取</h4>
         <div class="ums-auto">
-          <label class="ums-radio" title="服务端每隔 N 分钟自动增量获取「当天」数据，浏览器不用开着">
+          <label class="ums-radio" title="服务端每隔 N 分钟自动增量获取数据，浏览器不用开着">
             <input type="checkbox" id="umsAutoOn">自动获取
           </label>
           <label class="ums-field">间隔<input type="number" id="umsAutoMin" min="1" max="1440" step="1">分钟</label>
           <span class="ums-auto-state" id="umsAutoState"></span>
+        </div>
+        <div class="ums-auto-dates">
+          <label class="ums-field" title="只在每天的这段时间内自动获取；留空 = 全天">开始时间<input type="time" id="umsAutoStart"></label>
+          <label class="ums-field" title="到时自动停止，次日开始时间再恢复">结束时间<input type="time" id="umsAutoEnd"></label>
         </div>
       </section>
       <section class="ums-card">
@@ -291,9 +296,12 @@
         <div class="note hidden" id="umsNoteBody">
           入库口径与上传 xlsx 完全一致（按「拣货开始时间」的日期集合覆盖 / 新增）：<br>
           · 由后端带 Cookie 请求拣货单接口，需要先保存一次 Cookie（登录态过期后需重新粘贴）。<br>
+          · <b>Cookie 失效</b>时页面会提示：打开<b>盒马工作台</b>页面，点右下角插件面板里的「<b>立即同步</b>」手动同步一次，脚本会重新读取并保存 Cookie。<br>
           · 分页：<b>index 是页码（0 起，倒序第一页 = 最新）</b>，按 totalNum 自动探测总页数，每页条数可设置（单日约 4000 条）。<br>
           · 增量获取：从最新页往回取，遇到「整页拣货单号都已入库」即停，只把新增明细并入已有数据集，重复拉取不会翻倍。<br>
-          · 自动获取：服务端按设置的间隔自动增量获取「当天」数据（需已保存 Cookie，且服务端保持运行）。<br>
+          · 自动获取：服务端按设置的间隔自动增量获取「当天」数据（需已保存 Cookie，且服务端保持运行）。可设置每日执行时段（如 07:00 ~ 22:30），时段外自动暂停。<br>
+          · 手动获取：顶栏「手动获取」按钮立即增量获取「当天」数据，不用打开本弹窗。<br>
+          · 防风控：翻页之间随机停顿 300~900ms；自动间隔加 ±15% 抖动（避免固定时刻规律打点）；连续失败按指数退避重试（间隔翻倍，最多 60 分钟），成功后立即恢复正常间隔。手动 / 自动 / 脚本同步共用 60 秒取数冷却，冷却中「手动获取」按钮禁用并显示倒计时。首页角标只显示自动获取开关状态。<br>
           · 油猴脚本（推荐）：UMS 登录态是 HttpOnly Cookie，脚本读不到，所以脚本改为在本页面内用登录态取数后回传 ——
           安装 <b>userscript/hema-pick-sync.user.js</b> 后，后端不再需要 Cookie，也能自动同步（保持 ums 页面标签开着即可）。
         </div>
