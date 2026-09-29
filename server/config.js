@@ -83,6 +83,9 @@ module.exports = {
   // 每页条数（num）设置
   UMS_NUM_KEY: 'umsNum',
 
+  // 取数条件（页面「开始日期 / 结束日期」）：手动与自动获取共用同一区间
+  UMS_RANGE_KEY: 'umsRange',
+
   // 自动获取设置 { enabled, intervalMin } 与最近一次自动执行结果
   UMS_AUTO_KEY: 'umsAuto',
   UMS_AUTO_STATE_KEY: 'umsAutoState',

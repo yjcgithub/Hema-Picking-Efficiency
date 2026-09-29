@@ -29,6 +29,36 @@ const DIST_DIR = path.join(__dirname, '..', 'dist');
 // 例：BASE_PATH=/hpe 时，https://域名/hpe/api/latest 与 /api/latest 均可用
 const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
 
+/* ---------- 日志 ----------
+   统一「[YYYY-MM-DD HH:mm:ss] 内容」前缀，时间取东八区（与门店口径一致），
+   输出到 stdout / stderr（nohup 部署时落到 server.log），便于事后对账。
+   同时写入环形缓冲 LOG_BUFFER，供页面「日志」弹窗查看（只保留最近 LOG_MAX 条，重启即清空）。 */
+const LOG_MAX = 500;
+const LOG_BUFFER = [];
+
+function logTime() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+}
+function pushLog(at, level, msg) {
+  LOG_BUFFER.push({ at: at, level: level, msg: String(msg) });
+  if (LOG_BUFFER.length > LOG_MAX) LOG_BUFFER.splice(0, LOG_BUFFER.length - LOG_MAX);
+}
+function logInfo(msg) {
+  const t = logTime();
+  pushLog(t, 'info', msg);
+  console.log('[' + t + '] ' + msg);
+}
+function logWarn(msg) {
+  const t = logTime();
+  pushLog(t, 'warn', msg);
+  console.warn('[' + t + '] ' + msg);
+}
+
+// 时刻（东八区 HH:mm:ss），用于日志里标注「下次执行时间」等
+function clockOf(d) {
+  return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(11, 19);
+}
+
 /* ---------- 静态资源托管方式（详见 ../CACHE.md）
    auto（默认）：启动时构建指纹资源到 ../dist 并托管 dist；构建失败回落源目录
    dist        ：只托管已构建好的 dist（CI / 只读目录场景，需先 npm run build）
@@ -77,8 +107,8 @@ function resolveStatic() {
   const found = findWebDir();
   const webDir = found.dir;
   if (!webDir) {
-    console.warn('[静态资源] 未找到前端目录（需含 index.html），已尝试：\n  ' + found.tried.join('\n  '));
-    console.warn('[静态资源] 本次仅提供 API。若需本服务托管前端，请设置 STATIC_DIR=<前端目录>；'
+    logWarn('[静态资源] 未找到前端目录（需含 index.html），已尝试：\n  ' + found.tried.join('\n  '));
+    logWarn('[静态资源] 本次仅提供 API。若需本服务托管前端，请设置 STATIC_DIR=<前端目录>；'
       + '若前端已由 nginx/1Panel 站点托管，请设置 HEMA_STATIC=off 消除本提示');
     return { dir: '', fingerprint: false, map: {}, desc: '未找到前端目录：仅提供 API' };
   }
@@ -93,12 +123,12 @@ function resolveStatic() {
         desc: '已构建指纹资源 ' + r.files + ' 个 → ' + r.outDir
       };
     } catch (e) {
-      console.warn('[静态资源] 指纹构建失败，回落源目录：' + (e.message || e));
+      logWarn('[静态资源] 指纹构建失败，回落源目录：' + (e.message || e));
       return { dir: webDir, fingerprint: false, map: {}, desc: '构建失败，回落源目录 ' + webDir + '（未指纹化）' };
     }
   }
   if (!fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
-    console.warn('[静态资源] HEMA_STATIC=dist 但 ' + DIST_DIR + ' 不完整，请先 npm run build；本次回落源目录');
+    logWarn('[静态资源] HEMA_STATIC=dist 但 ' + DIST_DIR + ' 不完整，请先 npm run build；本次回落源目录');
     return { dir: webDir, fingerprint: false, map: {}, desc: '缺少 dist，回落源目录 ' + webDir + '（未指纹化）' };
   }
   const map = readManifestMap();
@@ -289,6 +319,12 @@ router.get('/api/health', (req, res) => {
   });
 });
 
+// 服务端日志（最近 limit 条，环形缓冲）：页面「日志」弹窗按需/定时拉取
+router.get('/api/logs', (req, res) => {
+  const limit = Math.min(LOG_MAX, Math.max(1, Number(req.query.limit) || 200));
+  res.json({ total: LOG_BUFFER.length, max: LOG_MAX, lines: LOG_BUFFER.slice(-limit) });
+});
+
 router.get('/api/settings', (req, res) => {
   res.json({
     map: currentMap(),
@@ -328,8 +364,14 @@ router.post('/api/settings', express.json({ limit: '1mb' }), (req, res) => {
     db.setSetting(CFG.MAPPING_KEY, map);
     db.setSetting(CFG.IGNORE_KEY, ignore);
     const r = rebuildAll(map, ignore);
+    logInfo('[设置] 分区映射 ' + Object.keys(map).length + ' 项、忽略分区 ' + ignore.length +
+      ' 项已保存；重算 ' + r.updated.length + ' 个数据集' +
+      (r.skipped.length ? '，跳过 ' + r.skipped.length + ' 个（缺原始明细）' : '') +
+      (r.failed.length ? '，失败 ' + r.failed.length + ' 个' : ''));
+    if (r.failed.length) logWarn('[设置] 重算失败：' + JSON.stringify(r.failed).slice(0, 300));
     res.json({ ok: true, map, ignore, updated: r.updated, skipped: r.skipped, failed: r.failed });
   } catch (e) {
+    logWarn('[设置] 保存失败：' + (e.message || e));
     res.status(400).json({ error: e.message || String(e) });
   }
 });
@@ -362,6 +404,7 @@ router.get('/api/datasets/:id', (req, res) => {
 function saveBuilt(built, opts) {
   const dates = built.dataset.meta.dates;
   const hit = db.findByDates(dates);
+  const src = built.dataset.meta.sourceFile || '上传文件';
   if (opts && opts.merge) {
     // 增量：优先并入同时间维度的数据集；增量只取到部分日期时并入日期有交集的最新一条
     const target = hit || db.findByOverlap(dates);
@@ -372,9 +415,12 @@ function saveBuilt(built, opts) {
         replaceDates: opts.replaceDates
       });
       if (!m.added && !m.replaced) {
+        logInfo('[入库] ' + src + '：无新增/覆盖，跳过写入（数据集 #' + target.id + '）');
         return Object.assign({ id: target.id, mode: 'merge', added: 0, replaced: 0 }, m.dataset);
       }
       db.overwrite(target.id, m.dataset, m.recs);
+      logInfo('[入库] ' + src + '：增量并入数据集 #' + target.id +
+        '，新增 ' + m.added + ' 条、覆盖 ' + m.replaced + ' 条，有效明细 ' + m.dataset.meta.recordCount + ' 条');
       return Object.assign({ id: target.id, mode: 'merge', added: m.added, replaced: m.replaced }, m.dataset);
     }
   }
@@ -383,6 +429,9 @@ function saveBuilt(built, opts) {
   const id = hit
     ? db.overwrite(hit.id, built.dataset, built.recs)
     : db.insert(built.dataset, built.recs);
+  logInfo('[入库] ' + src + '：' + (hit ? '覆盖数据集 #' + id : '新建数据集 #' + id) +
+    '，明细 ' + built.recs.length + ' 条' + (before ? '（替换旧明细 ' + before + ' 条）' : '') +
+    '，日期 ' + dates.join('、'));
   return Object.assign({
     id: id, mode: hit ? 'overwrite' : 'create',
     added: built.recs.length, replaced: before
@@ -390,13 +439,18 @@ function saveBuilt(built, opts) {
 }
 
 router.post('/api/upload', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
+  const name = String(req.query.name || req.get('x-filename') || 'upload.xlsx');
   try {
     const buf = req.body;
-    if (!buf || !buf.length) return res.status(400).json({ error: '未收到文件内容' });
-    const name = String(req.query.name || req.get('x-filename') || 'upload.xlsx');
+    if (!buf || !buf.length) {
+      logWarn('[上传] ' + name + '：未收到文件内容');
+      return res.status(400).json({ error: '未收到文件内容' });
+    }
+    logInfo('[上传] ' + name + '（' + Math.round(buf.length / 1024) + ' KB）解析中…');
     const built = compute.buildFromBuffer(buf, name, currentMap(), currentIgnore());
     res.json(saveBuilt(built));
   } catch (e) {
+    logWarn('[上传] ' + name + ' 失败：' + (e.message || e));
     res.status(400).json({ error: e.message || String(e) });
   }
 });
@@ -409,6 +463,15 @@ router.post('/api/upload', express.raw({ type: '*/*', limit: '100mb' }), (req, r
 
 // 同一时刻只允许一个获取任务（手动 / 自动共用）
 let umsBusy = false;
+
+/* 取数进度（内存，仅当前任务）：页面弹窗与顶栏据此显示「第 x / N 页」。
+   totalPages 由接口每页返回的 totalNum 与 num 直接算出 ceil(totalNum / num)，
+   拿到第一页即确定，不靠已取条数累计猜测；任务结束置空 */
+let UMS_PROGRESS = null;
+
+function umsProgressInfo() {
+  return UMS_PROGRESS;
+}
 
 // 接口地址（含固定查询参数）
 function umsUrl(startDate, endDate, index, num) {
@@ -482,6 +545,18 @@ function umsToday() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
+// 取数条件：页面「开始日期 / 结束日期」保存到服务端，手动与自动获取共用同一区间；
+// 未设置或非法时回退「当天」
+function umsRangeCfg() {
+  const ok = /^\d{4}-\d{2}-\d{2}$/;
+  const r = db.getSetting(CFG.UMS_RANGE_KEY) || {};
+  const start = ok.test(r.startDate) ? r.startDate : '';
+  let end = ok.test(r.endDate) ? r.endDate : '';
+  if (!start) return { startDate: umsToday(), endDate: umsToday() };
+  if (!end || end < start) end = start;
+  return { startDate: start, endDate: end };
+}
+
 /* ---------- 防风控：取数冷却（手动 / 自动 / 脚本共用同一窗口） ----------
    每次「尝试取数」（不论成功失败）都记一次时间，两次取数间隔不得小于
    CFG.UMS_FETCH_COOLDOWN_SEC 秒，避免连续点按或自动与手动叠加触发接口风控 */
@@ -510,9 +585,11 @@ function umsConfigPayload() {
     build: BUILD_ID,
     num: umsNum(),
     numChoices: CFG.UMS_NUM_CHOICES,
+    range: umsRangeCfg(),
     auto: Object.assign(umsAutoCfg(), umsAutoState()),
     agent: db.getSetting(CFG.UMS_AGENT_STATE_KEY) || null,
     lastFetch: db.getSetting(CFG.UMS_LAST_KEY) || null,
+    progress: umsProgressInfo(),
     cooldown: umsCooldownInfo()
   };
 }
@@ -606,7 +683,25 @@ function umsRemember(state) {
    整段抓取完整（complete）时把抓取日期范围内的旧明细整条替换：
    手动上传的当天数据没有单号、无法按单号合并，覆盖掉才不会与新抓的同一单重复计数 */
 async function umsRunFetch(startDate, endDate, incremental, cookie) {
-  const r = await umsFetchAll(startDate, endDate, cookie, { size: umsNum(), incremental: incremental });
+  const size = umsNum();
+  UMS_PROGRESS = {
+    active: true, pages: 0, totalPages: 0, got: 0, total: 0,
+    startDate: startDate, endDate: endDate, startedAt: Date.now()
+  };
+  let r;
+  try {
+    r = await umsFetchAll(startDate, endDate, cookie, {
+      size: size, incremental: incremental,
+      onProgress: function (p) {
+        UMS_PROGRESS.pages = p.pages;
+        UMS_PROGRESS.totalPages = p.totalPages;   // = ceil(totalNum / num)
+        UMS_PROGRESS.got = p.got;
+        UMS_PROGRESS.total = p.total;
+      }
+    });
+  } finally {
+    UMS_PROGRESS = null;                          // 任务结束（含失败）：进度置空
+  }
   const label = '实时接口 ' + startDate + ' ~ ' + endDate + (incremental && !r.complete ? '（增量）' : '');
   const built = compute.buildFromUms(r.info, { sourceFile: label }, currentMap(), currentIgnore());
   const out = saveBuilt(built, {
@@ -636,12 +731,18 @@ router.post('/api/ums/agent/data', express.json({ limit: '100mb' }), (req, res) 
   if (!Array.isArray(body.pages) || !body.pages.length) {
     return res.status(400).json({ error: 'pages 应为逐页响应数组' });
   }
-  if (umsBusy) return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
+  if (umsBusy) {
+    logWarn('[取数] 脚本同步被拒绝：已有获取任务正在进行');
+    return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
+  }
   umsBusy = true;
   const range = startDate + ' ~ ' + endDate;
+  const t0 = Date.now();
   try {
     umsMarkTry();                                   // 脚本同步同样占用冷却窗口
     const complete = !!body.complete;
+    logInfo('[取数] 脚本同步 ' + range + ' 开始：' + body.pages.length + ' 页，complete=' + complete +
+      '，reached=' + !!body.reached);
     const label = '浏览器脚本 ' + range + (complete ? '' : '（增量）');
     const built = compute.buildFromUms(body.pages, { sourceFile: label }, currentMap(), currentIgnore());
     const out = saveBuilt(built, {
@@ -658,11 +759,14 @@ router.post('/api/ums/agent/data', express.json({ limit: '100mb' }), (req, res) 
       added: out.added || 0, replaced: out.replaced || 0, records: out.meta.recordCount
     });
     res.json(Object.assign(out, { pages: body.pages.length, last: last }));
+    logInfo('[取数] 脚本同步完成：新增 ' + (out.added || 0) + ' 条、覆盖 ' + (out.replaced || 0) +
+      ' 条，数据集 #' + out.id + '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
   } catch (e) {
     db.setSetting(CFG.UMS_AGENT_STATE_KEY, {
       at: new Date().toISOString(), ok: false, error: String(e.message || e).slice(0, 200),
       range: range, added: 0, replaced: 0, records: 0
     });
+    logWarn('[取数] 脚本同步 ' + range + ' 失败：' + (e.message || e));
     res.status(400).json({ error: e.message || String(e) });
   } finally {
     umsBusy = false;
@@ -690,28 +794,41 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), async (req, res) =
   }
   const cookie = String(body.cookie || '').trim() || umsCookie();
   if (!cookie) {
+    logWarn('[取数] 未配置 Cookie，无法手动获取');
     return res.status(400).json({ error: '未配置接口 Cookie，无法获取（请在弹窗中粘贴一次 Cookie 后重试）' });
   }
-  if (umsBusy) return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
+  if (umsBusy) {
+    logWarn('[取数] 手动获取被拒绝：已有任务正在进行');
+    return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
+  }
   // 冷却：距上次取数（含自动获取 / 脚本同步）不足冷却时长时拒绝，避免触发接口风控
   const cd = umsCooldownInfo();
   if (cd.waitSec > 0) {
+    logWarn('[取数] 冷却中，拒绝手动获取（剩 ' + cd.waitSec + ' 秒）');
     return res.status(429).json({
       error: '冷却中：为避免触发接口风控，请 ' + cd.waitSec + ' 秒后再试（自动获取同样计入冷却）',
       waitSec: cd.waitSec
     });
   }
+  const range = startDate + ' ~ ' + endDate;
+  const t0 = Date.now();
+  logInfo('[取数] 手动获取 ' + range + (incremental ? '（增量）' : '（全量）') + ' 开始');
   umsBusy = true;
   try {
-    res.json(await umsRunFetch(startDate, endDate, incremental, cookie));
+    const out = await umsRunFetch(startDate, endDate, incremental, cookie);
+    logInfo('[取数] 手动获取完成：' + out.pages + '/' + out.totalPages + ' 页，明细 ' + out.meta.recordCount +
+      ' 条，新增 ' + (out.added || 0) + ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
+      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+    res.json(out);
   } catch (e) {
+    logWarn('[取数] 手动获取 ' + range + ' 失败（耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's）：' + (e.message || e));
     res.status(400).json({ error: e.message || String(e) });
   } finally {
     umsBusy = false;
   }
 });
 
-/* ---------- 自动获取：服务端按间隔轮询，每次取「当天」数据增量并入 ----------
+/* ---------- 自动获取：服务端按间隔轮询，每次取「页面取数条件」的日期区间增量并入 ----------
    与手动获取共用 umsRunFetch；上一轮未跑完（umsBusy）时跳过本轮；
    未配置 Cookie 时直接跳过（页面里会提示）；每次尝试都记 umsAutoState.at。
    防风控：间隔加随机抖动，连续失败按指数退避（上限 UMS_BACKOFF_MAX_MIN 分钟）。
@@ -752,29 +869,36 @@ async function umsAutoTick() {
   // 与手动获取共用冷却窗口：距上次取数（含手动 / 脚本）不足冷却时长时跳过本轮
   if (umsCooldownInfo().waitSec > 0) return;
 
-  const day = umsToday();
+  const range = umsRangeCfg();
+  const day = range.startDate + (range.endDate === range.startDate ? '' : ' ~ ' + range.endDate);
+  const t0 = Date.now();
   umsBusy = true;
   try {
-    const out = await umsRunFetch(day, day, true, cookie);
+    const out = await umsRunFetch(range.startDate, range.endDate, true, cookie);
     const at = new Date();
+    const nextAt = new Date(at.getTime() + auto.intervalMin * 60000 * umsJitter());
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
       at: at.toISOString(), ok: true, error: '',
       records: out.meta.recordCount, added: out.added || 0,
       failures: 0, nextMin: auto.intervalMin, cfgInterval: auto.intervalMin,
-      nextAt: new Date(at.getTime() + auto.intervalMin * 60000 * umsJitter()).toISOString()
+      nextAt: nextAt.toISOString()
     });
-    console.log('[自动获取] ' + day + '：明细 ' + out.meta.recordCount + ' 条，本次新增 ' + (out.added || 0) + ' 条');
+    logInfo('[自动获取] ' + day + ' 完成：明细 ' + out.meta.recordCount + ' 条，新增 ' + (out.added || 0) +
+      ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
+      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's，下次 ' + clockOf(nextAt));
   } catch (e) {
     const nf = fails + 1;
     const nextMin = Math.min(CFG.UMS_BACKOFF_MAX_MIN, auto.intervalMin * Math.pow(2, nf));
     const at = new Date();
+    const nextAt = new Date(at.getTime() + nextMin * 60000 * umsJitter());
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
       at: at.toISOString(), ok: false,
       error: String(e.message || e).slice(0, 160), records: 0, added: 0,
       failures: nf, nextMin: nextMin, cfgInterval: auto.intervalMin,
-      nextAt: new Date(at.getTime() + nextMin * 60000 * umsJitter()).toISOString()
+      nextAt: nextAt.toISOString()
     });
-    console.warn('[自动获取] ' + day + ' 失败（连续 ' + nf + ' 次，' + nextMin + ' 分钟后重试）：' + (e.message || e));
+    logWarn('[自动获取] ' + day + ' 失败（连续 ' + nf + ' 次，' + nextMin + ' 分钟后重试，' +
+      '下次 ' + clockOf(nextAt) + '）：' + (e.message || e));
   } finally {
     umsBusy = false;
   }
@@ -795,9 +919,25 @@ router.get('/api/ums/cookie', (req, res) => {
 // 保存设置：Cookie（传空字符串清除）/ 每页条数 / 自动获取开关与间隔
 router.post('/api/ums/config', express.json({ limit: '32kb' }), (req, res) => {
   const body = req.body || {};
-  if (typeof body.cookie === 'string') db.setSetting(CFG.UMS_COOKIE_KEY, body.cookie.trim());
+  if (typeof body.cookie === 'string') {
+    const v = body.cookie.trim();
+    db.setSetting(CFG.UMS_COOKIE_KEY, v);
+    // 只记长度，不把 Cookie 原文写进日志
+    logInfo('[设置] 接口 Cookie ' + (v ? '已保存（' + v.length + ' 字符）' : '已清除'));
+  }
   if (body.num != null && CFG.UMS_NUM_CHOICES.indexOf(Number(body.num)) >= 0) {
     db.setSetting(CFG.UMS_NUM_KEY, Number(body.num));
+    logInfo('[设置] 每页条数 → ' + Number(body.num));
+  }
+  if (body.range && typeof body.range === 'object') {
+    const ok = /^\d{4}-\d{2}-\d{2}$/;
+    const s = ok.test(body.range.startDate) ? body.range.startDate : '';
+    let e = ok.test(body.range.endDate) ? body.range.endDate : '';
+    if (s) {
+      if (!e || e < s) e = s;
+      db.setSetting(CFG.UMS_RANGE_KEY, { startDate: s, endDate: e });
+      logInfo('[设置] 取数条件 → ' + s + (e === s ? '' : ' ~ ' + e));
+    }
   }
   if (body.auto && typeof body.auto === 'object') {
     function clampTime(v) {
@@ -810,12 +950,17 @@ router.post('/api/ums/config', express.json({ limit: '32kb' }), (req, res) => {
       timeStart: clampTime(body.auto.timeStart),
       timeEnd: clampTime(body.auto.timeEnd)
     });
+    const a = umsAutoCfg();
+    logInfo('[设置] 自动获取 ' + (a.enabled ? '开启' : '关闭') + '，间隔 ' + a.intervalMin +
+      ' 分钟，时段 ' + (a.timeStart || '不限') + ' ~ ' + (a.timeEnd || '不限'));
   }
   res.json(umsConfigPayload());
 });
 
 router.delete('/api/datasets/:id', (req, res) => {
-  res.json({ removed: db.remove(req.params.id) });
+  const removed = db.remove(req.params.id);
+  logInfo('[数据集] 删除 #' + req.params.id + '，移除 ' + removed + ' 条');
+  res.json({ removed: removed });
 });
 
 /* 旧指纹回退：资源内容变化后文件名会变，仍停留在旧页面的标签页可能请求上一版文件名。
@@ -855,7 +1000,7 @@ app.use(function (req, res) {
       ? '当前 BASE_PATH=' + BASE_PATH + '；请确认 nginx 转发时是否已剥掉该前缀（proxy_pass 末尾带 / 会剥掉）'
       : '当前未设置 BASE_PATH。若通过子路径访问（如 /hpe/api/...），请用 「BASE_PATH=前缀」 启动本服务；'
         + '或在 nginx 把 proxy_pass 改成 http://127.0.0.1:端口/（末尾加斜杠）',
-    availableApi: ['/api/health', '/api/datasets', '/api/latest', '/api/datasets/:id', '/api/upload',
+    availableApi: ['/api/health', '/api/logs', '/api/datasets', '/api/latest', '/api/datasets/:id', '/api/upload',
       '/api/ums/fetch', '/api/ums/config', '/api/ums/cookie', '/api/ums/agent/data', '/api/ums/known', '/api/settings']
       .map(function (p) { return (BASE_PATH || '') + p; })
   });
@@ -864,11 +1009,15 @@ app.use(function (req, res) {
 // 直接运行时才启动监听（被 require 时只导出 app，便于测试）
 if (require.main === module) {
   app.listen(PORT, '0.0.0.0', () => {
-    console.log('服务已启动： http://localhost:' + PORT +
+    logInfo('服务已启动： http://localhost:' + PORT +
       (BASE_PATH ? '  （子路径 ' + BASE_PATH + '）' : '') + '  静态目录 ' + (STATIC.dir || '（未托管，仅 API）'));
-    console.log('静态资源：' + STATIC.desc);
-    console.log('可通过本地 IP 或域名访问');
-    console.log('历史数据集数量：' + db.count());
+    logInfo('静态资源：' + STATIC.desc);
+    logInfo('可通过本地 IP 或域名访问');
+    logInfo('历史数据集数量：' + db.count());
+    const auto = umsAutoCfg();
+    logInfo('自动获取：' + (auto.enabled ? '已开启（每 ' + auto.intervalMin + ' 分钟，时段 ' +
+      (auto.timeStart || '不限') + ' ~ ' + (auto.timeEnd || '不限') + '）' : '未开启') +
+      '，接口 Cookie：' + (umsCookie() ? '已保存' : '未保存'));
   });
 }
 

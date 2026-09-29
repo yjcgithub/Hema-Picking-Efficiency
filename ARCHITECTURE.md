@@ -150,13 +150,14 @@ resolveStatic()
 | `umsCookie()` | 读取 Cookie：设置表优先，回退环境变量 `HEMA_UMS_COOKIE` |
 | `umsNum()` / `umsClampInterval(v)` | 每页条数与自动间隔的取值钳制 |
 | `umsAutoCfg()` | 自动获取设置：`{ enabled, intervalMin, timeStart, timeEnd }` |
+| `umsRangeCfg()` | 取数条件：页面「开始/结束日期」持久化的日期区间，非法/未设回退当天（手动与自动共用） |
 | `umsInTimeWindow(cfg)` | 按东八区判断是否在执行时段内（当天时间点，支持留空 = 全天） |
 | `umsAutoState()` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` |
 | `umsJitter()` / `umsAutoWaitMin()` / `umsAutoNextAt()` | 防风控：抖动系数、退避后的等待间隔、排期好的下次执行时间 |
 | `umsMarkTry()` / `umsCooldownInfo()` | 取数冷却：记录尝试时间、返回剩余等待秒数 |
 | `umsSleep(ms)` | 翻页之间的随机停顿 |
-| `umsFetchAll(...)` | 逐页拉取：超时 `AbortController` → HTML 错误转可读文案 → 增量追平提前结束 → 翻页停顿 |
-| `umsRunFetch(...)` | 一次完整获取：翻页 → `compute.buildFromUms` → `saveBuilt`（手动与自动共用） |
+| `umsFetchAll(...)` | 逐页拉取：超时 `AbortController` → HTML 错误转可读文案 → 增量追平提前结束 → 翻页停顿；每页回调 `onProgress({ pages, totalPages, got, total })`（`totalPages = ceil(totalNum / num)`） |
+| `umsRunFetch(...)` | 一次完整获取：翻页 → `compute.buildFromUms` → `saveBuilt`（手动与自动共用）；期间把进度写入内存 `UMS_PROGRESS`，供 `umsConfigPayload().progress` 读取 |
 | `umsAutoTick()` | 自动获取定时任务（`setInterval` 5 秒检查一次排期） |
 
 自动获取的排期与退避（`umsAutoTick`）：
@@ -170,6 +171,21 @@ if (umsCooldownInfo().waitSec > 0) return          # 与手动/脚本共用冷�
 ```
 
 **其它编排函数**：`currentMap()` / `currentIgnore()`（设置优先、回退默认值）、`dataZones()` / `zoneRows()`（分区清单）、`rebuildAll()`（设置变更后重算）、`withDate()`（出数范围，见 [7.3](#73-按日重算-withdate)）、`saveBuilt()`（上传与取数共用的入库决策，见 [7.1](#71-时间维度覆盖--新增)）。
+
+**日志**：`logInfo()` / `logWarn()` 统一输出 `[YYYY-MM-DD HH:mm:ss] 内容`（东八区时间，`clockOf()` 用于标注「下次执行时间」）。日志只打在**关键动作**上，不打请求级日志（前端每 5 秒轮询一次配置，全量请求日志会淹没有用信息）：
+
+| 分类 | 位置 | 内容 |
+|------|------|------|
+| 启动 | `app.listen` 回调 | 端口 / 子路径 / 静态目录 / 数据集数量 / 自动获取与 Cookie 状态 |
+| `[上传]` | `/api/upload` | 文件名与大小（开始）、失败原因 |
+| `[入库]` | `saveBuilt` | 新建 / 覆盖 / 增量并入的数据集 id 与新增、覆盖、有效明细条数（上传与取数共用） |
+| `[取数]` | `/api/ums/fetch`、`/api/ums/agent/data` | 开始（区间 / 页数 / 增量或全量）、完成（页数、明细、新增、覆盖、数据集 id、耗时）、失败；被 409 / 429 拒绝的请求 |
+| `[自动获取]` | `umsAutoTick` | 完成（明细、新增、覆盖、耗时、下次执行时刻）、失败（连续次数、退避分钟数、下次执行时刻） |
+| `[设置]` | `/api/settings`、`/api/ums/config` | 映射与忽略项数、重算结果；Cookie（只记字符数，**不记原文**）、每页条数、自动获取开关与时段 |
+| `[数据集]` | `DELETE /api/datasets/:id` | 删除的数据集 id 与移除条数 |
+| `[静态资源]` | `resolveStatic` | 未找到前端目录 / 构建失败 / 缺 `dist` 等回落原因 |
+
+日志同时写入内存环形缓冲（`LOG_MAX = 500` 条，写满丢弃最旧的），由 `GET /api/logs?limit=N` 提供给顶栏「日志」弹窗：默认 3 秒自动刷新、可切 100 / 200 / 500 行、`warn` 行标红、自动滚到最新一行。缓冲随进程重启清空（历史日志看 `server.log`）。
 
 ### 5.2 计算层 — [server/compute.js](./server/compute.js)
 
@@ -265,7 +281,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | UMS 接口 | `UMS_URL`、`UMS_PAGE_SIZE`、`UMS_NUM_CHOICES`、`UMS_EXTRA_QUERY`、`UMS_TIMEOUT_MS`、`UMS_MAX_PAGES` |
 | 自动获取 | `UMS_AUTO_MIN_INTERVAL`、`UMS_AUTO_MAX_INTERVAL`、`UMS_AUTO_KEY`、`UMS_AUTO_STATE_KEY`、`UMS_AGENT_STATE_KEY` |
 | 防风控 | `UMS_PAGE_GAP_MIN_MS` / `UMS_PAGE_GAP_MAX_MS`（300 / 900）、`UMS_INTERVAL_JITTER`（0.15）、`UMS_BACKOFF_MAX_MIN`（60）、`UMS_FETCH_COOLDOWN_SEC`（60） |
-| 设置表键名 | `UMS_COOKIE_KEY`、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY` |
+| 设置表键名 | `UMS_COOKIE_KEY`、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY`、`UMS_RANGE_KEY` |
 
 映射的实际取值存于设置表，此处仅为**首次运行**的默认值。
 
@@ -310,7 +326,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | 卡片工具 | `injectCardTools` / `captureCard` / `exportPng` / `copyPng` / `runCapture` | html2canvas 导出/复制图片（透视卡可按分类选范围） |
 | 启动 | 底部末尾 | 拉数据集 → 判定含今天的数据集 → `refetch` 或 `clearView` + 遮罩 |
 
-前端轮询约定：角标与手动获取按钮每 1 秒重绘（倒计时走动），每 5 秒 `umsLoadCfg()` 拉一次 `/api/ums/config` 同步后台状态（自动获取结果、冷却剩余、构建版本）。
+前端轮询约定：角标与手动获取按钮每 1 秒重绘（倒计时走动），每 5 秒 `umsLoadCfg()` 拉一次 `/api/ums/config` 同步后台状态（自动获取结果、冷却剩余、构建版本）；**取数进行中改为每秒轮询**，据 `progress`（`pages` / `totalPages`）在弹窗与顶栏显示「第 x / N 页」（`totalPages` 来自接口 `totalNum ÷ num`，拿到第一页即确定）。
 
 ---
 
@@ -357,7 +373,8 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 ```
 setInterval(umsAutoTick, 5s)
   → 读配置与状态 → 时段判断 → 排期判断（now >= auto.nextAt）→ 冷却判断
-  → umsRunFetch(今天, 今天, incremental = true)
+  → umsRangeCfg() 取页面「取数条件」的日期区间（未设置则当天）
+  → umsRunFetch(开始日期, 结束日期, incremental = true)
   → 写回 umsAutoState：{ at, ok, error, records, added, failures, nextMin, nextAt, cfgInterval }
 ```
 
@@ -490,6 +507,7 @@ setInterval(umsAutoTick, 5s)
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/health` | 健康检查：数据集数量、`basePath`、静态托管方式与 `features`（接口能力自检） |
+| GET | `/api/logs?limit=N` | 服务端最近日志（内存环形缓冲，最多 500 条）：`{ total, max, lines[{ at, level, msg }] }` |
 | POST | `/api/upload?name=文件名.xlsx` | 上传拣货单（raw body，≤100MB；文件名也可用 `x-filename` 头）。返回 `{ id, mode, added, replaced, ...dataset }` |
 | GET | `/api/datasets` | 数据集列表（不含 `payload`） |
 | GET | `/api/latest?date=YYYY-MM-DD` | 最新数据集完整结果（无数据 404） |
@@ -502,9 +520,9 @@ setInterval(umsAutoTick, 5s)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/ums/config` | `cookieSet` / `build` / `num` / `numChoices` / `auto` / `agent` / `lastFetch` / `cooldown` |
+| GET | `/api/ums/config` | `cookieSet` / `build` / `num` / `numChoices` / `range` / `auto` / `agent` / `lastFetch` / `progress` / `cooldown` |
 | GET | `/api/ums/cookie` | 已保存的 Cookie 原文（仅在展开「Cookie 设置」时调用） |
-| POST | `/api/ums/config` | 保存 Cookie / 每页条数 / 自动获取设置，返回最新配置 |
+| POST | `/api/ums/config` | 保存 Cookie / 每页条数 / 取数条件（日期区间）/ 自动获取设置，返回最新配置 |
 | POST | `/api/ums/fetch` | 服务端逐页取数入库；冷却中 429、任务进行中 409 |
 | POST | `/api/ums/agent/data` | 脚本回传逐页结果入库 |
 | POST | `/api/ums/known` | 判定这批单号已入库多少条 → `{ known, total }` |
@@ -547,6 +565,7 @@ setInterval(umsAutoTick, 5s)
 | `ignoreZones` | 忽略分区列表 |
 | `umsCookie` | 实时接口 Cookie |
 | `umsNum` | 每页条数（50 / 100 / 200） |
+| `umsRange` | 取数条件 `{ startDate, endDate }`（页面「开始/结束日期」，手动与自动共用的日期区间） |
 | `umsAuto` | 自动获取设置 `{ enabled, intervalMin, timeStart, timeEnd }` |
 | `umsAutoState` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` |
 | `umsAgentState` | 油猴脚本最近一次同步结果 |

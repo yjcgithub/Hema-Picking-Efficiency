@@ -27,6 +27,9 @@ body {
   background: var(--bg);
   color: var(--txt);
   font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  /* 手机横竖屏切换时不让系统放大字号 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 ::selection { background: rgba(37, 99, 235, .18); color: inherit; }
 
@@ -637,6 +640,17 @@ footer a:hover::after { width: 100%; }
   max-width: 320px; text-align: left; overflow: hidden; text-overflow: ellipsis;
 }
 #dmTable td.dm-act { white-space: nowrap; }
+
+/* 日志弹窗：等宽字体滚动区，警告（warn）行标红 */
+.logs-body { background: #fbfcfe; }
+.logs-pre {
+  margin: 0; padding: 12px 14px; min-height: 200px; max-height: 58vh; overflow: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  font: 12.5px/1.55 ui-monospace, Consolas, 'Courier New', monospace;
+  color: var(--txt); font-variant-numeric: tabular-nums;
+}
+.logs-pre .lg { white-space: pre-wrap; word-break: break-all; }
+.logs-pre .lg.warn { color: #b91c1c; }
 #dmTable .dm-act .mini { margin: 0 3px; font-size: 12.5px; padding: 4px 10px; }
 .mini.danger { color: #b91c1c; border-color: #fecaca; }
 .mini.danger:hover { background: #fef2f2; border-color: #fca5a5; color: #b91c1c; }
@@ -1033,4 +1047,59 @@ body.intro-flash::after {
   .mask { padding: 10px; }
   .modal { max-height: 92vh; }
   .gate-card { padding: 28px 20px 22px; }
+}
+
+/* ---------- 手机 / 窄屏适配 ---------- */
+/* 平板与小屏：列多的表格改为横向滑动查看，不再被 overflow 裁掉 */
+@media (max-width: 900px) {
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-wrap > table { width: max-content; min-width: 100%; }
+}
+
+/* 手机（≤640px）：取消顶栏吸顶、压缩留白、弹窗全屏、表单纵向铺满 */
+@media (max-width: 640px) {
+  /* 顶栏在手机上会折成多行，吸顶会长期占掉近三成屏幕；改为随内容滚动。
+     保留 relative 以承载底部的渐变分割线（::after 需要定位祖先） */
+  .topbar { position: relative; gap: 6px; padding: 8px 12px 10px; }
+  main { padding: 12px 12px 6px; }
+  footer { padding: 4px 12px 16px; }
+  .brand-meta { padding: 6px 10px; gap: 2px 14px; }
+  .brand-meta .period-range { font-size: 16px; }
+
+  /* 顶栏控件：缩小内边距，靠自动换行铺开 */
+  .actions { gap: 8px; }
+  .actions .btn { padding: 7px 11px; font-size: 13px; }
+  .date-sel { max-width: 132px; padding: 7px 8px; }
+  /* 历史数据集下拉：占满整行并限制不超过行宽，避免菜单从右侧溢出屏幕 */
+  .actions .menu-wrap { flex: 1 1 100%; }
+  .menu.sel-menu { max-width: 100%; }
+
+  /* 卡片与图表：压缩留白、降低高度，减少滚动距离 */
+  .card { padding: 12px; border-radius: 10px; }
+  .chart { height: 210px; }
+  .chart.tall { height: 260px; }
+  .chart.xtall { height: 420px; }
+  .stat-strip { grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); gap: 8px; }
+  .bar-item { grid-template-columns: 72px minmax(0, 1fr) 92px; font-size: 12px; }
+
+  /* 弹窗铺满全屏（:has 已在本文件使用；只匹配含 .modal 的遮罩，不影响门禁遮罩） */
+  .mask:has(.modal) { padding: 0; align-items: stretch; }
+  .mask:has(.modal) .modal { width: 100%; height: 100%; max-height: 100%; border-radius: 0; }
+  .mask:has(.modal) .modal-head { padding: 12px 14px; }
+  .mask:has(.modal) .modal-bar { padding: 10px 14px; gap: 8px; }
+  .mask:has(.modal) .modal-body { max-height: none; flex: 1 1 auto; padding: 0 14px 16px; }
+  #dmTable td.dm-file { max-width: 150px; }
+  .logs-pre { max-height: none; padding: 10px; font-size: 11.5px; }
+
+  /* 表单：字段纵向铺满；输入框 16px 以避免 iOS 聚焦时自动放大页面 */
+  .ums-form, .ums-auto, .ums-auto-dates { flex-direction: column; align-items: stretch; gap: 8px; }
+  .ums-field { justify-content: space-between; }
+  .ums-field input, .ums-field select, .ums-auto input[type="number"] {
+    flex: 1 1 auto; min-width: 0; max-width: none; font-size: 16px;
+  }
+  .ums-cookie textarea, .zone-add input { font-size: 16px; }
+  .zone-add { flex-wrap: wrap; }
+  .zone-add input { flex: 1 1 100%; }
+  .zone-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .zone-row select { width: 100%; }
 }

@@ -21,13 +21,129 @@
    2) 已把 @grant none 换成 GM_* 权限（同步面板需要 GM_xmlhttpRequest / GM_cookie）；
    3) 同步面板只在顶层窗口创建，iframe 里不重复出现（见文件末尾的判断）。 */
 
+/* ============================== 统一配置区 ==============================
+   所有可调项集中在这里，改完保存、刷新页面即生效；正文不再出现散落的魔法值。
+   ├─ common  ：脚本级标识与通用常量（单例键 / 重试间隔 / 字体）
+   ├─ barcode ：拖拽生成 CODE-128 条码（配置持久化在 localStorage）
+   └─ sync    ：拣货效率同步（面板 / 接口 / 自动同步；配置持久化在 GM 存储）
+   注：CODE128_PATTERNS 是 CODE-128 编码表（协议数据，非配置项），仍留在使用处附近。
+   ====================================================================== */
+var US_CFG = {
+  /* ---------------------------- 通用 ---------------------------- */
+  common: {
+    singletonKey: '__barcodeInstanceV2__',                        // 防重复注入（条码功能）
+    configUiSingletonKey: '__tm_barcode_config_ui_created_v2__',  // 防重复创建设置面板
+    bodyRetryMs: 50,                                              // body 未就绪时的重试间隔
+    fontStack: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
+  },
+
+  /* ------------------------- 条码功能 ------------------------- */
+  barcode: {
+    storageKey: 'tm_barcode_config',            // localStorage 键名
+    defaults: {                                 // 首次运行的默认配置
+      barWidth: 2,
+      barHeight: 100,
+      showConfig: false,
+      countdownTime: 2,
+      enabled: false,
+      removeWatermark: false
+    },
+    domIds: [                                   // 脚本重载时需要先清理的旧 DOM
+      'tm-drop-zone',
+      'tm-barcode-container',
+      'tm-config-panel',
+      'tm-toggle-btn'
+    ],
+    el: {                                       // 面板元素 id（HTML 与 JS 都从这里取，保证一处修改）
+      dropZone: 'tm-drop-zone',
+      container: 'tm-barcode-container',
+      toggleBtn: 'tm-toggle-btn',
+      barcode: 'tm-barcode',
+      panel: 'tm-config-panel',
+      saveBtn: 'saveConfigBtn',
+      closeBtn: 'closeConfigBtn',
+      width: 'barWidthInput',
+      height: 'barHeightInput',
+      countdown: 'countdownTimeInput',
+      enabled: 'enabledCheckbox',
+      watermark: 'removeWatermarkCheckbox'
+    }
+  },
+
+  /* ------------------------ 拣货效率同步 ------------------------ */
+  sync: {
+    umsPath: '/out/PickOrderManager/listPickOrderForB2C.json',   // 拣货单接口路径
+    openUrl: 'http://8.137.63.172:40043/',                       // 「打开统计页面」跳转地址
+    maxPages: 400,              // 分页保护上限，与后端一致
+    maxLog: 300,                // 调试日志最多保留条数
+    pageSize: 100,              // 每页条数兜底（后端 /api/ums/config 返回的 num 优先）
+    backendTimeoutMs: 180000,   // 请求后端的超时
+    umsTimeoutMs: 60000,        // 请求拣货单接口的超时（GM_xmlhttpRequest 降级路径）
+    autoCheckMs: 15000,         // 自动同步：多久检查一次是否到点
+    countdownTickMs: 1000,      // 状态 / 倒计时刷新间隔
+    intervalMin: 5,             // 自动同步间隔默认值（分钟）
+    intervalMinLimit: 1,        // 自动同步间隔允许的最小值（分钟）
+    intervalMaxLimit: 1440,     // 自动同步间隔允许的最大值（分钟）
+    mountTries: 20,             // 等待条码设置面板出现的轮询次数
+    mountIntervalMs: 500,       // 轮询间隔（与 mountTries 相乘 = 最长等待时间）
+    panelWidth: 'min(250px, calc(100vw - 32px))',  // 挂进条码面板时的宽度
+    floatingWidth: 240,         // 找不到条码面板时的浮动面板宽度
+    hostId: 'hps-host',         // 浮动面板（找不到条码设置面板时的兜底）宿主 id
+    domId: 'hps-cfg',           // 同步卡片根节点 id（<style> 也用它限定作用域）
+    keys: {                     // GM 存储键名
+      base: 'base', enabled: 'enabled', intervalMin: 'intervalMin', range: 'range',
+      incremental: 'incremental', apiOrigin: 'apiOrigin', path: 'path', last: 'last'
+    },
+    defaults: {                 // 首次运行的默认值（被 GM 存储里已有的值覆盖）
+      base: 'http://8.137.63.172:3001',
+      enabled: false,           // 自动同步：默认关闭，需在面板里手动勾选
+      intervalMin: 5,
+      range: 'today',           // today | y2 | d3 | d7
+      incremental: true,
+      apiOrigin: 'https://ums.hemaos.com',   // 接口所在域（可能与页面域不同）
+      path: ''                  // 空 = 用上面的 umsPath
+    },
+    el: {                       // 同步面板元素 id（HTML 与 JS 都从这里取）
+      dot: 'hpsDot', state: 'hpsState',
+      base: 'hpsBase', on: 'hpsOn', min: 'hpsMin', range: 'hpsRange', inc: 'hpsInc',
+      now: 'hpsNow', test: 'hpsTest', open: 'hpsOpen', tip: 'hpsTip',
+      dbgHead: 'hpsDbgH', dbgArrow: 'hpsDbgA', dbgCount: 'hpsDbgN', dbgBody: 'hpsDbgBody',
+      dbgCopy: 'hpsDbgCopy', dbgClear: 'hpsDbgClr',
+      apiOrigin: 'hpsApiOrigin', path: 'hpsPath',
+      ckHead: 'hpsCkH', ckArrow: 'hpsCkA', ckCount: 'hpsCkN', ckBody: 'hpsCkB', ckVal: 'hpsCkVal',
+      ckSave: 'hpsCkSave', ckCopy: 'hpsCkCopy', ckRefresh: 'hpsCkRefresh'
+    },
+    /* 内联样式：整块 UI 会被塞进条码设置面板，所以全部走内联样式 */
+    styles: {
+      inp: 'width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:8px;padding:5px 8px;font:inherit;color:#0f172a;background:#fff;outline:none',
+      row: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px',
+      lab: 'display:inline-flex;align-items:center;gap:5px;min-width:0',
+      chk: 'width:14px;height:14px;accent-color:#2563eb;margin:0;flex:none',
+      num: 'width:44px;box-sizing:border-box;flex:none;border:1px solid #cbd5e1;border-radius:8px;padding:3px 6px;font:inherit;outline:none',
+      sel: 'min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:8px;padding:3px 6px;font:inherit;background:#fff;outline:none',
+      btn: 'border:1px solid #c9d6ea;background:#fff;border-radius:8px;padding:4px 10px;font:inherit;cursor:pointer;color:#0f172a;text-align:center',
+      grid2: 'display:grid;grid-template-columns:1fr 1fr;gap:7px 8px;margin-top:9px',
+      lb: 'color:#94a3b8;font-size:11px',
+      linkS: 'border:0;background:transparent;color:#2563eb;cursor:pointer;font:11px/1 inherit;padding:0 3px',
+      secH: 'display:flex;align-items:center;gap:6px;cursor:pointer;color:#475569;font-weight:600;user-select:none',
+      sec: 'margin-top:9px;border-top:1px dashed #e2e8f0;padding-top:7px',
+      card: 'padding:9px 10px;box-sizing:border-box;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc;font:12px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#0f172a;',
+      logBox: 'height:96px;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:5px 6px'
+    }
+  }
+};
+
 (function() {
     'use strict';
 
     // 本脚本用于 Hema 系统：拖拽选中文本生成 CODE-128 条形码浮动窗口
     // 支持拖放目标、悬浮显示以及生成后跟随鼠标移动的条码展示
 
-    const GLOBAL_SINGLETON_KEY = '__barcodeInstanceV2__';
+    const CFG_COMMON = US_CFG.common;               // 通用配置（见文件顶部「统一配置区」）
+    const CFG_BARCODE = US_CFG.barcode;             // 条码功能配置
+    const EL = CFG_BARCODE.el;                      // 面板元素 id：HTML 与 JS 共用一份
+
+    const GLOBAL_SINGLETON_KEY = CFG_COMMON.singletonKey;
     const isTopWindow = () => {
         try {
             if (typeof window === 'undefined') return true;
@@ -86,7 +202,7 @@
     };
     let SHOULD_CREATE_CONFIG = null;
 
-    const CONFIG_UI_SINGLETON_KEY = '__tm_barcode_config_ui_created_v2__';
+    const CONFIG_UI_SINGLETON_KEY = CFG_COMMON.configUiSingletonKey;
     const shouldCreateConfigPanel = () => {
         try {
             const top = window.top;
@@ -121,12 +237,7 @@
         }
     };
 
-    const BARCODE_DOM_IDS = [
-        'tm-drop-zone',
-        'tm-barcode-container',
-        'tm-config-panel',
-        'tm-toggle-btn'
-    ];
+    const BARCODE_DOM_IDS = CFG_BARCODE.domIds;
     // DOM 清理延迟到 ensureBodyThen 中执行，确保 body 已存在
     const cleanupOldDom = () => {
         BARCODE_DOM_IDS.forEach((id) => {
@@ -156,7 +267,7 @@
         const run = () => {
             if (executed) return;
             if (document.body) { executed = true; try { fn(); } catch (_) {} }
-            else { setTimeout(run, 50); }
+            else { setTimeout(run, CFG_COMMON.bodyRetryMs); }
         };
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', run, { once: true });
@@ -165,15 +276,8 @@
         }
     };
 
-    const CONFIG_KEY = 'tm_barcode_config';
-    const DEFAULT_CONFIG = {
-        barWidth: 2,
-        barHeight: 100,
-        showConfig: false,
-        countdownTime: 2,
-        enabled: false,
-        removeWatermark: false
-    };
+    const CONFIG_KEY = CFG_BARCODE.storageKey;
+    const DEFAULT_CONFIG = CFG_BARCODE.defaults;
     let config;
     try {
         const saved = JSON.parse(localStorage.getItem(CONFIG_KEY));
@@ -318,7 +422,7 @@
         return bars;
     };
 
-    const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
+    const FONT_STACK = CFG_COMMON.fontStack;
 
     let dropZone = null;
     let container = null;
@@ -329,7 +433,7 @@
         cleanupOldDom();
         if (isTopShellWindow()) return;
         dropZone = createEl('div', {
-            id: 'tm-drop-zone',
+            id: EL.dropZone,
             textContent: '拖拽至此\n生成条码',
             style: `
                 position: fixed;
@@ -359,14 +463,14 @@
         document.body.appendChild(dropZone);
 
         container = createEl('div', {
-            id: 'tm-barcode-container',
+            id: EL.container,
             innerHTML: `
                 <div style="padding:10px 12px;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#fff;border-top-left-radius:10px;border-top-right-radius:10px;display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;font-family:${FONT_STACK};">
                     <strong style="font-size:14px;">条形码生成 (CODE-128)</strong>
                 </div>
                 <div style="padding:10px 12px;">
                     <div id="original-text" style="margin:6px 0;word-break:break-all;text-align:center;font-size:12px;color:#6b7280;padding:8px 10px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;font-family:${FONT_STACK};min-height:38px;"></div>
-                    <div id="tm-barcode" style="display:flex;background:#ffffff;overflow-x:auto;overflow-y:hidden;margin-top:0;border:1px solid #e5e7eb;border-radius:6px;padding:14px 0;min-height:110px;">
+                    <div id="${EL.barcode}" style="display:flex;background:#ffffff;overflow-x:auto;overflow-y:hidden;margin-top:0;border:1px solid #e5e7eb;border-radius:6px;padding:14px 0;min-height:110px;">
                     </div>
                     <div id="countdown-display" style="margin:8px 0 0;text-align:center;font-size:13px;color:#991b1b;font-weight:500;padding:4px 0;font-family:${FONT_STACK};"></div>
                 </div>
@@ -391,7 +495,7 @@
         if (SHOULD_CREATE_CONFIG === null) SHOULD_CREATE_CONFIG = shouldCreateConfig();
         if (!SHOULD_CREATE_CONFIG) return;
         configPanel = createEl('div', {
-            id: 'tm-config-panel',
+            id: EL.panel,
             innerHTML: `
                 <div style="padding:10px 12px;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#fff;border-top-left-radius:10px;border-top-right-radius:10px;display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;">
                     <strong style="font-size:13px;font-family:${FONT_STACK};">条形码设置</strong>
@@ -399,7 +503,7 @@
                 <div style="padding:12px;">
                     <div style="margin-bottom:12px;position:relative;">
                         <label id="enabledLabel" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#334155;font-family:${FONT_STACK};font-size:12px;">
-                            <input type="checkbox" id="enabledCheckbox" ${config.enabled?'checked':''} style="width:14px;height:14px;cursor:pointer;accent-color:#2563eb;">
+                            <input type="checkbox" id="${EL.enabled}" ${config.enabled?'checked':''} style="width:14px;height:14px;cursor:pointer;accent-color:#2563eb;">
                             <span>启用功能</span>
                             <span style="display:inline-block;font-size:10px;color:#1d4ed8;background:#dbeafe;border:1px solid #93c5fd;padding:1px 5px;line-height:18px;border-radius:999px;cursor:help;">?</span>
                         </label>
@@ -417,21 +521,21 @@
                     </div>
                     <div style="margin-bottom:14px;">
                         <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:#334155;font-family:${FONT_STACK};font-size:13px;">
-                            <input type="checkbox" id="removeWatermarkCheckbox" ${config.removeWatermark?'checked':''} style="width:16px;height:16px;cursor:pointer;accent-color:#2563eb;">
+                            <input type="checkbox" id="${EL.watermark}" ${config.removeWatermark?'checked':''} style="width:16px;height:16px;cursor:pointer;accent-color:#2563eb;">
                             <span>移除水印</span>
                         </label>
                     </div>
                     <div style="display:grid;grid-template-columns:100px 1fr;gap:8px 8px;align-items:center;margin:8px 0;">
                         <label style="color:#334155;font-size:12px;font-family:${FONT_STACK};">宽度</label>
-                        <input type="number" id="barWidthInput" min="1" max="5" value="${config.barWidth}" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;outline:none;font-family:${FONT_STACK};color:#0f172a;">
+                        <input type="number" id="${EL.width}" min="1" max="5" value="${config.barWidth}" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;outline:none;font-family:${FONT_STACK};color:#0f172a;">
                         <label style="color:#334155;font-size:12px;font-family:${FONT_STACK};">高度</label>
-                        <input type="number" id="barHeightInput" min="80" max="300" value="${config.barHeight}" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;outline:none;font-family:${FONT_STACK};color:#0f172a;">
+                        <input type="number" id="${EL.height}" min="80" max="300" value="${config.barHeight}" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;outline:none;font-family:${FONT_STACK};color:#0f172a;">
                         <label style="color:#334155;font-size:12px;font-family:${FONT_STACK};">倒计时</label>
-                        <input type="number" id="countdownTimeInput" min="1" max="60" value="${config.countdownTime}" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;outline:none;font-family:${FONT_STACK};color:#0f172a;">
+                        <input type="number" id="${EL.countdown}" min="1" max="60" value="${config.countdownTime}" style="padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;outline:none;font-family:${FONT_STACK};color:#0f172a;">
                     </div>
                     <div style="display:flex;gap:8px;margin-top:10px;">
-                        <button id="saveConfigBtn" class="an-btn-style an-btn-success" style="flex:1;padding:8px 12px;border-radius:10px;background:#059669;color:#fff;border:none;cursor:pointer;font-size:12px;font-family:${FONT_STACK};">保存</button>
-                        <button id="closeConfigBtn" class="an-btn-style an-btn-secondary" style="flex:1;padding:8px 12px;border-radius:10px;background:#64748b;color:#fff;border:none;cursor:pointer;font-size:12px;font-family:${FONT_STACK};">关闭</button>
+                        <button id="${EL.saveBtn}" class="an-btn-style an-btn-success" style="flex:1;padding:8px 12px;border-radius:10px;background:#059669;color:#fff;border:none;cursor:pointer;font-size:12px;font-family:${FONT_STACK};">保存</button>
+                        <button id="${EL.closeBtn}" class="an-btn-style an-btn-secondary" style="flex:1;padding:8px 12px;border-radius:10px;background:#64748b;color:#fff;border:none;cursor:pointer;font-size:12px;font-family:${FONT_STACK};">关闭</button>
                     </div>
                     <style>.power-link{color:#94a3b8;text-decoration:none;transition:color 0.2s;font-size:11px;font-family:${FONT_STACK};}.power-link:hover{color:#475569;}</style>
                     <div style="display:flex;justify-content:center;align-items:center;padding-top:12px;margin-top:16px;border-top:1px solid #e2e8f0;font-family:${FONT_STACK};">
@@ -454,7 +558,7 @@
         document.body.appendChild(configPanel);
 
         toggleBtn = createEl('button', {
-            id: 'tm-toggle-btn',
+            id: EL.toggleBtn,
             textContent: '条码设置',
             style: `
                 position:fixed;bottom:10px;right:1px;z-index:2147483646;
@@ -682,16 +786,16 @@
     ensureBodyThen(() => {
         if (SHOULD_CREATE_CONFIG === null) SHOULD_CREATE_CONFIG = shouldCreateConfig();
         if (!SHOULD_CREATE_CONFIG) return;
-        const saveBtn = $('#saveConfigBtn');
-        const closeBtn = $('#closeConfigBtn');
+        const saveBtn = $('#' + EL.saveBtn);
+        const closeBtn = $('#' + EL.closeBtn);
         if (!saveBtn || !closeBtn) return;
 
         saveBtn.onclick = () => {
-            config.barWidth = parseInt($('#barWidthInput').value) || DEFAULT_CONFIG.barWidth;
-            config.barHeight = parseInt($('#barHeightInput').value) || DEFAULT_CONFIG.barHeight;
-            config.countdownTime = parseInt($('#countdownTimeInput').value) || DEFAULT_CONFIG.countdownTime;
-            config.enabled = $('#enabledCheckbox').checked;
-            config.removeWatermark = $('#removeWatermarkCheckbox').checked;
+            config.barWidth = parseInt($('#' + EL.width).value) || DEFAULT_CONFIG.barWidth;
+            config.barHeight = parseInt($('#' + EL.height).value) || DEFAULT_CONFIG.barHeight;
+            config.countdownTime = parseInt($('#' + EL.countdown).value) || DEFAULT_CONFIG.countdownTime;
+            config.enabled = $('#' + EL.enabled).checked;
+            config.removeWatermark = $('#' + EL.watermark).checked;
 
             config.showConfig = false;
             localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
@@ -727,34 +831,38 @@
   // 本文件还兼管条码脚本（不能加 @noframes），这里自己判断：只在顶层窗口建面板，iframe 里不重复出现
   try { if (window.top !== window) return; } catch (e) { return; }
 
-  /* ---------- 常量与配置 ---------- */
-  var UMS_PATH = '/out/PickOrderManager/listPickOrderForB2C.json';
-  var MAX_PAGES = 400;          // 分页保护上限，与后端一致
-  var MAX_LOG = 300;            // 调试日志最多保留多少条
-  var OPEN_URL = 'http://8.137.63.172:40043/';   // 同步成功后「打开统计页面」跳转的地址
+  /* ---------- 配置：全部取自文件顶部「统一配置区」的 US_CFG.sync ---------- */
+  var CFG_S = US_CFG.sync;              // 同步模块配置
+  var K = CFG_S.keys;                   // GM 存储键名
+  var EL_S = CFG_S.el;                  // 同步面板元素 id
+  var S = CFG_S.styles;                 // 内联样式
+  var UMS_PATH = CFG_S.umsPath;         // 接口路径（cfg.path 为空时的兜底）
+  var OPEN_URL = CFG_S.openUrl;         // 「打开统计页面」跳转地址
+  var MAX_PAGES = CFG_S.maxPages;       // 分页保护上限，与后端一致
+  var MAX_LOG = CFG_S.maxLog;           // 调试日志最多保留条数
 
   var cfg = {
-    base: GM_getValue('base', 'http://8.137.63.172:3001'),
-    enabled: GM_getValue('enabled', true),
-    intervalMin: GM_getValue('intervalMin', 5),
-    range: GM_getValue('range', 'today'),      // today | y2 | d3 | d7
-    incremental: GM_getValue('incremental', true),
-    apiOrigin: GM_getValue('apiOrigin', 'https://ums.hemaos.com'),  // 接口所在域（可能与页面域不同）
-    path: GM_getValue('path', UMS_PATH)        // 接口路径，可改（排查 404 用）
+    base: GM_getValue(K.base, CFG_S.defaults.base),
+    enabled: GM_getValue(K.enabled, CFG_S.defaults.enabled),    // 自动同步：默认关闭，需在面板里手动勾选
+    intervalMin: GM_getValue(K.intervalMin, CFG_S.defaults.intervalMin),
+    range: GM_getValue(K.range, CFG_S.defaults.range),          // today | y2 | d3 | d7
+    incremental: GM_getValue(K.incremental, CFG_S.defaults.incremental),
+    apiOrigin: GM_getValue(K.apiOrigin, CFG_S.defaults.apiOrigin),  // 接口所在域（可能与页面域不同）
+    path: GM_getValue(K.path, UMS_PATH)        // 接口路径，可改（排查 404 用）
   };
-  var last = GM_getValue('last', null);        // { at, ok, msg, added, replaced, records, pages, range }
+  var last = GM_getValue(K.last, null);        // { at, ok, msg, added, replaced, records, pages, range }
   var running = false;
   var stateText = '尚未同步';
   var stateCls = '';
 
   function saveCfg() {
-    GM_setValue('base', cfg.base);
-    GM_setValue('enabled', !!cfg.enabled);
-    GM_setValue('intervalMin', cfg.intervalMin);
-    GM_setValue('range', cfg.range);
-    GM_setValue('incremental', !!cfg.incremental);
-    GM_setValue('apiOrigin', cfg.apiOrigin);
-    GM_setValue('path', cfg.path);
+    GM_setValue(K.base, cfg.base);
+    GM_setValue(K.enabled, !!cfg.enabled);
+    GM_setValue(K.intervalMin, cfg.intervalMin);
+    GM_setValue(K.range, cfg.range);
+    GM_setValue(K.incremental, !!cfg.incremental);
+    GM_setValue(K.apiOrigin, cfg.apiOrigin);
+    GM_setValue(K.path, cfg.path);
   }
 
   function api(path) {
@@ -808,7 +916,7 @@
         url: url,
         headers: body ? { 'Content-Type': 'application/json' } : {},
         data: body ? JSON.stringify(body) : undefined,
-        timeout: 180000,
+        timeout: CFG_S.backendTimeoutMs,
         onload: function (res) {
           dbg('← 后端 ' + res.status + '（' + method + ' ' + url.replace(/^.*\/api/, '/api') + '）',
             res.status >= 400 ? 'err' : 'ok');
@@ -849,7 +957,7 @@
           method: 'GET',
           url: url,
           headers: { Accept: 'application/json, text/plain, */*' },
-          timeout: 60000,
+          timeout: CFG_S.umsTimeoutMs,
           onload: function (r) { resolve({ status: r.status, text: r.responseText || '', via: 'GM' }); },
           ontimeout: function () { reject(new Error('接口请求超时：' + url)); },
           onerror: function () { reject(new Error('接口请求失败（网络不可达）：' + url)); }
@@ -893,7 +1001,7 @@
   function sync() {
     if (running) return Promise.resolve();
     running = true;
-    var rg = rangeOf(), pages = [], got = 0, total = 0, reached = false, complete = false, num = 100;
+    var rg = rangeOf(), pages = [], got = 0, total = 0, reached = false, complete = false, num = CFG_S.pageSize;
     setState('同步中…', 'run');
     dbg('— 开始同步 ' + rg.start + ' ~ ' + rg.end + (cfg.incremental ? '（增量）' : '（全量）') + ' —', 'run');
 
@@ -976,92 +1084,78 @@
 
   /* ---------- 面板：整块同步 UI ----------
      这一整块会被放进条码脚本的「条码设置」面板里（见本文件末尾的挂载逻辑），
-     所以全部用内联样式；只有日志行的着色用一小段 <style> 限定在 #hps-cfg 内 */
-  var S = {
-    inp: 'width:100%;box-sizing:border-box;border:1px solid #cbd5e1;border-radius:8px;padding:5px 8px;font:inherit;color:#0f172a;background:#fff;outline:none',
-    row: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px',
-    lab: 'display:inline-flex;align-items:center;gap:5px;min-width:0',
-    chk: 'width:14px;height:14px;accent-color:#2563eb;margin:0;flex:none',
-    num: 'width:44px;box-sizing:border-box;flex:none;border:1px solid #cbd5e1;border-radius:8px;padding:3px 6px;font:inherit;outline:none',
-    sel: 'min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:8px;padding:3px 6px;font:inherit;background:#fff;outline:none',
-    btn: 'border:1px solid #c9d6ea;background:#fff;border-radius:8px;padding:4px 10px;font:inherit;cursor:pointer;color:#0f172a;text-align:center',
-    grid2: 'display:grid;grid-template-columns:1fr 1fr;gap:7px 8px;margin-top:9px',
-    lb: 'color:#94a3b8;font-size:11px',
-    linkS: 'border:0;background:transparent;color:#2563eb;cursor:pointer;font:11px/1 inherit;padding:0 3px',
-    secH: 'display:flex;align-items:center;gap:6px;cursor:pointer;color:#475569;font-weight:600;user-select:none',
-    sec: 'margin-top:9px;border-top:1px dashed #e2e8f0;padding-top:7px'
-  };
+     所以全部用内联样式（S = US_CFG.sync.styles）；元素 id 统一由 US_CFG.sync.el 提供，
+     只有日志行的着色用一小段 <style> 限定在 #<US_CFG.sync.domId> 内 */
   var cfgBlock = document.createElement('div');
-  cfgBlock.id = 'hps-cfg';
+  cfgBlock.id = CFG_S.domId;
   // 自成一张卡片：与上方条码设置视觉分离
-  cfgBlock.setAttribute('style', 'padding:9px 10px;box-sizing:border-box;' +
-    'border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc;' +
-    'font:12px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#0f172a;');
+  cfgBlock.setAttribute('style', S.card);
   cfgBlock.innerHTML = [
     // 标题 + 状态（状态点 / 底色随结果变化）
     '<div style="display:flex;align-items:center;gap:6px">',
-    '  <span id="hpsDot" style="width:8px;height:8px;border-radius:50%;background:#cbd5e1;flex:none"></span>',
+    '  <span id="' + EL_S.dot + '" style="width:8px;height:8px;border-radius:50%;background:#cbd5e1;flex:none"></span>',
     '  <span style="font-weight:600;color:#1d4ed8">拣货效率同步</span>',
     '</div>',
-    '<div id="hpsState" style="margin:5px 0 10px;padding:6px 8px;border-radius:8px;background:#f1f5f9;color:#64748b;font-size:11px;line-height:1.5;font-variant-numeric:tabular-nums;word-break:break-all">尚未同步</div>',
+    '<div id="' + EL_S.state + '" style="margin:5px 0 10px;padding:6px 8px;border-radius:8px;background:#f1f5f9;color:#64748b;font-size:11px;line-height:1.5;font-variant-numeric:tabular-nums;word-break:break-all">尚未同步</div>',
     // 后端地址
     '<div style="' + S.lb + '">后端地址</div>',
-    '<input id="hpsBase" type="text" placeholder="如 http://localhost:3001/hpe" style="margin-top:3px;' + S.inp + '">',
+    '<input id="' + EL_S.base + '" type="text" placeholder="如 http://localhost:3001/hpe" style="margin-top:3px;' + S.inp + '">',
     // 取数选项（两列）
     '<div style="' + S.grid2 + '">',
-    '  <label style="' + S.lab + ';cursor:pointer"><input id="hpsOn" type="checkbox" style="' + S.chk + '">自动同步</label>',
-    '  <label style="' + S.lab + '">每<input id="hpsMin" type="number" min="1" max="1440" step="1" style="' + S.num + '">分钟</label>',
-    '  <label style="' + S.lab + '">范围<select id="hpsRange" style="' + S.sel + '">',
+    '  <label style="' + S.lab + ';cursor:pointer"><input id="' + EL_S.on + '" type="checkbox" style="' + S.chk + '">自动同步</label>',
+    '  <label style="' + S.lab + '">每<input id="' + EL_S.min + '" type="number" min="1" max="1440" step="1" style="' + S.num + '">分钟</label>',
+    '  <label style="' + S.lab + '">范围<select id="' + EL_S.range + '" style="' + S.sel + '">',
     '    <option value="today">当天</option><option value="y2">昨天 ~ 今天</option>',
     '    <option value="d3">最近 3 天</option><option value="d7">最近 7 天</option></select></label>',
-    '  <label style="' + S.lab + ';cursor:pointer"><input id="hpsInc" type="checkbox" style="' + S.chk + '">增量</label>',
+    '  <label style="' + S.lab + ';cursor:pointer"><input id="' + EL_S.inc + '" type="checkbox" style="' + S.chk + '">增量</label>',
     '</div>',
     // 操作（两个按钮一行，跳转按钮占整行）
     '<div style="' + S.grid2 + '">',
-    '  <button id="hpsNow" style="' + S.btn + '">立即同步</button>',
-    '  <button id="hpsTest" style="' + S.btn + '">测试接口</button>',
-    '  <a id="hpsOpen" href="' + OPEN_URL + '" target="_blank" rel="noopener" title="' + OPEN_URL + '"',
+    '  <button id="' + EL_S.now + '" style="' + S.btn + '">立即同步</button>',
+    '  <button id="' + EL_S.test + '" style="' + S.btn + '">测试接口</button>',
+    '  <a id="' + EL_S.open + '" href="' + OPEN_URL + '" target="_blank" rel="noopener" title="' + OPEN_URL + '"',
     '    style="grid-column:1 / -1;display:none;text-decoration:none;' + S.btn + '">打开统计页面 ↗</a>',
     '</div>',
-    '<div id="hpsTip" style="margin-top:6px;color:#64748b;font-size:11px;min-height:14px"></div>',
+    '<div id="' + EL_S.tip + '" style="margin-top:6px;color:#64748b;font-size:11px;min-height:14px"></div>',
     '<div style="' + S.sec + '">',
-    '  <div id="hpsDbgH" style="' + S.secH + '"><span id="hpsDbgA" style="width:10px;color:#94a3b8">▸</span><span>调试日志</span>',
-    '    <span id="hpsDbgN" style="color:#94a3b8;font-weight:400"></span><span style="flex:1"></span>',
-    '    <button id="hpsDbgCopy" style="' + S.linkS + '">复制</button>',
-    '    <button id="hpsDbgClr" style="' + S.linkS + '">清空</button></div>',
-    '  <div id="hpsDbgB" style="display:none">',
+    '  <div id="' + EL_S.dbgHead + '" style="' + S.secH + '"><span id="' + EL_S.dbgArrow + '" style="width:10px;color:#94a3b8">▸</span><span>调试日志</span>',
+    '    <span id="' + EL_S.dbgCount + '" style="color:#94a3b8;font-weight:400"></span><span style="flex:1"></span>',
+    '    <button id="' + EL_S.dbgCopy + '" style="' + S.linkS + '">复制</button>',
+    '    <button id="' + EL_S.dbgClear + '" style="' + S.linkS + '">清空</button></div>',
+    '  <div id="' + EL_S.dbgBody + '" style="display:none">',
     '    <div style="' + S.row + '"><span>接口域</span>',
-    '      <input id="hpsApiOrigin" type="text" placeholder="https://ums.hemaos.com" style="flex:1;min-width:0;' + S.inp + '"></div>',
+    '      <input id="' + EL_S.apiOrigin + '" type="text" placeholder="https://ums.hemaos.com" style="flex:1;min-width:0;' + S.inp + '"></div>',
     '    <div style="' + S.row + '"><span>接口路径</span>',
-    '      <input id="hpsPath" type="text" style="flex:1;min-width:0;' + S.inp + '"></div>',
-    '    <div id="hpsDbgBody" style="height:96px;overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:5px 6px"></div>',
+    '      <input id="' + EL_S.path + '" type="text" style="flex:1;min-width:0;' + S.inp + '"></div>',
+    '    <div id="' + EL_S.dbgArea + '" style="' + S.logBox + '"></div>',
     '  </div>',
     '</div>',
     '<div style="' + S.sec + '">',
-    '  <div id="hpsCkH" style="' + S.secH + '"><span id="hpsCkA" style="width:10px;color:#94a3b8">▸</span><span>捕获的 Cookie</span>',
-    '    <span id="hpsCkN" style="color:#94a3b8;font-weight:400"></span><span style="flex:1"></span>',
-    '    <button id="hpsCkSave" style="' + S.linkS + '">存到服务端</button>',
-    '    <button id="hpsCkCopy" style="' + S.linkS + '">复制</button>',
-    '    <button id="hpsCkRefresh" style="' + S.linkS + '">刷新</button></div>',
-    '  <div id="hpsCkB" style="display:none">',
-    '    <textarea id="hpsCkVal" readonly placeholder="点「刷新」从浏览器读取（含 HttpOnly 登录态）"',
+    '  <div id="' + EL_S.ckHead + '" style="' + S.secH + '"><span id="' + EL_S.ckArrow + '" style="width:10px;color:#94a3b8">▸</span><span>捕获的 Cookie</span>',
+    '    <span id="' + EL_S.ckCount + '" style="color:#94a3b8;font-weight:400"></span><span style="flex:1"></span>',
+    '    <button id="' + EL_S.ckSave + '" style="' + S.linkS + '">存到服务端</button>',
+    '    <button id="' + EL_S.ckCopy + '" style="' + S.linkS + '">复制</button>',
+    '    <button id="' + EL_S.ckRefresh + '" style="' + S.linkS + '">刷新</button></div>',
+    '  <div id="' + EL_S.ckBody + '" style="display:none">',
+    '    <textarea id="' + EL_S.ckVal + '" readonly placeholder="点「刷新」从浏览器读取（含 HttpOnly 登录态）"',
     '      style="width:100%;box-sizing:border-box;height:56px;resize:vertical;border:1px solid #cbd5e1;border-radius:8px;padding:5px 6px;font:11px/1.4 ui-monospace,Consolas,monospace;color:#0f172a"></textarea>',
     '    <div style="color:#94a3b8;font-size:11px;margin-top:4px">「存到服务端」后，后端可自己带 Cookie 取数；也可复制粘贴到后端「实时获取 → 接口 Cookie → 设置」</div>',
     '  </div>',
     '</div>',
-    '<style>#hps-cfg .hps-ln{font:10px/1.4 ui-monospace,Consolas,monospace;color:#475569;word-break:break-all;white-space:pre-wrap}',
-    '#hps-cfg .hps-ln.ok{color:#047857}#hps-cfg .hps-ln.err{color:#b91c1c}',
-    '#hps-cfg .hps-ln.warn{color:#b45309}#hps-cfg .hps-ln.run{color:#1d4ed8}</style>'
+    '<style>#' + CFG_S.domId + ' .hps-ln{font:10px/1.4 ui-monospace,Consolas,monospace;color:#475569;word-break:break-all;white-space:pre-wrap}',
+    '#' + CFG_S.domId + ' .hps-ln.ok{color:#047857}#' + CFG_S.domId + ' .hps-ln.err{color:#b91c1c}',
+    '#' + CFG_S.domId + ' .hps-ln.warn{color:#b45309}#' + CFG_S.domId + ' .hps-ln.run{color:#1d4ed8}</style>'
   ].join('');
 
   var $ = function (sel) { return cfgBlock.querySelector(sel); };
 
-  /* ---------- 元素引用（全部在 cfgBlock 内） ---------- */
-  var elBase = $('#hpsBase'), elOn = $('#hpsOn'), elMin = $('#hpsMin'), elRange = $('#hpsRange'), elInc = $('#hpsInc');
-  var elState = $('#hpsState'), elTip = $('#hpsTip'), elOpen = $('#hpsOpen'), elDot = $('#hpsDot');
-  var elLogBody = $('#hpsDbgBody'), elLogN = $('#hpsDbgN'), elPath = $('#hpsPath'), elLogA = $('#hpsDbgA');
-  var elApiOrigin = $('#hpsApiOrigin');
-  var elCkVal = $('#hpsCkVal'), elCkN = $('#hpsCkN'), elCkA = $('#hpsCkA');
+  /* ---------- 元素引用（全部在 cfgBlock 内，id 见 US_CFG.sync.el） ---------- */
+  var elBase = $('#' + EL_S.base), elOn = $('#' + EL_S.on), elMin = $('#' + EL_S.min),
+    elRange = $('#' + EL_S.range), elInc = $('#' + EL_S.inc);
+  var elState = $('#' + EL_S.state), elTip = $('#' + EL_S.tip), elOpen = $('#' + EL_S.open), elDot = $('#' + EL_S.dot);
+  var elLogBody = $('#' + EL_S.dbgArea), elLogN = $('#' + EL_S.dbgCount), elPath = $('#' + EL_S.path), elLogA = $('#' + EL_S.dbgArrow);
+  var elApiOrigin = $('#' + EL_S.apiOrigin);
+  var elCkVal = $('#' + EL_S.ckVal), elCkN = $('#' + EL_S.ckCount), elCkA = $('#' + EL_S.ckArrow);
 
   /* ---------- 调试日志 ---------- */
   var logBuf = [];
@@ -1247,8 +1341,8 @@
     paint();
   });
   elMin.addEventListener('change', function () {
-    var n = Math.round(Number(elMin.value) || 5);
-    cfg.intervalMin = Math.min(1440, Math.max(1, n));
+    var n = Math.round(Number(elMin.value) || CFG_S.intervalMin);
+    cfg.intervalMin = Math.min(CFG_S.intervalMaxLimit, Math.max(CFG_S.intervalMinLimit, n));
     saveCfg();
     tip('间隔已设为每 ' + cfg.intervalMin + ' 分钟', 'ok');
     paint();
@@ -1264,24 +1358,24 @@
     saveCfg();
     tip(cfg.incremental ? '增量：遇到已入库即停' : '全量：整段区间重取', 'ok');
   });
-  $('#hpsNow').addEventListener('click', function () { tip('', ''); sync(); });
-  $('#hpsTest').addEventListener('click', function () { tip('', ''); testApi(); });
+  $('#' + EL_S.now).addEventListener('click', function () { tip('', ''); sync(); });
+  $('#' + EL_S.test).addEventListener('click', function () { tip('', ''); testApi(); });
 
-  section($('#hpsDbgH'), $('#hpsDbgB'), elLogA);
-  section($('#hpsCkH'), $('#hpsCkB'), elCkA);
+  section($('#' + EL_S.dbgHead), $('#' + EL_S.dbgBody), elLogA);
+  section($('#' + EL_S.ckHead), $('#' + EL_S.ckBody), elCkA);
 
   /* 把整块同步 UI 放进条码脚本的「条码设置」面板（保存 / 关闭按钮上方）。
-     该面板可能比本脚本晚创建、或不在本窗口创建，所以轮询 10 秒；
-     实在找不到就退化为右上角的独立浮动面板，功能不丢 */
+     该面板可能比本脚本晚创建、或不在本窗口创建，所以轮询 US_CFG.sync.mountTries 次；
+     实在找不到就退化为独立浮动面板，功能不丢 */
   (function mount() {
     var tries = 0;
     var timer = setInterval(function () {
-      var saveBtn = document.getElementById('saveConfigBtn');
+      var saveBtn = document.getElementById(US_CFG.barcode.el.saveBtn);
       if (saveBtn && saveBtn.parentNode && saveBtn.parentNode.parentNode) {
-        var panel = document.getElementById('tm-config-panel');
+        var panel = document.getElementById(US_CFG.barcode.el.panel);
         // 同步模块内容较多：把条码设置面板放宽一点、并可纵向滚动，避免挤在一列里换行 / 溢出屏幕
         if (panel) {
-          panel.style.width = 'min(250px, calc(100vw - 32px))';   // 比原来的 220px 略宽即可
+          panel.style.width = CFG_S.panelWidth;
           panel.style.maxHeight = 'calc(100vh - 32px)';
           panel.style.overflowY = 'auto';
           panel.style.overflowX = 'hidden';
@@ -1291,29 +1385,29 @@
         clearInterval(timer);
         return;
       }
-      if (++tries >= 20) {
+      if (++tries >= CFG_S.mountTries) {
         clearInterval(timer);
         mountFloating();
       }
-    }, 500);
+    }, CFG_S.mountIntervalMs);
   })();
 
   function mountFloating() {
     var host = document.createElement('div');
-    host.id = 'hps-host';
+    host.id = CFG_S.hostId;
     (document.body || document.documentElement).appendChild(host);
     var root = host.attachShadow({ mode: 'open' });
     root.innerHTML = '<style>:host{all:initial}.w{position:fixed;top:10px;right:10px;z-index:2147483647;' +
-      'width:240px;box-sizing:border-box;background:#fff;border:1px solid #dbe3ef;border-radius:10px;' +
+      'width:' + CFG_S.floatingWidth + 'px;box-sizing:border-box;background:#fff;border:1px solid #dbe3ef;border-radius:10px;' +
       'box-shadow:0 8px 24px rgba(15,23,42,.18);padding:10px}</style><div class="w"></div>';
     root.querySelector('.w').appendChild(cfgBlock);
   }
 
-  $('#hpsDbgClr').addEventListener('click', function () { logBuf = []; renderLog(); });
-  $('#hpsDbgCopy').addEventListener('click', function () { copy(logText(), '调试日志'); });
-  $('#hpsCkRefresh').addEventListener('click', function () { refreshCookie(false); });
-  $('#hpsCkSave').addEventListener('click', function () { saveCookie(false); });
-  $('#hpsCkCopy').addEventListener('click', function () {
+  $('#' + EL_S.dbgClear).addEventListener('click', function () { logBuf = []; renderLog(); });
+  $('#' + EL_S.dbgCopy).addEventListener('click', function () { copy(logText(), '调试日志'); });
+  $('#' + EL_S.ckRefresh).addEventListener('click', function () { refreshCookie(false); });
+  $('#' + EL_S.ckSave).addEventListener('click', function () { saveCookie(false); });
+  $('#' + EL_S.ckCopy).addEventListener('click', function () {
     if (!elCkVal.value) return tip('还没有读到 Cookie，先点「刷新」', 'err');
     copy(elCkVal.value, 'Cookie');
   });
@@ -1341,7 +1435,7 @@
     dbg('页面地址 ' + location.href);
     dbg('接口地址 ' + apiOrigin() + umsPath());
     dbg('User-Agent ' + navigator.userAgent);
-    var rg = rangeOf(), num = 100;
+    var rg = rangeOf(), num = CFG_S.pageSize;
     http('GET', api('/api/ums/config'))
       .then(function (j) { if (j && j.num) num = j.num; }, function (e) {
         dbg('读取后端配置失败（不影响接口测试）：' + ((e && e.message) || e), 'warn');
@@ -1361,20 +1455,20 @@
   GM_registerMenuCommand('立即同步', function () { sync(); });
   GM_registerMenuCommand('测试接口', function () { testApi(); });
   GM_registerMenuCommand('打开 / 关闭设置面板', function () {
-    var p = document.getElementById('tm-config-panel');
+    var p = document.getElementById(US_CFG.barcode.el.panel);
     if (p) p.style.display = p.style.display === 'block' ? 'none' : 'block';
     else tip('没找到设置面板，点页面右下角的「条码设置」');
   });
 
-  /* ---------- 自动同步：每 15 秒检查是否到点；每秒只更新倒计时 ---------- */
+  /* ---------- 自动同步：每 autoCheckMs 检查一次是否到点；每 countdownTickMs 只更新倒计时 ---------- */
   setInterval(function () {
     if (running) return;
     var at = last && last.at ? last.at : 0;
     if (cfg.enabled && (!at || Date.now() - at >= cfg.intervalMin * 60000)) { sync(); return; }
     paintState();
-  }, 15000);
+  }, CFG_S.autoCheckMs);
 
-  setInterval(function () { if (!running) paintState(); }, 1000);
+  setInterval(function () { if (!running) paintState(); }, CFG_S.countdownTickMs);
 
   /* ---------- 首屏 ---------- */
   if (last) { stateText = lastText(); stateCls = last.ok ? 'ok' : 'err'; }

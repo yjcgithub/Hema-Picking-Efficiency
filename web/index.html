@@ -38,6 +38,7 @@
     <button class="btn" id="umsBtn" title="按日期范围从拣货单接口实时获取，与上传同口径入库">实时获取</button>
     <button class="btn" id="zoneCfgBtn">分区设置</button>
     <button class="btn" id="dataMgrBtn">数据管理</button>
+    <button class="btn" id="logsBtn" title="查看服务端日志（取数 / 自动获取 / 入库 / 设置等关键动作，最多保留最近 500 条）">日志</button>
   </div>
   </div>
   <!-- 顶栏信息条：独立整行，含「统计时间段 + 数据来源 / 有效明细 / 访问方式」
@@ -205,6 +206,32 @@
   </div>
 </div>
 
+<!-- 日志弹窗：查看服务端最近日志（上传 / 入库 / 取数 / 自动获取 / 设置等关键动作），默认自动刷新 -->
+<div class="mask hidden" id="logsMask">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>服务端日志</h3>
+      <button type="button" class="modal-x" id="logsClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-bar">
+      <label class="chk" title="每 3 秒自动拉取最新日志"><input type="checkbox" id="logsAuto" checked>自动刷新</label>
+      <span class="modal-sum" id="logsSum">—</span>
+      <span class="grow"></span>
+      <label class="chk" title="只显示最近 N 条">行数
+        <select class="select" id="logsLimit">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+        </select>
+      </label>
+      <button type="button" class="btn" id="logsRefresh">刷新</button>
+    </div>
+    <div class="modal-body logs-body">
+      <pre class="logs-pre" id="logsPre">加载中…</pre>
+    </div>
+  </div>
+</div>
+
 <!-- 分区设置弹窗：配置「拣货分区 → 前后场分区（作业类型）」映射，保存后由服务端重算历史数据集 -->
 <div class="mask hidden" id="zoneCfgMask">
   <div class="modal narrow">
@@ -297,10 +324,10 @@
           入库口径与上传 xlsx 完全一致（按「拣货开始时间」的日期集合覆盖 / 新增）：<br>
           · 由后端带 Cookie 请求拣货单接口，需要先保存一次 Cookie（登录态过期后需重新粘贴）。<br>
           · <b>Cookie 失效</b>时页面会提示：打开<b>盒马工作台</b>页面，点右下角插件面板里的「<b>立即同步</b>」手动同步一次，脚本会重新读取并保存 Cookie。<br>
-          · 分页：<b>index 是页码（0 起，倒序第一页 = 最新）</b>，按 totalNum 自动探测总页数，每页条数可设置（单日约 4000 条）。<br>
+          · 分页：<b>index 是页码（0 起，倒序第一页 = 最新）</b>，总页数 = <b>ceil(总条数 totalNum ÷ 每页条数)</b>，拿到第一页即确定；取数时弹窗与顶栏显示「第 x / N 页」。每页条数可设置（单日约 4000 条）。<br>
           · 增量获取：从最新页往回取，遇到「整页拣货单号都已入库」即停，只把新增明细并入已有数据集，重复拉取不会翻倍。<br>
-          · 自动获取：服务端按设置的间隔自动增量获取「当天」数据（需已保存 Cookie，且服务端保持运行）。可设置每日执行时段（如 07:00 ~ 22:30），时段外自动暂停。<br>
-          · 手动获取：顶栏「手动获取」按钮立即增量获取「当天」数据，不用打开本弹窗。<br>
+          · 自动获取：服务端按设置的间隔自动增量获取<b>页面「取数条件」的日期区间</b>（默认当天；需已保存 Cookie，且服务端保持运行）。可设置每日执行时段（如 07:00 ~ 22:30），时段外自动暂停。<br>
+          · 手动获取：顶栏「手动获取」按钮立即按<b>页面「取数条件」的日期区间</b>增量获取，不用打开本弹窗。<br>
           · 防风控：翻页之间随机停顿 300~900ms；自动间隔加 ±15% 抖动（避免固定时刻规律打点）；连续失败按指数退避重试（间隔翻倍，最多 60 分钟），成功后立即恢复正常间隔。手动 / 自动 / 脚本同步共用 60 秒取数冷却，冷却中「手动获取」按钮禁用并显示倒计时。首页角标只显示自动获取开关状态。<br>
           · 油猴脚本（推荐）：UMS 登录态是 HttpOnly Cookie，脚本读不到，所以脚本改为在本页面内用登录态取数后回传 ——
           安装 <b>userscript/hema-pick-sync.user.js</b> 后，后端不再需要 Cookie，也能自动同步（保持 ums 页面标签开着即可）。

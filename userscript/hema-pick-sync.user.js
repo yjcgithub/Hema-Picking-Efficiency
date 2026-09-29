@@ -40,38 +40,100 @@
   · 「增量」勾选时从最新页往回取，遇到「整页拣货单号都已入库」即停；不勾选则整段区间全量重取
   · 整段抓取完整时，后端会把该日期范围内的旧明细整条替换（含手动上传的数据），避免同一单重复计数
 */
+/* ============================== 统一配置区 ==============================
+   所有可调项集中在这里，改完保存、刷新页面即生效；正文不再出现散落的魔法值。
+   配置持久化在 GM 存储里（键名见 keys），首次运行取 defaults 里的值。
+   ====================================================================== */
+var US_CFG = {
+  /* -------------------------- 接口与请求 -------------------------- */
+  umsPath: '/out/PickOrderManager/listPickOrderForB2C.json',   // 拣货单接口路径（cfg.path 为空时的兜底）
+  maxPages: 400,              // 分页保护上限，与后端一致
+  maxLog: 300,                // 调试日志最多保留条数
+  pageSize: 100,              // 每页条数兜底（后端 /api/ums/config 返回的 num 优先）
+  backendTimeoutMs: 180000,   // 请求后端的超时
+  umsTimeoutMs: 60000,        // 请求拣货单接口的超时（GM_xmlhttpRequest 降级路径）
+
+  /* -------------------------- 自动同步 --------------------------- */
+  autoCheckMs: 15000,         // 多久检查一次是否到点
+  countdownTickMs: 1000,      // 倒计时刷新间隔
+  intervalMin: 5,             // 自动同步间隔默认值（分钟）
+  intervalMinLimit: 1,        // 允许的最小间隔（分钟）
+  intervalMaxLimit: 1440,     // 允许的最大间隔（分钟）
+
+  /* ---------------------------- 面板 ----------------------------- */
+  hostId: 'hps-host',         // 宿主节点 id（面板挂在 Shadow DOM 里）
+  panelWidth: 240,            // 面板宽度（px）
+  logMaxHeight: 104,          // 调试日志区最大高度（px）
+  cookieBoxHeight: 46,        // Cookie 文本框高度（px）
+
+  /* ------------------------- 存储与默认值 ------------------------- */
+  keys: {                     // GM 存储键名
+    base: 'base', enabled: 'enabled', intervalMin: 'intervalMin', range: 'range',
+    incremental: 'incremental', apiOrigin: 'apiOrigin', path: 'path',
+    collapsed: 'collapsed', last: 'last'
+  },
+  defaults: {                 // 首次运行的默认值（被 GM 存储里已有的值覆盖）
+    base: 'https://xl.yjmc.xyz/hpe',
+    enabled: false,           // 自动同步：默认关闭，需在面板里手动勾选
+    intervalMin: 5,
+    range: 'today',           // today | y2 | d3 | d7
+    incremental: true,
+    apiOrigin: 'https://ums.hemaos.com',   // 接口所在域（可能与页面域不同）
+    collapsed: false          // 整个面板折叠状态
+  },
+
+  /* --------------------------- 元素标识 --------------------------- */
+  // 面板元素的 id / class（HTML 与 JS 共用一份；JS 侧用 idSel() / clsSel() 拼选择器）
+  el: {
+    wrap: 'wrap', head: 'hd', sum: 'sum', toggle: 'tg', body: 'bd',
+    base: 'base', on: 'on', min: 'min', range: 'range', inc: 'inc',
+    now: 'now', test: 'test', tip: 'tip',
+    dot: 'dot', state: 'st', stateMsg: 'stm', countdown: 'cd',
+    dbgHead: 'dbgH', dbgArrow: 'dbgA', dbgCount: 'dbgN', dbgToggle: 'dbgB', dbgArea: 'dbgBody',
+    dbgCopy: 'dbgCopy', dbgClear: 'dbgClr',
+    apiOrigin: 'apiOrigin', path: 'path',
+    ckHead: 'ckH', ckArrow: 'ckA', ckCount: 'ckN', ckToggle: 'ckB',
+    ckVal: 'ckVal', ckCopy: 'ckCopy', ckRefresh: 'ckRefresh'
+  }
+};
+
 (function () {
   'use strict';
 
-  /* ---------- 常量与配置 ---------- */
-  var UMS_PATH = '/out/PickOrderManager/listPickOrderForB2C.json';
-  var MAX_PAGES = 400;          // 分页保护上限，与后端一致
-  var MAX_LOG = 300;            // 调试日志最多保留多少条
+  /* ---------- 配置：全部取自文件顶部「统一配置区」 ---------- */
+  var K = US_CFG.keys;                  // GM 存储键名
+  var EL = US_CFG.el;                   // 面板元素标识
+  var UMS_PATH = US_CFG.umsPath;        // 接口路径（cfg.path 为空时的兜底）
+  var MAX_PAGES = US_CFG.maxPages;      // 分页保护上限，与后端一致
+  var MAX_LOG = US_CFG.maxLog;          // 调试日志最多保留条数
+  function idSel(k) { return '#' + EL[k]; }    // 按 id 取选择器
+  function clsSel(k) { return '.' + EL[k]; }   // 按 class 取选择器
 
   var cfg = {
-    base: GM_getValue('base', 'https://xl.yjmc.xyz/hpe'),
-    enabled: GM_getValue('enabled', true),
-    intervalMin: GM_getValue('intervalMin', 5),
-    range: GM_getValue('range', 'today'),      // today | y2 | d3 | d7
-    incremental: GM_getValue('incremental', true),
-    apiOrigin: GM_getValue('apiOrigin', 'https://ums.hemaos.com'),  // 接口所在域（可能与页面域不同）
-    path: GM_getValue('path', UMS_PATH),       // 接口路径，可改（排查 404 用）
-    collapsed: GM_getValue('collapsed', false) // 整个面板折叠状态
+    base: GM_getValue(K.base, US_CFG.defaults.base),
+    enabled: GM_getValue(K.enabled, US_CFG.defaults.enabled),    // 自动同步：默认关闭，需在面板里手动勾选
+    intervalMin: GM_getValue(K.intervalMin, US_CFG.defaults.intervalMin),
+    range: GM_getValue(K.range, US_CFG.defaults.range),          // today | y2 | d3 | d7
+    incremental: GM_getValue(K.incremental, US_CFG.defaults.incremental),
+    apiOrigin: GM_getValue(K.apiOrigin, US_CFG.defaults.apiOrigin),  // 接口所在域（可能与页面域不同）
+    path: GM_getValue(K.path, UMS_PATH),       // 接口路径，可改（排查 404 用）
+    collapsed: GM_getValue(K.collapsed, US_CFG.defaults.collapsed)   // 整个面板折叠状态
   };
-  var last = GM_getValue('last', null);        // { at, ok, msg, added, replaced, records, pages, range }
+  var last = GM_getValue(K.last, null);        // { at, ok, msg, added, replaced, records, pages, range }
+
   var running = false;
   var stateText = '尚未同步';
   var stateCls = '';
 
   function saveCfg() {
-    GM_setValue('base', cfg.base);
-    GM_setValue('enabled', !!cfg.enabled);
-    GM_setValue('intervalMin', cfg.intervalMin);
-    GM_setValue('range', cfg.range);
-    GM_setValue('incremental', !!cfg.incremental);
-    GM_setValue('apiOrigin', cfg.apiOrigin);
-    GM_setValue('path', cfg.path);
-    GM_setValue('collapsed', !!cfg.collapsed);
+    GM_setValue(K.base, cfg.base);
+    GM_setValue(K.enabled, !!cfg.enabled);
+    GM_setValue(K.intervalMin, cfg.intervalMin);
+    GM_setValue(K.range, cfg.range);
+    GM_setValue(K.incremental, !!cfg.incremental);
+    GM_setValue(K.apiOrigin, cfg.apiOrigin);
+    GM_setValue(K.path, cfg.path);
+    GM_setValue(K.collapsed, !!cfg.collapsed);
   }
 
   function api(path) {
@@ -125,7 +187,7 @@
         url: url,
         headers: body ? { 'Content-Type': 'application/json' } : {},
         data: body ? JSON.stringify(body) : undefined,
-        timeout: 180000,
+        timeout: US_CFG.backendTimeoutMs,
         onload: function (res) {
           dbg('← 后端 ' + res.status + '（' + method + ' ' + url.replace(/^.*\/api/, '/api') + '）',
             res.status >= 400 ? 'err' : 'ok');
@@ -166,7 +228,7 @@
           method: 'GET',
           url: url,
           headers: { Accept: 'application/json, text/plain, */*' },
-          timeout: 60000,
+          timeout: US_CFG.umsTimeoutMs,
           onload: function (r) { resolve({ status: r.status, text: r.responseText || '', via: 'GM' }); },
           ontimeout: function () { reject(new Error('接口请求超时：' + url)); },
           onerror: function () { reject(new Error('接口请求失败（网络不可达）：' + url)); }
@@ -210,7 +272,7 @@
   function sync() {
     if (running) return Promise.resolve();
     running = true;
-    var rg = rangeOf(), pages = [], got = 0, total = 0, reached = false, complete = false, num = 100;
+    var rg = rangeOf(), pages = [], got = 0, total = 0, reached = false, complete = false, num = US_CFG.pageSize;
     setState('同步中…', 'run');
     dbg('— 开始同步 ' + rg.start + ' ~ ' + rg.end + (cfg.incremental ? '（增量）' : '（全量）') + ' —', 'run');
 
@@ -254,7 +316,7 @@
           msg: (complete ? '全量' : '增量追平') + '，数据集 #' + r.id
         };
         running = false;
-        GM_setValue('last', last);
+        GM_setValue(K.last, last);
         setState(lastText(), 'ok');
         tip('同步完成', 'ok');
         dbg('同步完成：新增 ' + last.added + ' 条，覆盖 ' + last.replaced + ' 条，合计 ' + last.records + ' 条', 'ok');
@@ -266,7 +328,7 @@
           msg: (e && e.message) || String(e)
         };
         running = false;
-        GM_setValue('last', last);
+        GM_setValue(K.last, last);
         setState(lastText(), 'err');
         tip('同步失败', 'err');
         dbg('同步失败：' + last.msg, 'err');
@@ -299,13 +361,13 @@
 
   /* ---------- 面板 ---------- */
   var host = document.createElement('div');
-  host.id = 'hps-host';
+  host.id = US_CFG.hostId;
   (document.body || document.documentElement).appendChild(host);
   var root = host.attachShadow({ mode: 'open' });
   root.innerHTML = [
     '<style>',
     ':host{all:initial}',
-    '.wrap{position:fixed;top:10px;right:10px;z-index:2147483647;width:240px;',
+    '.wrap{position:fixed;top:10px;right:10px;z-index:2147483647;width:' + US_CFG.panelWidth + 'px;',
     '  font:11.5px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#0f172a;',
     '  background:#fff;border:1px solid #dbe3ef;border-radius:9px;box-shadow:0 8px 24px rgba(15,23,42,.18);overflow:hidden}',
     '.hd{display:flex;align-items:center;gap:5px;padding:5px 8px;background:#f4f8ff;cursor:pointer}',
@@ -328,52 +390,52 @@
     '.secH .sp{flex:1}',
     '.secH button{border:0;background:transparent;color:#2563eb;cursor:pointer;font:inherit;padding:0 2px}',
     '.secH button:hover{text-decoration:underline}',
-    '.log{max-height:104px;overflow:auto;background:#f8fafc;border:1px solid #e5ecf7;border-radius:5px;padding:4px 5px}',
+    '.log{max-height:' + US_CFG.logMaxHeight + 'px;overflow:auto;background:#f8fafc;border:1px solid #e5ecf7;border-radius:5px;padding:4px 5px}',
     '.ln{font:10px/1.4 ui-monospace,Consolas,"Courier New",monospace;color:#475569;word-break:break-all;white-space:pre-wrap}',
     '.ln.ok{color:#047857}.ln.err{color:#b91c1c}.ln.warn{color:#b45309}.ln.run{color:#1d4ed8}',
     'textarea{border:1px solid #d5dced;border-radius:5px;padding:4px 5px;width:100%;box-sizing:border-box;',
-    '  height:46px;resize:vertical;font:10px/1.35 ui-monospace,Consolas,"Courier New",monospace;color:#0f172a}',
+    '  height:' + US_CFG.cookieBoxHeight + 'px;resize:vertical;font:10px/1.35 ui-monospace,Consolas,"Courier New",monospace;color:#0f172a}',
     '.st{margin-top:5px;padding-top:5px;border-top:1px dashed #e5ecf7;color:#64748b;font-variant-numeric:tabular-nums;word-break:break-all;font-size:11px}',
     '.st.run{color:#1d4ed8}.st.ok{color:#047857}.st.err{color:#b91c1c}',
     '.dot{width:7px;height:7px;border-radius:50%;background:#cbd5e1;flex:none}',
     '.dot.run{background:#2563eb}.dot.ok{background:#10b981}.dot.err{background:#ef4444}',
     '.hide{display:none}',
     '</style>',
-    '<div class="wrap">',
-    '  <div class="hd" id="hd"><span class="dot"></span><span class="st1">拣货效率同步</span>',
-    '    <span class="sum" id="sum"></span><button id="tg" title="折叠 / 展开">−</button></div>',
-    '  <div class="bd" id="bd">',
-    '    <div class="row"><input type="text" id="base" placeholder="后端地址，如 http://localhost:3001/hpe"></div>',
+    '<div class="' + EL.wrap + '">',
+    '  <div class="' + EL.head + '" id="' + EL.head + '"><span class="' + EL.dot + '"></span><span class="st1">拣货效率同步</span>',
+    '    <span class="' + EL.sum + '" id="' + EL.sum + '"></span><button id="' + EL.toggle + '" title="折叠 / 展开">−</button></div>',
+    '  <div class="' + EL.body + '" id="' + EL.body + '">',
+    '    <div class="row"><input type="text" id="' + EL.base + '" placeholder="后端地址，如 http://localhost:3001/hpe"></div>',
     '    <div class="row">',
-    '      <label><input type="checkbox" id="on">自动同步</label>',
-    '      <label>每<input type="number" id="min" min="1" max="1440" step="1">分钟</label>',
+    '      <label><input type="checkbox" id="' + EL.on + '">自动同步</label>',
+    '      <label>每<input type="number" id="' + EL.min + '" min="' + US_CFG.intervalMinLimit + '" max="' + US_CFG.intervalMaxLimit + '" step="1">分钟</label>',
     '    </div>',
     '    <div class="row">',
-    '      <label>范围<select id="range">',
+    '      <label>范围<select id="' + EL.range + '">',
     '        <option value="today">当天</option><option value="y2">昨天 ~ 今天</option>',
     '        <option value="d3">最近 3 天</option><option value="d7">最近 7 天</option>',
     '      </select></label>',
-    '      <label><input type="checkbox" id="inc">增量</label>',
+    '      <label><input type="checkbox" id="' + EL.inc + '">增量</label>',
     '    </div>',
-    '    <div class="row"><button class="act" id="now">立即同步</button>',
-    '      <button class="act" id="test">测试接口</button><span id="tip"></span></div>',
-    '    <div class="st" id="st"><div id="stm"></div><div id="cd"></div></div>',
+    '    <div class="row"><button class="act" id="' + EL.now + '">立即同步</button>',
+    '      <button class="act" id="' + EL.test + '">测试接口</button><span id="' + EL.tip + '"></span></div>',
+    '    <div class="' + EL.state + '" id="' + EL.state + '"><div id="' + EL.stateMsg + '"></div><div id="' + EL.countdown + '"></div></div>',
     '    <div class="sec">',
-    '      <div class="secH" id="dbgH"><span class="arw" id="dbgA">▸</span><span>调试日志</span>',
-    '        <span class="cnt" id="dbgN"></span><span class="sp"></span>',
-    '        <button id="dbgCopy">复制</button><button id="dbgClr">清空</button></div>',
-    '      <div class="hide" id="dbgB">',
-    '        <div class="row"><label style="flex:1">接口域名<input type="text" id="apiOrigin" placeholder="https://ums.hemaos.com"></label></div>',
-    '        <div class="row"><label style="flex:1">接口路径<input type="text" id="path"></label></div>',
-    '        <div class="log" id="dbgBody"></div>',
+    '      <div class="secH" id="' + EL.dbgHead + '"><span class="arw" id="' + EL.dbgArrow + '">▸</span><span>调试日志</span>',
+    '        <span class="cnt" id="' + EL.dbgCount + '"></span><span class="sp"></span>',
+    '        <button id="' + EL.dbgCopy + '">复制</button><button id="' + EL.dbgClear + '">清空</button></div>',
+    '      <div class="hide" id="' + EL.dbgToggle + '">',
+    '        <div class="row"><label style="flex:1">接口域名<input type="text" id="' + EL.apiOrigin + '" placeholder="https://ums.hemaos.com"></label></div>',
+    '        <div class="row"><label style="flex:1">接口路径<input type="text" id="' + EL.path + '"></label></div>',
+    '        <div class="log" id="' + EL.dbgArea + '"></div>',
     '      </div>',
     '    </div>',
     '    <div class="sec">',
-    '      <div class="secH" id="ckH"><span class="arw" id="ckA">▸</span><span>捕获的 Cookie</span>',
-    '        <span class="cnt" id="ckN"></span><span class="sp"></span>',
-    '        <button id="ckCopy">复制</button><button id="ckRefresh">刷新</button></div>',
-    '      <div class="hide" id="ckB">',
-    '        <textarea id="ckVal" readonly placeholder="点「刷新」从浏览器读取（含 HttpOnly 登录态）"></textarea>',
+    '      <div class="secH" id="' + EL.ckHead + '"><span class="arw" id="' + EL.ckArrow + '">▸</span><span>捕获的 Cookie</span>',
+    '        <span class="cnt" id="' + EL.ckCount + '"></span><span class="sp"></span>',
+    '        <button id="' + EL.ckCopy + '">复制</button><button id="' + EL.ckRefresh + '">刷新</button></div>',
+    '      <div class="hide" id="' + EL.ckToggle + '">',
+    '        <textarea id="' + EL.ckVal + '" readonly placeholder="点「刷新」从浏览器读取（含 HttpOnly 登录态）"></textarea>',
     '        <div class="row" style="margin:5px 0 0"><span style="color:#94a3b8">可粘贴到后端「实时获取 → 接口 Cookie → 设置」</span></div>',
     '      </div>',
     '    </div>',
@@ -382,12 +444,15 @@
   ].join('');
 
   var $ = function (sel) { return root.querySelector(sel); };
-  var elBase = $('#base'), elOn = $('#on'), elMin = $('#min'), elRange = $('#range'), elInc = $('#inc');
-  var elDot = $('.dot'), elSt = $('#st'), elStm = $('#stm'), elCd = $('#cd'), elTip = $('#tip');
-  var elSum = $('#sum'), elBd = $('#bd'), elTg = $('#tg');
-  var elLogBody = $('#dbgBody'), elLogN = $('#dbgN'), elPath = $('#path'), elLogA = $('#dbgA');
-  var elApiOrigin = $('#apiOrigin');
-  var elCkVal = $('#ckVal'), elCkN = $('#ckN'), elCkA = $('#ckA');
+  var elBase = $(idSel('base')), elOn = $(idSel('on')), elMin = $(idSel('min')),
+    elRange = $(idSel('range')), elInc = $(idSel('inc'));
+  var elDot = $(clsSel('dot')), elSt = $(idSel('state')), elStm = $(idSel('stateMsg')),
+    elCd = $(idSel('countdown')), elTip = $(idSel('tip'));
+  var elSum = $(idSel('sum')), elBd = $(idSel('body')), elTg = $(idSel('toggle'));
+  var elLogBody = $(idSel('dbgArea')), elLogN = $(idSel('dbgCount')),
+    elPath = $(idSel('path')), elLogA = $(idSel('dbgArrow'));
+  var elApiOrigin = $(idSel('apiOrigin'));
+  var elCkVal = $(idSel('ckVal')), elCkN = $(idSel('ckCount')), elCkA = $(idSel('ckArrow'));
 
   /* ---------- 调试日志 ---------- */
   var logBuf = [];
@@ -533,8 +598,8 @@
     paint();
   });
   elMin.addEventListener('change', function () {
-    var n = Math.round(Number(elMin.value) || 5);
-    cfg.intervalMin = Math.min(1440, Math.max(1, n));
+    var n = Math.round(Number(elMin.value) || US_CFG.intervalMin);
+    cfg.intervalMin = Math.min(US_CFG.intervalMaxLimit, Math.max(US_CFG.intervalMinLimit, n));
     saveCfg();
     tip('间隔已设为每 ' + cfg.intervalMin + ' 分钟', 'ok');
     paint();
@@ -550,12 +615,12 @@
     saveCfg();
     tip(cfg.incremental ? '增量：遇到已入库即停' : '全量：整段区间重取', 'ok');
   });
-  $('#now').addEventListener('click', function () { tip('', ''); sync(); });
-  $('#test').addEventListener('click', function () { tip('', ''); testApi(); });
+  $(idSel('now')).addEventListener('click', function () { tip('', ''); sync(); });
+  $(idSel('test')).addEventListener('click', function () { tip('', ''); testApi(); });
 
   // 标题栏整行可点：折叠 / 展开（状态记忆）
-  $('#hd').addEventListener('click', function (ev) {
-    if (ev.target && ev.target.id === 'tg') return;   // 由按钮自己处理
+  $(idSel('head')).addEventListener('click', function (ev) {
+    if (ev.target && ev.target.id === EL.toggle) return;   // 由按钮自己处理
     toggleCollapse();
   });
   elTg.addEventListener('click', toggleCollapse);
@@ -565,13 +630,13 @@
     paint();
   }
 
-  section($('#dbgH'), $('#dbgB'), elLogA);
-  section($('#ckH'), $('#ckB'), elCkA);
+  section($(idSel('dbgHead')), $(idSel('dbgToggle')), elLogA);
+  section($(idSel('ckHead')), $(idSel('ckToggle')), elCkA);
 
-  $('#dbgClr').addEventListener('click', function () { logBuf = []; renderLog(); });
-  $('#dbgCopy').addEventListener('click', function () { copy(logText(), '调试日志'); });
-  $('#ckRefresh').addEventListener('click', function () { refreshCookie(false); });
-  $('#ckCopy').addEventListener('click', function () {
+  $(idSel('dbgClear')).addEventListener('click', function () { logBuf = []; renderLog(); });
+  $(idSel('dbgCopy')).addEventListener('click', function () { copy(logText(), '调试日志'); });
+  $(idSel('ckRefresh')).addEventListener('click', function () { refreshCookie(false); });
+  $(idSel('ckCopy')).addEventListener('click', function () {
     if (!elCkVal.value) return tip('还没有读到 Cookie，先点「刷新」', 'err');
     copy(elCkVal.value, 'Cookie');
   });
@@ -599,7 +664,7 @@
     dbg('页面地址 ' + location.href);
     dbg('接口地址 ' + apiOrigin() + umsPath());
     dbg('User-Agent ' + navigator.userAgent);
-    var rg = rangeOf(), num = 100;
+    var rg = rangeOf(), num = US_CFG.pageSize;
     http('GET', api('/api/ums/config'))
       .then(function (j) { if (j && j.num) num = j.num; }, function (e) {
         dbg('读取后端配置失败（不影响接口测试）：' + ((e && e.message) || e), 'warn');
@@ -619,24 +684,24 @@
   GM_registerMenuCommand('立即同步', function () { sync(); });
   GM_registerMenuCommand('测试接口', function () { testApi(); });
   GM_registerMenuCommand('显示 / 隐藏面板', function () {
-    var w = $('.wrap');
+    var w = $(clsSel('wrap'));
     w.style.display = w.style.display === 'none' ? '' : 'none';
   });
 
-  /* ---------- 自动同步：每 15 秒检查是否到点；每秒只更新倒计时 ---------- */
+  /* ---------- 自动同步：每 autoCheckMs 检查一次是否到点；每 countdownTickMs 只更新倒计时 ---------- */
   setInterval(function () {
     if (running) return;
     var at = last && last.at ? last.at : 0;
     if (cfg.enabled && (!at || Date.now() - at >= cfg.intervalMin * 60000)) { sync(); return; }
     if (cfg.collapsed) elSum.textContent = shortText();
     else elCd.textContent = countdownText();
-  }, 15000);
+  }, US_CFG.autoCheckMs);
 
   setInterval(function () {
     if (running) return;
     if (cfg.collapsed) elSum.textContent = shortText();
     else elCd.textContent = countdownText();
-  }, 1000);
+  }, US_CFG.countdownTickMs);
 
   /* ---------- 首屏 ---------- */
   if (last) { stateText = lastText(); stateCls = last.ok ? 'ok' : 'err'; }

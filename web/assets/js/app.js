@@ -1133,7 +1133,7 @@
   var umsAutoStateEl = document.getElementById('umsAutoState');
   var umsAutoStart = document.getElementById('umsAutoStart');
   var umsAutoEnd = document.getElementById('umsAutoEnd');
-  var umsCfg = { cookieSet: false, num: 100, numChoices: [50, 100, 200], auto: {}, lastFetch: null };
+  var umsCfg = { cookieSet: false, num: 100, numChoices: [50, 100, 200], auto: {}, lastFetch: null, progress: null };
   var umsRunning = false, umsT0 = 0, umsLast = null, umsTick = null, umsCookieShown = false;
   var umsPrev = null;   // 上一次获取结果（成功 / 失败），首页角标据它显示
   var umsCdUntil = 0;   // 取数冷却截止时间戳（与服务端 60 秒窗口对应，手动 / 自动共用）
@@ -1211,6 +1211,14 @@
     });
   }
 
+  // 取数条件持久化：把页面「开始日期 / 结束日期」存到服务端，自动获取跟随同一区间
+  function umsSaveRange(s, e) {
+    if (!s) return;
+    if (!e || e < s) e = s;
+    umsSaveCfg({ range: { startDate: s, endDate: e } })
+      .catch(function () { /* 失败静默：不影响本次取数 */ });
+  }
+
   // 距上次获取的时长（10 分钟以内按「X 分 Y 秒」显示，便于确认自动获取是否在跑）
   function umsAgo(iso) {
     var t = Date.parse(iso);
@@ -1250,11 +1258,14 @@
       umsChip.title = '页面运行的仍是旧版本前端（' + umsBuild + '），点此刷新加载最新版本';
       return;
     }
-    if (umsRunning && umsLast) {
-      var sec = ((Date.now() - umsT0) / 1000).toFixed(0);
+    var pr = umsCfg.progress || {};
+    if (umsRunning || pr.active) {                   // 本页发起或服务端（自动获取）正在取数
+      var t0 = umsT0 || pr.startedAt || Date.now();
+      var sec = ((Date.now() - t0) / 1000).toFixed(0);
+      var pageTxt = umsPageText();
       umsChip.className = 'ums-chip run';
-      umsChip.textContent = '获取中 · 已用 ' + sec + 's';
-      umsChip.title = '点击查看实时获取进度';
+      umsChip.textContent = '获取中 · ' + (pageTxt || '已用 ' + sec + 's');
+      umsChip.title = pageTxt ? ('正在获取：' + pageTxt + '，已用 ' + sec + 's') : '点击查看实时获取进度';
       return;
     }
     if (umsPrev && umsPrev.ok) {
@@ -1292,10 +1303,10 @@
     }
     umsManualBtn.disabled = false;
     umsManualBtn.textContent = '手动获取';
-    umsManualBtn.title = '立即增量获取「当天」拣货单（与自动获取共用 ' + umsCdSec + ' 秒冷却）';
+    umsManualBtn.title = '立即按页面「取数条件」的日期区间增量获取（与自动获取共用 ' + umsCdSec + ' 秒冷却）';
   }
 
-  // 顶栏「手动获取」：抓「当天」增量数据，未保存 Cookie 时引导到弹窗
+  // 顶栏「手动获取」：抓页面「取数条件」的日期区间（默认当天），未保存 Cookie 时引导到弹窗
   umsManualBtn.addEventListener('click', function () {
     if (umsRunning) { notice('正在获取中，请稍候', 'err'); return; }
     var left = umsCdLeft();
@@ -1308,8 +1319,9 @@
       openUms();
       return;
     }
-    var t = todayStr();
-    umsRun(t, t, true);   // 当天 + 增量，与自动获取口径一致
+    var s = umsStartDate.value || todayStr();
+    var e = umsEndDate.value || s;
+    umsRun(s, e, true);   // 页面取数条件 + 增量，与自动获取口径一致
   });
 
   // 每隔一秒走动「距上次获取的时长」；每 5 秒拉一次服务端状态（后台自动获取的结果），保证角标与后端同步
@@ -1317,7 +1329,10 @@
   setInterval(function () {
     umsChipPaint();
     umsManualPaint();
-    if (++umsChipTicks % 5 === 0) umsLoadCfg();
+    umsChipTicks++;
+    // 取数进行中（本页发起或服务端自动获取）每秒拉一次进度，其余每 5 秒一次
+    var busy = umsRunning || !!(umsCfg.progress && umsCfg.progress.active);
+    if (busy || umsChipTicks % 5 === 0) umsLoadCfg();
     // 弹窗开着时顺带刷新「上次自动获取」状态文字
     if (umsChipTicks % 5 === 2 && umsMask && !umsMask.classList.contains('hidden')) umsAutoPaint();
   }, 1000);
@@ -1329,12 +1344,25 @@
     umsMetaEl.innerHTML = (items || []).map(function (s) { return '<span>' + s + '</span>'; }).join('');
   }
 
+  // 服务端取数进度文案：totalPages 由接口 totalNum ÷ num 直接算出，拿到第一页即显示「第 x / N 页」
+  function umsPageText() {
+    var pr = umsCfg.progress || {};
+    if (!pr.active) return '';
+    return pr.totalPages ? ('第 ' + pr.pages + ' / ' + pr.totalPages + ' 页') : '正在取第 1 页…';
+  }
+
   // 进度重绘（定时器驱动，让「已用时长」持续走动），同时刷新首页角标
   function umsPaint() {
     if (!umsLast) { umsChipPaint(); return; }
     var sec = ((Date.now() - umsT0) / 1000).toFixed(0);
-    umsSum.textContent = '服务端获取中…';
-    umsProg(100, true, ['已用 ' + sec + ' s']);
+    var pr = umsCfg.progress || {};
+    var pageTxt = umsPageText();
+    umsSum.textContent = '服务端获取中 · ' + pageTxt;
+    if (pr.active && pr.totalPages) {
+      umsProg(Math.round(pr.pages / pr.totalPages * 100), false, [pageTxt, '已用 ' + sec + ' s']);
+    } else {
+      umsProg(100, true, [pageTxt, '已用 ' + sec + ' s']);
+    }
     umsChipPaint();
   }
 
@@ -1403,6 +1431,7 @@
     if (!e) e = umsEndDate.value || s;
     if (!s) { notice('请先选择开始日期', 'err'); umsStartDate.focus(); return; }
     if (e < s) { notice('结束日期不能早于开始日期', 'err'); return; }
+    umsSaveRange(s, e);   // 记录本次取数条件，自动获取跟随同一区间
 
     var incFlag = inc == null ? umsIncremental() : !!inc;
     var label = '实时接口 ' + s + (e === s ? '' : ' ~ ' + e) + (incFlag ? '（增量）' : '');
@@ -1594,6 +1623,9 @@
   });
 
   // 每页条数 / 自动获取：改动即保存到服务端（自动获取由服务端常驻定时执行）
+  // 取数条件（开始/结束日期）：改动即保存，自动获取跟随同一区间
+  umsStartDate.addEventListener('change', function () { umsSaveRange(umsStartDate.value, umsEndDate.value); });
+  umsEndDate.addEventListener('change', function () { umsSaveRange(umsStartDate.value, umsEndDate.value); });
   umsNumSel.addEventListener('change', function () {
     umsSaveCfg({ num: Number(umsNumSel.value) })
       .then(function (j) { notice('每页条数已设为 ' + j.num + ' 条', 'ok'); })
@@ -1802,6 +1834,7 @@
     if (ev.key !== 'Escape') return;
     if (!dmConfirm.classList.contains('hidden')) { closeConfirm(); return; }
     if (!dmMask.classList.contains('hidden')) { closeDataMgr(); return; }
+    if (logsMask && !logsMask.classList.contains('hidden')) { closeLogs(); return; }
     var zc = document.getElementById('zoneCfgMask');
     if (zc && !zc.classList.contains('hidden')) closeZoneCfg();
     if (umsMask && !umsMask.classList.contains('hidden')) closeUms();
@@ -1822,6 +1855,51 @@
     if (view) switchDataset(view);
     else if (del) deleteDatasets([String(del)]);
   });
+
+  /* ---------- 日志查看（顶栏按钮 → 弹窗）：读服务端环形缓冲里的最近日志 ---------- */
+  var logsMask = document.getElementById('logsMask');
+  var logsPre = document.getElementById('logsPre');
+  var logsSum = document.getElementById('logsSum');
+  var logsAuto = document.getElementById('logsAuto');
+  var logsLimit = document.getElementById('logsLimit');
+  var logsTick = null;
+
+  function logsLoad() {
+    var limit = logsLimit.value || '200';
+    return fetch(API + '/logs?limit=' + encodeURIComponent(limit), { cache: 'no-store' })
+      .then(readJson).then(function (j) {
+        var lines = j.lines || [];
+        logsPre.innerHTML = lines.length
+          ? lines.map(function (l) {
+              return '<div class="lg' + (l.level === 'warn' ? ' warn' : '') + '">[' +
+                esc(l.at) + '] ' + esc(l.msg) + '</div>';
+            }).join('')
+          : '<div class="lg">暂无日志</div>';
+        logsSum.textContent = '最近 ' + lines.length + ' 条 / 共 ' + (j.total || 0) +
+          ' 条（最多保留 ' + (j.max || 0) + ' 条）';
+        logsPre.scrollTop = logsPre.scrollHeight;   // 始终停在最新一行
+      }).catch(function (e) {
+        logsPre.innerHTML = '<div class="lg warn">日志读取失败：' + esc((e && e.message) || e) + '</div>';
+        logsSum.textContent = '—';
+      });
+  }
+
+  function openLogs() {
+    logsMask.classList.remove('hidden');
+    logsLoad();
+    if (logsTick) clearInterval(logsTick);
+    logsTick = setInterval(function () { if (logsAuto.checked) logsLoad(); }, 3000);
+  }
+  function closeLogs() {
+    logsMask.classList.add('hidden');
+    if (logsTick) { clearInterval(logsTick); logsTick = null; }
+  }
+
+  document.getElementById('logsBtn').addEventListener('click', openLogs);
+  document.getElementById('logsClose').addEventListener('click', closeLogs);
+  logsMask.addEventListener('click', function (ev) { if (ev.target === logsMask) closeLogs(); });
+  document.getElementById('logsRefresh').addEventListener('click', logsLoad);
+  logsLimit.addEventListener('change', logsLoad);
 
   /* ---------- 分区设置（顶栏按钮 → 弹窗）：维护「拣货分区 → 前后场分区」映射与忽略分区 ---------- */
   var IGNORE_VAL = '__ignore__';    // 下拉里的「忽略」档位（哨兵值，不会与作业类型重名）
@@ -2172,6 +2250,14 @@
       scale: window.devicePixelRatio > 1 ? 2 : 1.5,
       ignoreElements: function (el) {
         return !!(el.classList && el.classList.contains('card-tools'));
+      },
+      // html2canvas 把节点克隆到独立文档再渲染，克隆体会重放入场动画（表格行 row-in 的逐行延迟、
+      // 卡片 dash-in、KPI 数字跳动），截图时仍停在 opacity:0 / translateX 初始态 → 图片显示不全。
+      // 只在克隆文档内关闭动画与过渡，不影响页面本身的动效。
+      onclone: function (doc) {
+        var st = doc.createElement('style');
+        st.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;}';
+        (doc.head || doc.documentElement).appendChild(st);
       }
     }).then(function (canvas) {
       if (restore) restore();
