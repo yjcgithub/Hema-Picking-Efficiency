@@ -379,7 +379,7 @@ npm start            # HEMA_STATIC=auto（默认）：启动时自动重建 dist
 npm run build        # 显式构建，打印 原始路径 -> 指纹路径 清单
 ```
 
-改完 `web/` 下的文件后**重启服务**即可；API 响应统一带 `no-store`，避免浏览器轮询命中 304 空响应。反向代理（nginx / Apache）需**透传上游缓存头且不要缓存 HTML**，完整配置示例、浏览器验证步骤与故障排查见 [CACHE.md](CACHE.md)。
+改完 `web/` 下的文件后**重启服务**即可；API 响应统一带 `no-store`，避免浏览器轮询命中 304 空响应。反向代理（nginx / Apache）需**透传上游缓存头且不要缓存 HTML**
 
 ---
 
