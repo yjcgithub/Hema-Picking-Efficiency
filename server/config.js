@@ -56,6 +56,7 @@ module.exports = {
   UMS_MAX_PAGES: 400,                     // 分页保护上限（100 × 400 = 4 万条）
   UMS_AUTO_MIN_INTERVAL: 1,               // 自动获取最小间隔（分钟）
   UMS_AUTO_MAX_INTERVAL: 1440,            // 自动获取最大间隔（分钟）
+  UMS_EDGE_WINDOW_MIN: 2,                 // 时段「开始 / 结束」时刻额外取数一次：到点后多少分钟内允许补执行
 
   /* ---------- 防风控：请求节流与退避 ---------- */
   UMS_PAGE_GAP_MIN_MS: 300,               // 翻页之间的最小停顿

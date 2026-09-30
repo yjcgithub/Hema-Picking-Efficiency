@@ -1174,7 +1174,7 @@
     if (umsAutoEnd && document.activeElement !== umsAutoEnd) umsAutoEnd.value = auto.timeEnd || '';
 
     var win = umsAutoWindow(auto);
-    var range = win ? '（时段 ' + win + '）' : '（全天）';
+    var range = win ? '（时段 ' + win + '，首尾各额外获取一次）' : '（全天）';
 
     if (!umsCfg.cookieSet) {
       umsAutoStateEl.className = 'ums-auto-state err';
@@ -1236,16 +1236,16 @@
     return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false });
   }
 
-  // 自动获取临近触发的倒计时秒数：只在服务端排期的下次执行前 10 秒内返回，其余返回 0
+  // 自动获取临近触发的倒计时秒数：只在服务端排期的下次执行前 60 秒（1 分钟）内返回，其余返回 0
   function umsAutoCountdown() {
     var auto = umsCfg.auto || {};
     if (!auto.enabled || !auto.nextAt) return 0;
     var left = Math.ceil((Date.parse(auto.nextAt) - Date.now()) / 1000);
-    return left > 0 && left <= 10 ? left : 0;
+    return left > 0 && left <= 60 ? left : 0;
   }
 
   // 首页角标：获取中显示进度与已用时长；空闲显示「上次获取 X 前 · N 条」
-  // 自动获取只显示开关状态（开 / 关），临近触发前 10 秒追加倒计时；其余细节在弹窗内查看
+  // 自动获取只显示开关状态（开 / 关），临近触发前 1 分钟追加倒计时；其余细节在弹窗内查看
   function umsChipPaint() {
     if (!umsChip) return;
     var autoOn = !!(umsCfg.auto && umsCfg.auto.enabled);

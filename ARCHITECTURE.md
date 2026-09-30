@@ -152,7 +152,8 @@ resolveStatic()
 | `umsAutoCfg()` | 自动获取设置：`{ enabled, intervalMin, timeStart, timeEnd }` |
 | `umsRangeCfg()` | 取数条件：页面「开始/结束日期」持久化的日期区间，非法/未设回退当天（手动与自动共用） |
 | `umsInTimeWindow(cfg)` | 按东八区判断是否在执行时段内（当天时间点，支持留空 = 全天） |
-| `umsAutoState()` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` |
+| `umsEdgeHit(cfg, st)` | 时段边界到点：返回 `'' / 'start' / 'end'`，用于在「开始 / 结束时刻」各额外强制取数一次（同一时刻只触发一次，见 `umsAutoState.edge`） |
+| `umsAutoState()` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` / `edge` |
 | `umsJitter()` / `umsAutoWaitMin()` / `umsAutoNextAt()` | 防风控：抖动系数、退避后的等待间隔、排期好的下次执行时间 |
 | `umsMarkTry()` / `umsCooldownInfo()` | 取数冷却：记录尝试时间、返回剩余等待秒数 |
 | `umsSleep(ms)` | 翻页之间的随机停顿 |
@@ -163,11 +164,15 @@ resolveStatic()
 自动获取的排期与退避（`umsAutoTick`）：
 
 ```
-if (!enabled || !cookie || 不在执行时段) return
-if (now < umsAutoNextAt(auto, st)) return          # 未到排期时间
+if (!enabled || !cookie) return
+edge = umsEdgeHit(auto, st)                        # 时段开始 / 结束时刻（到点后 UMS_EDGE_WINDOW_MIN 分钟内有效）
+if (!edge) {                                       # 边界取数不吃时段与排期
+  if (不在执行时段) return
+  if (now < umsAutoNextAt(auto, st)) return        # 未到排期时间
+}
 if (umsCooldownInfo().waitSec > 0) return          # 与手动/脚本共用冷却窗口
-成功 → failures=0，nextAt = now + intervalMin × jitter()
-失败 → failures+1，nextAt = now + min(BACKOFF_MAX, intervalMin × 2^failures) × jitter()
+成功 → failures=0，nextAt = now + intervalMin × jitter()，edge = 当天:边界
+失败 → failures+1，nextAt = now + min(BACKOFF_MAX, intervalMin × 2^failures) × jitter()，edge = 当天:边界
 ```
 
 **其它编排函数**：`currentMap()` / `currentIgnore()`（设置优先、回退默认值）、`dataZones()` / `zoneRows()`（分区清单）、`rebuildAll()`（设置变更后重算）、`withDate()`（出数范围，见 [7.3](#73-按日重算-withdate)）、`saveBuilt()`（上传与取数共用的入库决策，见 [7.1](#71-时间维度覆盖--新增)）。
@@ -279,7 +284,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | 上传 | `STORE_CODE`、`REQUIRED_COLUMNS` |
 | 设置键名 | `MAPPING_KEY`、`IGNORE_KEY` |
 | UMS 接口 | `UMS_URL`、`UMS_PAGE_SIZE`、`UMS_NUM_CHOICES`、`UMS_EXTRA_QUERY`、`UMS_TIMEOUT_MS`、`UMS_MAX_PAGES` |
-| 自动获取 | `UMS_AUTO_MIN_INTERVAL`、`UMS_AUTO_MAX_INTERVAL`、`UMS_AUTO_KEY`、`UMS_AUTO_STATE_KEY`、`UMS_AGENT_STATE_KEY` |
+| 自动获取 | `UMS_AUTO_MIN_INTERVAL`、`UMS_AUTO_MAX_INTERVAL`、`UMS_EDGE_WINDOW_MIN`、`UMS_AUTO_KEY`、`UMS_AUTO_STATE_KEY`、`UMS_AGENT_STATE_KEY` |
 | 防风控 | `UMS_PAGE_GAP_MIN_MS` / `UMS_PAGE_GAP_MAX_MS`（300 / 900）、`UMS_INTERVAL_JITTER`（0.15）、`UMS_BACKOFF_MAX_MIN`（60）、`UMS_FETCH_COOLDOWN_SEC`（60） |
 | 设置表键名 | `UMS_COOKIE_KEY`、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY`、`UMS_RANGE_KEY` |
 
@@ -372,13 +377,15 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 
 ```
 setInterval(umsAutoTick, 5s)
-  → 读配置与状态 → 时段判断 → 排期判断（now >= auto.nextAt）→ 冷却判断
+  → 读配置与状态 → 边界判断（umsEdgeHit：时段开始 / 结束时刻额外取一次）→ 时段判断 → 排期判断（now >= auto.nextAt）→ 冷却判断
   → umsRangeCfg() 取页面「取数条件」的日期区间（未设置则当天）
   → umsRunFetch(开始日期, 结束日期, incremental = true)
-  → 写回 umsAutoState：{ at, ok, error, records, added, failures, nextMin, nextAt, cfgInterval }
+  → 写回 umsAutoState：{ at, ok, error, records, added, failures, nextMin, nextAt, cfgInterval, edge }
 ```
 
 `nextAt` 是**固定排期**（含抖动与退避），不再每 5 秒重新随机 —— 这样服务端判断与前端倒计时用的是同一个时间点。
+
+`edge` 记录当天已执行的时段边界（`当天:start` / `当天:end`）：边界这一跳**不吃时段与间隔排期**（结束时刻正好在时段外），但仍受冷却与 `umsBusy` 约束；到点后 `UMS_EDGE_WINDOW_MIN` 分钟内允许补执行一次。
 
 ### 6.4 读取（展示）
 
@@ -567,7 +574,7 @@ setInterval(umsAutoTick, 5s)
 | `umsNum` | 每页条数（50 / 100 / 200） |
 | `umsRange` | 取数条件 `{ startDate, endDate }`（页面「开始/结束日期」，手动与自动共用的日期区间） |
 | `umsAuto` | 自动获取设置 `{ enabled, intervalMin, timeStart, timeEnd }` |
-| `umsAutoState` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` |
+| `umsAutoState` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` / `edge`（当天已执行的时段边界） |
 | `umsAgentState` | 油猴脚本最近一次同步结果 |
 | `umsLastFetch` | 最近一次取数结果（角标展示） |
 | `umsLastTryAt` | 最近一次取数**尝试**时间（冷却窗口起点） |

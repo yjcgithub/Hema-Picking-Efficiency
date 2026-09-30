@@ -527,16 +527,36 @@ function umsInTimeWindow(cfg) {
   return cur >= (sh * 60 + sm) && cur <= (eh * 60 + em);
 }
 
+/* 时段边界到点：在设置的「开始时间 / 结束时间」各额外强制取数一次（不受间隔排期限制）。
+   返回 '' | 'start' | 'end'。用 umsAutoState.edge 记录当天已执行的边界，同一时刻只触发一次；
+   到点后的 UMS_EDGE_WINDOW_MIN 分钟内允许补执行 —— 首次因冷却 / 任务占用被跳过时不会漏掉 */
+function umsEdgeHit(cfg, st) {
+  if (!cfg.timeStart && !cfg.timeEnd) return '';      // 未设时段 = 全天，无边界
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const cur = now.getUTCHours() * 60 + now.getUTCMinutes() + now.getUTCSeconds() / 60;
+  const day = now.toISOString().slice(0, 10);
+  const hit = function (hhmm, kind) {
+    if (!hhmm) return '';
+    const [h, m] = hhmm.split(':').map(Number);
+    const at = h * 60 + m;
+    if (!(cur >= at && cur < at + CFG.UMS_EDGE_WINDOW_MIN)) return '';
+    return st.edge === day + ':' + kind ? '' : kind;
+  };
+  return hit(cfg.timeStart, 'start') || hit(cfg.timeEnd, 'end');
+}
+
 // 最近一次自动获取结果（供页面展示）；failures/nextMin 为连续失败次数与退避后的下次间隔，
 // nextAt 为排期好的下次执行时间（页面据此在临近触发前显示倒计时），
-// cfgInterval 为排期时使用的「设置里的间隔」，用来判断用户改过间隔后是否需要重新排期
+// cfgInterval 为排期时使用的「设置里的间隔」，用来判断用户改过间隔后是否需要重新排期，
+// edge 记录当天已执行的「时段边界额外取数」（形如 '2026-09-30:end'），避免同一时刻重复触发
 function umsAutoState() {
   const s = db.getSetting(CFG.UMS_AUTO_STATE_KEY) || {};
   return {
     at: s.at || null, ok: s.ok == null ? null : !!s.ok,
     error: s.error || '', records: s.records || 0, added: s.added || 0,
     failures: s.failures || 0, nextMin: s.nextMin || 0,
-    nextAt: s.nextAt || null, cfgInterval: s.cfgInterval || 0
+    nextAt: s.nextAt || null, cfgInterval: s.cfgInterval || 0,
+    edge: s.edge || ''
   };
 }
 
@@ -861,14 +881,19 @@ async function umsAutoTick() {
   if (!auto.enabled) return;
   const cookie = umsCookie();
   if (!cookie) return;
-  // 不在执行时段内：跳过（不更新 at，到点后自然会触发）
-  if (!umsInTimeWindow(auto)) return;
   const st = umsAutoState();
-  const fails = st.failures || 0;
-  if (Date.now() < umsAutoNextAt(auto, st)) return;   // 未到排期时间
+  const edge = umsEdgeHit(auto, st);      // 时段「开始 / 结束」时刻：额外强制取数一次
+  if (!edge) {
+    // 不在执行时段内：跳过（不更新 at，到点后自然会触发）
+    if (!umsInTimeWindow(auto)) return;
+    if (Date.now() < umsAutoNextAt(auto, st)) return;   // 未到排期时间
+  }
   // 与手动获取共用冷却窗口：距上次取数（含手动 / 脚本）不足冷却时长时跳过本轮
   if (umsCooldownInfo().waitSec > 0) return;
 
+  const fails = st.failures || 0;
+  const edgeKey = edge ? umsToday() + ':' + edge : (st.edge || '');
+  const badge = edge ? '（时段' + (edge === 'start' ? '开始' : '结束') + '额外获取）' : '';
   const range = umsRangeCfg();
   const day = range.startDate + (range.endDate === range.startDate ? '' : ' ~ ' + range.endDate);
   const t0 = Date.now();
@@ -881,9 +906,9 @@ async function umsAutoTick() {
       at: at.toISOString(), ok: true, error: '',
       records: out.meta.recordCount, added: out.added || 0,
       failures: 0, nextMin: auto.intervalMin, cfgInterval: auto.intervalMin,
-      nextAt: nextAt.toISOString()
+      nextAt: nextAt.toISOString(), edge: edgeKey
     });
-    logInfo('[自动获取] ' + day + ' 完成：明细 ' + out.meta.recordCount + ' 条，新增 ' + (out.added || 0) +
+    logInfo('[自动获取] ' + day + badge + ' 完成：明细 ' + out.meta.recordCount + ' 条，新增 ' + (out.added || 0) +
       ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
       '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's，下次 ' + clockOf(nextAt));
   } catch (e) {
@@ -895,9 +920,9 @@ async function umsAutoTick() {
       at: at.toISOString(), ok: false,
       error: String(e.message || e).slice(0, 160), records: 0, added: 0,
       failures: nf, nextMin: nextMin, cfgInterval: auto.intervalMin,
-      nextAt: nextAt.toISOString()
+      nextAt: nextAt.toISOString(), edge: edgeKey
     });
-    logWarn('[自动获取] ' + day + ' 失败（连续 ' + nf + ' 次，' + nextMin + ' 分钟后重试，' +
+    logWarn('[自动获取] ' + day + badge + ' 失败（连续 ' + nf + ' 次，' + nextMin + ' 分钟后重试，' +
       '下次 ' + clockOf(nextAt) + '）：' + (e.message || e));
   } finally {
     umsBusy = false;
