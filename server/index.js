@@ -960,8 +960,12 @@ router.post('/api/ums/config', express.json({ limit: '32kb' }), (req, res) => {
     let e = ok.test(body.range.endDate) ? body.range.endDate : '';
     if (s) {
       if (!e || e < s) e = s;
-      db.setSetting(CFG.UMS_RANGE_KEY, { startDate: s, endDate: e });
-      logInfo('[设置] 取数条件 → ' + s + (e === s ? '' : ' ~ ' + e));
+      // 与当前值相同就不再写库/记日志：页面每次加载都会把「默认当天」同步过来，避免刷屏
+      const cur = db.getSetting(CFG.UMS_RANGE_KEY) || {};
+      if (cur.startDate !== s || cur.endDate !== e) {
+        db.setSetting(CFG.UMS_RANGE_KEY, { startDate: s, endDate: e });
+        logInfo('[设置] 取数条件 → ' + s + (e === s ? '' : ' ~ ' + e));
+      }
     }
   }
   if (body.auto && typeof body.auto === 'object') {

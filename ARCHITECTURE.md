@@ -324,7 +324,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | 总渲染 | `render(d)` / `clearView(errMsg, latestMeta)` | 渲染全部卡片 / 清空视图 |
 | 历史数据集 | `selHtml` / `syncHistory` / `renderHistoryMenu` / `refetch` / `loadHistory` / `pickHistory` | 顶栏与门禁同款自定义下拉 |
 | 上传 | `upload(file)` | POST xlsx 原始字节 |
-| **实时获取** | `umsRun` / `umsManualPaint` / `umsChipPaint` / `umsAutoPaint` / `umsLoadCfg` / `umsSaveCfg` / `umsLoadCookie` / `umsAfterImport` / `umsApplyServerFetch` | 顶栏角标与「手动获取」按钮、取数弹窗、自动获取设置、冷却与倒计时、后台新数据自动刷新视图 |
+| **实时获取** | `umsRun` / `umsManualPaint` / `umsChipPaint` / `umsAutoPaint` / `umsLoadCfg` / `umsSaveCfg` / `umsSaveRange` / `umsDateSync` / `umsLoadCookie` / `umsAfterImport` / `umsApplyServerFetch` | 顶栏角标与「手动获取」按钮、取数弹窗、自动获取设置、取数日期（默认当天，跨 0 点自动翻新）、冷却与倒计时、后台新数据自动刷新视图 |
 | 数据管理 | `renderDmTable` / `loadDataMgr` / `deleteDatasets` / `clearDatasets` / `switchDataset` / `askConfirm` | 弹窗内查看/切换/删除/清空 + 页内二次确认 |
 | 分区设置 | `renderZoneCfg` / `loadZoneCfg` / `zcAdd` / `saveZoneCfg` | 维护映射与忽略分区，保存并重算 |
 | 门禁 | `todayStr` / `syncGate` / `playGateOut` / `playDashIn` | 「今日暂无数据」遮罩与入场动画 |

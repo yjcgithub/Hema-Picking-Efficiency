@@ -1219,6 +1219,29 @@
       .catch(function () { /* 失败静默：不影响本次取数 */ });
   }
 
+  /* 「开始 / 结束日期」默认当天，并跨过 0 点（24 点）自动翻到新的一天：
+     仅当输入框仍是「上次自动填写的当天日期」（用户没手动改过）时才跟随，
+     避免覆盖手动指定的历史区间；值变化时同步到服务端，让自动获取也跟着走 */
+  var umsDateAuto = null;      // 上次自动填写的当天日期（YYYY-MM-DD）
+  function umsDateSync() {
+    var t = todayStr();
+    var changed = false, rolled = false;
+    [umsStartDate, umsEndDate].forEach(function (el) {
+      if (!el.value) { el.value = t; changed = true; return; }                  // 空值补当天
+      if (umsDateAuto && el.value === umsDateAuto && umsDateAuto !== t) {       // 仍是自动填的旧日期 → 翻新
+        el.value = t;
+        changed = true;
+        rolled = true;
+      }
+    });
+    umsDateAuto = t;
+    if (changed) {
+      umsSaveRange(umsStartDate.value, umsEndDate.value);                       // 服务端也跟随（相同值不会重复写）
+      if (rolled) notice('日期已更新为当天（' + t + '），自动获取同步', 'ok');
+    }
+    return changed;
+  }
+
   // 距上次获取的时长（10 分钟以内按「X 分 Y 秒」显示，便于确认自动获取是否在跑）
   function umsAgo(iso) {
     var t = Date.parse(iso);
@@ -1327,6 +1350,7 @@
   // 每隔一秒走动「距上次获取的时长」；每 5 秒拉一次服务端状态（后台自动获取的结果），保证角标与后端同步
   var umsChipTicks = 0;
   setInterval(function () {
+    umsDateSync();                                   // 跨过 0 点自动把取数日期翻到当天
     umsChipPaint();
     umsManualPaint();
     umsChipTicks++;
@@ -1563,9 +1587,7 @@
   }
 
   function openUms() {
-    var t = todayStr();
-    if (!umsStartDate.value) umsStartDate.value = t;
-    if (!umsEndDate.value) umsEndDate.value = t;
+    umsDateSync();   // 默认当天；跨过 0 点则自动翻到新的一天
     // 未保存 Cookie 时默认展开粘贴框（服务端代取必须先有 Cookie）
     if (!umsCfg.cookieSet) umsCookieShown = true;
     umsSyncCookie();
@@ -1586,6 +1608,7 @@
   });
   umsChipPaint();
   umsManualPaint();
+  umsDateSync();   // 取数日期默认当天；此后每秒检查是否跨过 0 点
   umsLoadCfg();   // 首页角标：读取服务端记录的「最近一次获取结果」
   document.getElementById('umsClose').addEventListener('click', closeUms);
   umsMask.addEventListener('click', function (ev) { if (ev.target === umsMask) closeUms(); });
