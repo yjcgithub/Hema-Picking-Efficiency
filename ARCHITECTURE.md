@@ -150,7 +150,7 @@ resolveStatic()
 | `umsCookie()` | 读取 Cookie：设置表优先，回退环境变量 `HEMA_UMS_COOKIE` |
 | `umsNum()` / `umsClampInterval(v)` | 每页条数与自动间隔的取值钳制 |
 | `umsAutoCfg()` | 自动获取设置：`{ enabled, intervalMin, timeStart, timeEnd }` |
-| `umsRangeCfg()` | 取数条件：页面「开始/结束日期」持久化的日期区间，非法/未设回退当天（手动与自动共用） |
+| `umsRangeCfg()` | 取数条件：页面「开始/结束日期」持久化的日期区间，非法/未设回退当天；**单日区间已过期时顺延为当天**（服务端不依赖浏览器），多日区间原样使用（手动与自动共用） |
 | `umsInTimeWindow(cfg)` | 按东八区判断是否在执行时段内（当天时间点，支持留空 = 全天） |
 | `umsEdgeHit(cfg, st)` | 时段边界到点：返回 `'' / 'start' / 'end'`，用于在「开始 / 结束时刻」各额外强制取数一次（同一时刻只触发一次，见 `umsAutoState.edge`） |
 | `umsAutoState()` | 最近一次自动执行结果 + `failures` / `nextMin` / `nextAt` / `cfgInterval` / `edge` |

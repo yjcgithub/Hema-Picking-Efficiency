@@ -1221,25 +1221,25 @@
 
   /* 「开始 / 结束日期」默认当天，并跨过 0 点（24 点）自动翻到新的一天：
      仅当输入框仍是「上次自动填写的当天日期」（用户没手动改过）时才跟随，
-     避免覆盖手动指定的历史区间；值变化时同步到服务端，让自动获取也跟着走 */
+     避免覆盖手动指定的历史区间；翻新时同步到服务端，让自动获取也跟着走。
+     （服务端另有「单日区间过期自动顺延」兜底，故首屏默认值不必写回，免得冲掉固定的多日区间） */
   var umsDateAuto = null;      // 上次自动填写的当天日期（YYYY-MM-DD）
   function umsDateSync() {
     var t = todayStr();
-    var changed = false, rolled = false;
+    var rolled = false;
     [umsStartDate, umsEndDate].forEach(function (el) {
-      if (!el.value) { el.value = t; changed = true; return; }                  // 空值补当天
+      if (!el.value) { el.value = t; return; }                                  // 空值补当天（仅显示，不落库）
       if (umsDateAuto && el.value === umsDateAuto && umsDateAuto !== t) {       // 仍是自动填的旧日期 → 翻新
         el.value = t;
-        changed = true;
         rolled = true;
       }
     });
     umsDateAuto = t;
-    if (changed) {
-      umsSaveRange(umsStartDate.value, umsEndDate.value);                       // 服务端也跟随（相同值不会重复写）
-      if (rolled) notice('日期已更新为当天（' + t + '），自动获取同步', 'ok');
+    if (rolled) {
+      umsSaveRange(umsStartDate.value, umsEndDate.value);
+      notice('日期已更新为当天（' + t + '），自动获取同步', 'ok');
     }
-    return changed;
+    return rolled;
   }
 
   // 距上次获取的时长（10 分钟以内按「X 分 Y 秒」显示，便于确认自动获取是否在跑）

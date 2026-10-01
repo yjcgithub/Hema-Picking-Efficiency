@@ -565,15 +565,20 @@ function umsToday() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
-// 取数条件：页面「开始日期 / 结束日期」保存到服务端，手动与自动获取共用同一区间；
-// 未设置或非法时回退「当天」
+/* 取数条件：页面「开始日期 / 结束日期」保存到服务端，手动与自动获取共用同一区间。
+   · 单日区间视为「跟随当天」：日期已过（如昨天设的当天）时顺延到今天，
+     避免浏览器没开着（自动获取只在服务端跑）时一直抓旧日期；
+   · 多日区间视为用户明确指定的区间，原样使用；
+   · 未设置或非法时回退当天 */
 function umsRangeCfg() {
   const ok = /^\d{4}-\d{2}-\d{2}$/;
   const r = db.getSetting(CFG.UMS_RANGE_KEY) || {};
   const start = ok.test(r.startDate) ? r.startDate : '';
   let end = ok.test(r.endDate) ? r.endDate : '';
-  if (!start) return { startDate: umsToday(), endDate: umsToday() };
+  const today = umsToday();
+  if (!start) return { startDate: today, endDate: today };
   if (!end || end < start) end = start;
+  if (start === end && end < today) return { startDate: today, endDate: today };   // 单日顺延
   return { startDate: start, endDate: end };
 }
 
@@ -896,6 +901,12 @@ async function umsAutoTick() {
   const badge = edge ? '（时段' + (edge === 'start' ? '开始' : '结束') + '额外获取）' : '';
   const range = umsRangeCfg();
   const day = range.startDate + (range.endDate === range.startDate ? '' : ' ~ ' + range.endDate);
+  // 单日区间被顺延到当天：写回设置，让页面看到的取数条件与实际执行的保持一致
+  const stored = db.getSetting(CFG.UMS_RANGE_KEY) || {};
+  if (stored.startDate !== range.startDate || stored.endDate !== range.endDate) {
+    db.setSetting(CFG.UMS_RANGE_KEY, { startDate: range.startDate, endDate: range.endDate });
+    logInfo('[取数条件] 单日区间顺延到当天 → ' + day);
+  }
   const t0 = Date.now();
   umsBusy = true;
   try {
