@@ -7,6 +7,7 @@
   var instances = {};
   var cache = null;
   var weighted = true;    // 效率口径：true = 按工时加权（默认），false = 人均
+  var bucketUnit = 'hour'; // 时间轴粒度：'hour' 单日按小时；'date' 周视图按日期；'week' 月视图按自然周
 
   function inst(id) {
     var el = document.getElementById(id);
@@ -30,6 +31,20 @@
     var h = Math.floor(m / 60), mi = Math.round(m - h * 60);
     if (mi >= 60) { h += 1; mi -= 60; }
     return (h < 10 ? '0' + h : h) + ':' + (mi < 10 ? '0' + mi : mi);
+  }
+  /* 自然周标签：周一的日期 -> 'MM-DD~MM-DD'（周日起算） */
+  function weekLabel(monday) {
+    var d = new Date(String(monday) + 'T00:00:00');
+    if (isNaN(d.getTime())) return String(monday);
+    d.setDate(d.getDate() + 6);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return String(monday).slice(5) + '~' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  /* 时间轴刻度文案：小时视图为「N点」（半小时为 H:MM）；周视图为日期 MM-DD；月视图为自然周 MM-DD~MM-DD */
+  function timeText(v, jSlot) {
+    if (bucketUnit === 'week') return weekLabel(v);
+    if (bucketUnit === 'date') return String(v).slice(5);
+    return jSlot ? slotText(v) : v + '点';
   }
 
   var AXIS = { axisLine: { lineStyle: { color: '#e2e8f0' } }, axisLabel: { color: '#64748b', fontSize: 11 } };
@@ -147,9 +162,10 @@
   HEMA.charts.render = function (data) {
     cache = data;
     if (typeof echarts === 'undefined') return;
+    bucketUnit = (data.meta && data.meta.bucket) || 'hour';   // 时间轴粒度：hour / date / week
 
-    /* 1) 效率总览 · 各小时效率趋势（合并为一张图）
-          x 轴为半小时刻度（旧数据无半小时时退回整点小时）
+    /* 1) 效率总览 · 效率趋势（合并为一张图）
+          x 轴：单日视图为半小时刻度（旧数据无半小时时退回整点小时）；周 / 月聚合视图为日期（MM-DD）
           左轴：各作业类型效率线 + 整体效率线（灰虚线），随顶栏口径开关切换：人均 / 按工时加权
           右轴：拣货行数柱；tooltip 附带另一种口径对照 */
     var hRows = (data.bySlot && data.bySlot.length) ? data.bySlot : (data.byHour || []);
@@ -158,8 +174,12 @@
       var jb = (data.jobTypeBySlot && data.jobTypeBySlot.slots && data.jobTypeBySlot.slots.length)
         ? data.jobTypeBySlot : data.jobTypeByHour;
       var jSlot = !!jb.slots;
-      var xs = jb.slots || jb.hours;                        // 坐标轴取值（半小时为 7 / 7.5 / 8 …）
-      var xName = function (i) { return jSlot ? slotText(xs[i]) : xs[i] + '点'; };
+      var xs = jb.slots || jb.hours;                        // 坐标轴取值（半小时为 7 / 7.5 / 8 …；周 / 月为日期）
+      var xName = function (i) {
+        return bucketUnit === 'hour' ? (jSlot ? slotText(xs[i]) : xs[i] + '点')
+          : (bucketUnit === 'week' ? weekLabel(xs[i]) : xs[i]);
+      };
+      var xLabel = function (i) { return timeText(xs[i], jSlot); };
       // 人均口径序列（服务端给出，与当前刻度对齐）；旧数据集无该字段时为 null
       var uw = jb.unweighted || null;
       var wt = {};                                          // 加权值：Σ行数 ÷ Σ时长
@@ -230,7 +250,7 @@
         // 图例项较多（各作业类型 + 整体 + 拣货行数），grid.top 留足 56px 供其换行
         legend: { top: 0, left: 'center', itemGap: 14, itemWidth: 14, itemHeight: 8, textStyle: { fontSize: 11, color: '#64748b' } },
         grid: { left: 56, right: 56, top: 56, bottom: 30 },
-        xAxis: Object.assign({ type: 'category', boundaryGap: true, data: xs.map(function (_, i) { return xName(i); }) }, AXIS),
+        xAxis: Object.assign({ type: 'category', boundaryGap: true, data: xs.map(function (_, i) { return xLabel(i); }) }, AXIS),
         yAxis: [
           Object.assign({
             type: 'value', name: useW ? '行/h' : '行/h（人均）', nameTextStyle: { color: '#94a3b8', fontSize: 11 }, splitLine: SPLIT,
@@ -492,7 +512,7 @@
           },
           grid: { left: 56, right: 24, top: 40, bottom: 26 },
           xAxis: Object.assign({
-            type: 'category', data: (to.hours || []).map(function (h) { return h + '点'; })
+            type: 'category', data: (to.hours || []).map(function (h) { return timeText(h, false); })
           }, AXIS),
           yAxis: Object.assign({
             type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
@@ -524,7 +544,7 @@
           },
           grid: { left: 56, right: 24, top: 40, bottom: 26 },
           xAxis: Object.assign({
-            type: 'category', data: (to.hours || []).map(function (h) { return h + '点'; })
+            type: 'category', data: (to.hours || []).map(function (h) { return timeText(h, false); })
           }, AXIS),
           yAxis: Object.assign({
             type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
@@ -548,7 +568,8 @@
         toStatEl.innerHTML = [
           chipOf('超时单数', toTotal.toLocaleString(), '单'),
           chipOf('超时单占比', fmt(recN ? toTotal / recN * 100 : 0), '%'),
-          chipOf('超时最多时段', peakN ? peakH + '点' : '-', peakN ? peakN + ' 单' : '')
+          chipOf(bucketUnit === 'hour' ? '超时最多时段' : (bucketUnit === 'week' ? '超时最多周' : '超时最多日期'),
+            peakN ? timeText(peakH, false) : '-', peakN ? peakN + ' 单' : '')
         ].concat((to.duties || []).map(function (d) {
           return chipOf(d.name, d.count.toLocaleString(), '单');
         })).join('');
@@ -633,7 +654,7 @@
           },
           grid: { left: 56, right: 24, top: 40, bottom: 26 },
           xAxis: Object.assign({
-            type: 'category', data: (to.hours || []).map(function (h) { return h + '点'; })
+            type: 'category', data: (to.hours || []).map(function (h) { return timeText(h, false); })
           }, AXIS),
           yAxis: Object.assign({
             type: 'value', name: '超时单数', minInterval: 1, splitLine: SPLIT
@@ -657,7 +678,7 @@
     var c10 = inst('chartZoneHeat');
     if (c10 && data.zoneByHour) {
       var zh = data.zoneByHour;
-      var zhHours = (zh.hours || []).map(function (h) { return h + '点'; });
+      var zhHours = (zh.hours || []).map(function (h) { return timeText(h, false); });
       // y 轴：分区名列表（倒序，使第一个分区显示在最下方）
       var zhSeries = zh.series || [];
       var zhNames = zhSeries.map(function (s) { return s.name; }).reverse();

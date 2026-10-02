@@ -21,6 +21,14 @@
       <span>日期</span>
       <select class="select date-sel" id="dateSel"></select>
     </label>
+    <!-- 周 / 月视图专用：按周 / 月步进 + 当前统计区间（日视图隐藏） -->
+    <div class="range-nav hidden" id="rangeNav">
+      <button type="button" class="btn nav-btn" id="rangePrev" title="上一个周 / 月">◀</button>
+      <span class="range-label" id="rangeLabel"></span>
+      <button type="button" class="btn nav-btn" id="rangeNext" title="下一个周 / 月">▶</button>
+    </div>
+    <button type="button" class="btn view-btn" id="viewWeek" title="新页面打开周视图：读取已有数据，按自然周（周一 ~ 周日）聚合当前所选日期所在周；主页面保持日视图不变。已在视图页面内时点击可切换 / 回到日视图">周视图</button>
+    <button type="button" class="btn view-btn" id="viewMonth" title="新页面打开月视图：读取已有数据，按自然月聚合当前所选日期所在月；主页面保持日视图不变。已在视图页面内时点击可切换 / 回到日视图">月视图</button>
     <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）。切换后所有汇总口径同步（卡片 / 图表 / 各表合计行）">
       <input type="checkbox" id="weightedToggle" checked>按工时加权
     </label>
@@ -64,15 +72,8 @@
   <section class="kpis sub" id="kpisSub"></section>
 
   <section class="card">
-    <h3>效率总览 · 各小时效率趋势</h3>
+    <h3 id="trendTitle">效率总览 · 各小时效率趋势</h3>
     <div class="chart tall" id="chartJtHour"></div>
-  </section>
-
-  <!-- 分区×小时热力图 -->
-  <section class="card">
-    <h3>分区 × 小时效率热力图</h3>
-    <div class="chart tall" id="chartZoneHeat"></div>
-    <div class="note" id="zoneHeatNote"></div>
   </section>
 
   <section class="card collapsible hidden collapsed" id="timeoutCard">
@@ -82,11 +83,11 @@
     </h3>
     <div class="card-body" id="timeoutBody">
       <div class="stat-strip" id="timeoutStat"></div>
-      <div class="chart-sub">按小时 × 超时判责</div>
+      <div class="chart-sub" id="timeoutSubDuty">按小时 × 超时判责</div>
       <div class="chart" id="chartTimeout"></div>
-      <div class="chart-sub">按小时 × 作业类型（前场 / 后场 / 一体化）</div>
+      <div class="chart-sub" id="timeoutSubType">按小时 × 作业类型（前场 / 后场 / 一体化）</div>
       <div class="chart" id="chartTimeoutType"></div>
-      <div class="chart-sub">按小时 × 拣货分区</div>
+      <div class="chart-sub" id="timeoutSubZone">按小时 × 拣货分区</div>
       <div class="chart" id="chartTimeoutZone"></div>
       <div class="table-wrap"><table id="tableTimeoutZone"></table></div>
       <div class="pivot-block collapsed" id="timeoutPerson">
@@ -108,6 +109,13 @@
   <section class="card">
     <h3>效率透视表（行/h，按前场合流 / 后场合流 / 一体化）</h3>
     <div id="pivotBlocks"></div>
+  </section>
+
+  <!-- 分区×小时热力图（周 / 月聚合视图下横轴改为日期） -->
+  <section class="card">
+    <h3 id="zoneHeatTitle">分区 × 小时效率热力图</h3>
+    <div class="chart tall" id="chartZoneHeat"></div>
+    <div class="note" id="zoneHeatNote"></div>
   </section>
 
   <section class="card">
@@ -156,7 +164,24 @@
     <div class="note" id="rowsNote"></div>
   </section>
 
-  <section class="card">
+  <!-- 拣货数量统计（件数）：数据里没有「拣货数量」字段时整卡隐藏（由 app.js 控制） -->
+  <section class="card hidden" id="qtyCard">
+    <h3>拣货数量统计（按人员分布与集中度）</h3>
+    <div class="stat-strip" id="qtyStat"></div>
+    <div class="two-col">
+      <div>
+        <div class="sub-title">数量 TOP 10</div>
+        <div class="bar-list" id="qtyTop"></div>
+      </div>
+      <div>
+        <div class="sub-title">数量分档（人数 / 数量两条口径）</div>
+        <div class="table-wrap"><table id="tableQtyBin"></table></div>
+      </div>
+    </div>
+    <div class="note" id="qtyNote"></div>
+  </section>
+
+  <section class="card" id="timelineCard">
     <h3>人员工作时间图</h3>
     <div class="stat-strip" id="timelineStat"></div>
     <div class="chart xtall" id="chartTimeline"></div>

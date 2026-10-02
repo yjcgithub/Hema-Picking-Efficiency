@@ -41,6 +41,11 @@ module.exports = {
   TIMEOUT_DUTY_COLUMN: '超时判责',     // 超时责任细分（堆积图分组）
   TIMEOUT_NO_DUTY: '未填判责',          // 「超时判责」为空时的归集项
 
+  // 拣货数量（件数）列（非必需：旧文件 / 接口没有该字段时不统计数量，也不阻塞上传）
+  // 实时接口对应字段见 QTY_FIELD（listPickOrderForB2C 明细里的 pickNum）
+  QTY_COLUMN: '拣货数量',
+  QTY_FIELD: 'pickNum',
+
   // 门店编码：拣货单号的前缀。导入时按此鉴别门店，只接收该编码开头的明细
   STORE_CODE: '20005',
 

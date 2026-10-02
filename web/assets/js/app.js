@@ -4,7 +4,21 @@
   var API = (global.HEMA_CONFIG && global.HEMA_CONFIG.API_BASE) || '/api';
   var current = null;
   var curDate = null;     // 当前展示日期；null = 取数据集内最新日期
+  var viewMode = 'day';   // 视图范围：day = 单日；week = 自然周（周一~周日）；month = 自然月
   var weighted = true;    // 全局效率口径：true = 按工时加权（默认），false = 人均；由顶栏开关统一切换
+
+  /* 「周视图 / 月视图」独立页面：主页面点击按钮另开新标签页进入（?view=week|month&date=YYYY-MM-DD）。
+     视图页面读取库内已有数据、按自然周 / 自然月单独聚合，与主页面（日视图）互不影响；
+     锚点日期由 URL 带入，缺失时用当天 */
+  var viewPage = false;   // 是否为独立的周 / 月视图页面
+  var qDate = null;       // 视图页面锚点日期（URL 带入）
+  try {
+    var qs = new URLSearchParams(global.location.search);
+    var qView = qs.get('view');
+    if (qView === 'week' || qView === 'month') { viewMode = qView; viewPage = true; }
+    var qd = qs.get('date');
+    if (qd && /^\d{4}-\d{2}-\d{2}$/.test(qd)) { qDate = qd; curDate = qd; }
+  } catch (e) { /* 不支持 URLSearchParams 的环境按日视图处理 */ }
 
   // 统一响应解析：后端未部署/地址配错时返回的是 HTML，给出可定位的错误
   function readJson(res) {
@@ -169,13 +183,20 @@
       });
     });
     var sub = [
-      { label: '拣货行数', value: t.rows.toLocaleString(), unit: '行', raw: t.rows, foot: '有效明细合计' },
+      { label: '拣货行数', value: t.rows.toLocaleString(), unit: '行', raw: t.rows, foot: '有效明细合计' }
+    ];
+    // 数据含「拣货数量」字段时才显示数量卡（与「拣货数量统计」卡片同一存在条件）
+    if (d.stats && d.stats.qtyStat) {
+      sub.push({ label: '拣货数量', value: (t.qty || 0).toLocaleString(), unit: '件', raw: t.qty || 0,
+        foot: '有效明细「拣货数量」合计' });
+    }
+    sub.push(
       { label: '拣货人数', value: t.persons, unit: '人', raw: t.persons, foot: '参与拣货的人员' },
       { label: '有效明细', value: d.meta.recordCount.toLocaleString(), unit: '条', raw: d.meta.recordCount,
         foot: '丢弃 ' + d.meta.dropped + ' 条（缺人/缺时间）' +
           (d.meta.otherStore ? '，已过滤 ' + d.meta.otherStore + ' 条（非本门店）' : '') +
           (d.meta.ignored ? '，已忽略 ' + d.meta.ignored + ' 条（分区设置）' : '') }
-    ];
+    );
     document.getElementById('kpis').innerHTML = main.map(kpiCard).join('');
     document.getElementById('kpisSub').innerHTML = sub.map(kpiCard).join('');
     animateKpiNumbers();
@@ -312,25 +333,42 @@
     });
   }
 
+  /* 时间轴列头标签：小时「N点」/ 日期「MM-DD」/ 周「MM-DD~MM-DD」 */
+  function axisColLabel(v, unit) {
+    if (unit === 'week') {
+      var d = new Date(String(v) + 'T00:00:00');
+      if (isNaN(d.getTime())) return String(v);
+      d.setDate(d.getDate() + 6);
+      var p = function (n) { return (n < 10 ? '0' : '') + n; };
+      return String(v).slice(5) + '~' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    }
+    if (unit === 'date') return String(v).slice(5);
+    return v + '点';
+  }
+
   /* ---------- 人员 × 小时 透视：3 块（前场合流 / 后场合流 / 一体化），可折叠并记忆 ---------- */
   function renderPivotBlocks(d) {
     var host = document.getElementById('pivotBlocks');
     if (!host) return;
     var pb = d.personByHour, hours = pb.hours;
+    var unit = (d.meta && d.meta.bucket) || 'hour';   // 周 / 月聚合：列头为日期 / 周
     var colors = (global.HEMA_CONFIG && global.HEMA_CONFIG.COLORS) || {};
     var collapsed = collapsedSet();
     /* 人均口径（顶栏口径开关未勾选时）：按作业类型给出各时段「各人效率的算术平均」 */
     var uwHour = (d.jobTypeByHour && d.jobTypeByHour.unweighted) || null;
 
     var cols = [{ key: 'person', label: '拣货人', text: 1 }]
-      .concat(hours.map(function (h) { return { key: 'h' + h, label: h + '点' }; }))
+      .concat(hours.map(function (h) {
+        return { key: 'h' + h, label: axisColLabel(h, unit) };
+      }))
       .concat([{ key: 'total', label: '总计' }]);
     var pSt = sortState('pivot', null, -1);
     var head = theadHtml(cols, pSt);
     var foot = '<tfoot><tr><td colspan="' + cols.length + '" class="table-note">' +
       '小计＝该范围内 Σ拣货行数 ÷ Σ拣货时长（按工时加权）；取消勾选顶栏「按工时加权」后，' +
       '小计改为该范围内各人效率的算术平均（人均口径，随开关同步）；' +
-      '「平均值 / 中位数」按各人总计效率统计，浅蓝 / 浅紫边框标出与之最接近的人员行；「-」表示该时段无记录。' +
+      '「平均值 / 中位数」按各人总计效率统计，浅蓝 / 浅紫边框标出与之最接近的人员行；「-」表示该' +
+      (unit === 'hour' ? '时段' : (unit === 'week' ? '周' : '日')) + '无记录。' +
       '</td></tr></tfoot>';
     // 点击表头可排序：按人或按某个小时（或总计）的效率升降序
     var getters = { person: function (r) { return r.person; }, total: function (r) { return r.total; } };
@@ -383,6 +421,20 @@
         '<div class="table-wrap"><table>' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' +
         '</div>';
     }).join('');
+
+    /* 量取表格「完整显示且不出现左右滑动」所需的最小宽度，写入 --pivot-min：
+       用 min-content 量取（可换行的脚注行会折行，数据 / 表头为 nowrap 保持原样），
+       即表格在不产生横向滚动时能收缩到的最小宽度 —— 用它而非 max-content，
+       否则脚注长文本会把宽度撑大，导致宽屏下也只能并排两块。
+       各块人员不同、首列宽窄略有差异，取三块最大值兜底 */
+    var minW = 0;
+    Array.prototype.forEach.call(host.querySelectorAll('table'), function (t) {
+      var prevW = t.style.width;
+      t.style.width = 'min-content';
+      minW = Math.max(minW, Math.ceil(t.getBoundingClientRect().width));
+      t.style.width = prevW;
+    });
+    if (minW > 0) host.style.setProperty('--pivot-min', (minW + 2) + 'px');   // +2：表格容器左右各 1px 边框
   }
 
   /* ---------- 细分明细（表头可点击升/降序） ---------- */
@@ -553,6 +605,9 @@
     var s = d.stats || {};
     var dist = s.personDist;
     if (!dist) return;
+    var unit = (d.meta && d.meta.bucket) || 'hour';   // 周 / 月聚合：稳定性按日期 / 周衡量
+    var spanW = unit === 'week' ? '周' : (unit === 'date' ? '日' : '小时');
+    var countW = unit === 'week' ? '记录周数' : (unit === 'date' ? '记录天数' : '记录小时数');
     var n = dist.n;
 
     document.getElementById('distStat').innerHTML = [
@@ -593,7 +648,7 @@
     var stbCols = [
       { key: 'person', label: '拣货人', text: 1 },
       { key: 'type', label: '主要作业类型', text: 1 },
-      { key: 'n', label: '记录小时数' },
+      { key: 'n', label: countW },
       { key: 'avg', label: '平均效率' },
       { key: 'sd', label: '标准差' },
       { key: 'cv', label: '变异系数' }
@@ -616,7 +671,8 @@
     };
     var body;
     if (!st.length) {
-      body = '<tr><td colspan="6" class="dm-empty">暂无足够的每小时记录（每人需 ≥ 3 小时）</td></tr>';
+      body = '<tr><td colspan="6" class="dm-empty">暂无足够的每' + spanW +
+        '记录（每人需 ≥ 3 ' + spanW + '）</td></tr>';
     } else if (st.length <= 22) {
       body = sortRows(st, stbSt, stbGet).map(rowOf).join('');
     } else {
@@ -629,9 +685,9 @@
 
     document.getElementById('distNote').textContent =
       '分布：按各人总计效率（Σ拣货行数 ÷ Σ拣货时长）统计，不受顶栏口径开关影响。' +
-      '稳定性：变异系数 = 标准差 ÷ 平均，越小表示该人各小时产出一致；' +
+      '稳定性：变异系数 = 标准差 ÷ 平均，越小表示该人各' + spanW + '产出一致；' +
       '为避免跨作业类型的基准差异（后场合流约 250、前场合流约 70）被误判为「不稳定」，' +
-      '只在该人记录最多的作业类型内计算，且仅统计记录小时数 ≥ 3 的人。';
+      '只在该人记录最多的作业类型内计算，且仅统计记录' + countW + ' ≥ 3 的人。';
   }
 
   /* ---------- 卡片：拣货行数统计（按人员分布与集中度） ---------- */
@@ -699,6 +755,77 @@
     document.getElementById('rowsNote').textContent =
       '占比条长度按最高个人行数归一，右侧为「行数 · 占总行数比例」。' +
       '分档表同时给两条口径：人数占比说明有多少人产出偏低；行数占比说明总产出集中在哪一档，' +
+      '两者差距越大，说明产出越向少数人集中。';
+  }
+
+  /* ---------- 卡片：拣货数量统计（件数，按人员分布与集中度） ---------- */
+  function renderQtyStat(d) {
+    var card = document.getElementById('qtyCard');
+    var s = (d.stats && d.stats.qtyStat) || null;
+    if (!s) { if (card) card.classList.add('hidden'); return; }   // 数据无「拣货数量」字段：整卡隐藏
+    if (card) card.classList.remove('hidden');
+    var n = s.n;
+    var totalQty = s.total;
+
+    /* 帕累托：数量从高到低累计，前 k 人贡献的数量占比（服务端已算好） */
+    var paretoChip = function (t, label) {
+      if (!t) return '';
+      return chip(label, fmt(t.pct, 1), '%',
+        '数量最多的前 ' + t.k + ' 人（占 ' + fmt(t.k / n * 100, 0) + '%）贡献了 ' + fmt(t.pct, 1) + '% 的数量');
+    };
+
+    document.getElementById('qtyStat').innerHTML = [
+      chip('总拣货数量', totalQty.toLocaleString(), '件', '有效明细「拣货数量」之和'),
+      chip('人均数量', fmt(s.avg, 0), '件', '总数量 ÷ ' + n + ' 人'),
+      chip('中位数数量', fmt(s.median, 0), '件', '一半人高于此值'),
+      chip('最高 / 最低', s.max.toLocaleString() + ' / ' + s.min, '件',
+        '个人数量的极值，差距大说明分工不均'),
+      paretoChip(s.top10, 'TOP 10% 人员数量占比'),
+      paretoChip(s.top25, 'TOP 25% 人员数量占比')
+    ].join('');
+
+    /* TOP 10：条形长度按最高个人数量归一，右侧标注数量与占比 */
+    var top = (d.stats && d.stats.qtyTop) || [];
+    var maxQty = top.length ? top[0].qty : 0;
+    document.getElementById('qtyTop').innerHTML = top.map(function (r, i) {
+      var w = maxQty ? r.qty / maxQty * 100 : 0;
+      return '<div class="bar-item">' +
+        '<span class="bar-name" title="' + esc(r.name) + '">' + (i + 1) + '. ' + esc(r.name) + '</span>' +
+        '<span class="bar-track"><span class="bar-fill" style="width:' + fmt(w, 1) + '%"></span></span>' +
+        '<span class="bar-val">' + r.qty.toLocaleString() + ' 件 · ' + fmt(r.share, 1) + '%</span>' +
+        '</div>';
+    }).join('');
+
+    /* 数量分档：人数占比看「多少人干得少」，数量占比看「产出集中在哪一档」 */
+    var bins = (d.stats && d.stats.qtyBins) || [];
+    var qbSt = sortState('qtyBin');
+    var qbCols = [
+      { key: 'label', label: '数量区间（件）', text: 1 },
+      { key: 'n', label: '人数' },
+      { key: 'nshare', label: '人数占比' },
+      { key: 'qty', label: '数量合计' },
+      { key: 'qshare', label: '数量占比' }
+    ];
+    var qbGet = {
+      label: function (b) { return labelNum(b.label); },
+      n: function (b) { return b.n; },
+      nshare: function (b) { return n ? b.n / n : 0; },
+      qty: function (b) { return b.rows; },              // 分档产出量（数量）统一放在 rows 字段
+      qshare: function (b) { return totalQty ? b.rows / totalQty : 0; }
+    };
+    var html = theadHtml(qbCols, qbSt) + '<tbody>';
+    sortRows(bins, qbSt, qbGet).forEach(function (b) {
+      html += '<tr><td>' + b.label + '</td><td>' + b.n + '</td><td>' + fmt(n ? b.n / n * 100 : 0, 1) + '%</td><td>' +
+        b.rows.toLocaleString() + '</td><td>' + fmt(totalQty ? b.rows / totalQty * 100 : 0, 1) + '%</td></tr>';
+    });
+    html += '<tr class="total"><td>合计</td><td>' + n + '</td><td>100.0%</td><td>' +
+      totalQty.toLocaleString() + '</td><td>100.0%</td></tr></tbody>';
+    document.getElementById('tableQtyBin').innerHTML = html;
+
+    document.getElementById('qtyNote').textContent =
+      '口径：Σ「拣货数量」列（件），按人员汇总（与「行数」同口径：取消勾选顶栏「按工时加权」不影响本卡）。' +
+      '占比条长度按最高个人数量归一，右侧为「数量 · 占总数量比例」。' +
+      '分档表同时给两条口径：人数占比说明有多少人产出偏低；数量占比说明总产出集中在哪一档，' +
       '两者差距越大，说明产出越向少数人集中。';
   }
 
@@ -821,14 +948,47 @@
     bar.classList.remove('hidden');
   }
 
-  /* 小字行左半：数据来源 + 有效明细（无数据集时给出引导文案） */
+  /* 小字行左半：数据来源 + 有效明细（无数据集时给出引导文案）；周 / 月视图追加聚合范围 */
   function renderSource(m) {
     var el = document.getElementById('metaSource');
     if (!el) return;
-    el.textContent = m
-      ? '数据来源：' + (m.sourceFile || '-') +
-        ' ｜ 有效明细 ' + Number(m.recordCount || 0).toLocaleString() + ' 条'
-      : '当前无数据集，请先上传拣货单 xlsx。';
+    if (!m) { el.textContent = '当前无数据集，请先上传拣货单 xlsx。'; return; }
+    var txt = '数据来源：' + (m.sourceFile || '-') +
+      ' ｜ 有效明细 ' + Number(m.recordCount || 0).toLocaleString() + ' 条';
+    if (m.range) {
+      txt += ' ｜ 统计范围 ' + m.range.from + ' ~ ' + m.range.to +
+        (viewMode === 'week' ? '（按天）' : (viewMode === 'month' ? '（按月 · 按周出数）' : ''));
+    }
+    el.textContent = txt;
+  }
+
+  /* 卡片标题随「时间轴粒度」切换：周 / 月聚合视图按日期，单日视图按小时 */
+  var timelineHidden = null;        // 「人员工作时间图」当前是否隐藏（null = 尚未判定）
+  var timelineLayoutDirty = false;  // 该卡片显隐刚变化：图表渲染后需 resize 重新测量
+  /* 时间轴粒度的中文名：'hour' 小时 / 'date' 日期 / 'week' 周 */
+  function unitWord(unit) { return unit === 'week' ? '周' : (unit === 'date' ? '日期' : '小时'); }
+
+  function renderAxisTitles(d) {
+    var unit = (d && d.meta && d.meta.bucket) || 'hour';
+    var byDate = unit !== 'hour';
+    var word = unitWord(unit);
+    var set = function (id, txt) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = txt;
+    };
+    set('trendTitle', unit === 'hour' ? '效率总览 · 各小时效率趋势'
+      : (unit === 'week' ? '效率总览 · 月效率趋势（按周）' : '效率总览 · 周效率趋势'));
+    set('zoneHeatTitle', '分区 × ' + word + '效率热力图');
+    set('timeoutSubDuty', '按' + word + ' × 超时判责');
+    set('timeoutSubType', '按' + word + ' × 作业类型（前场 / 后场 / 一体化）');
+    set('timeoutSubZone', '按' + word + ' × 拣货分区');
+    // 周 / 月聚合视图下不展示「人员工作时间图」（x 轴为当天时刻，跨天聚合后无意义）
+    var tl = document.getElementById('timelineCard');
+    if (tl && timelineHidden !== byDate) {
+      tl.classList.toggle('hidden', byDate);
+      timelineHidden = byDate;
+      timelineLayoutDirty = true;      // 显隐变化会改布局：图表渲染完成后需重新测量尺寸
+    }
   }
 
   /* 日期下拉：默认取数据集内最新日期；只有多天数据时才需要手动切换 */
@@ -836,6 +996,9 @@
     var wrap = document.getElementById('dateWrap');
     var sel = document.getElementById('dateSel');
     if (!wrap || !sel) return;
+    // 周 / 月聚合视图隐藏日期下拉：改用顶栏「◀ 区间 ▶」步进 + 区间标签
+    //（下拉里是零散的数据集日期，跨数据集聚合时作为锚点选择容易混淆）
+    if (m && m.bucket && m.bucket !== 'hour') { wrap.classList.add('hidden'); sel.innerHTML = ''; return; }
     var dates = (m && m.dates) || [];
     if (dates.length <= 1) { wrap.classList.add('hidden'); sel.innerHTML = ''; return; }
     sel.innerHTML = dates.map(function (dt) {
@@ -850,22 +1013,31 @@
     if (!d) { notice('没有可展示的数据', 'err'); return; }
     current = d;
     var m = d.meta || {};
-    // 当前展示日期（服务端按 ?date= 过滤，默认给出数据集内最新日期）
-    curDate = m.date || (m.dates && m.dates.length ? m.dates[m.dates.length - 1] : null);
+    // 当前展示日期：日视图以服务端返回的日期为准；周 / 月视图保留所选锚点日期（据此推算聚合区间，避免视图漂移）
+    if (viewMode === 'day' || !curDate) {
+      curDate = m.date || (m.dates && m.dates.length ? m.dates[m.dates.length - 1] : null);
+    }
     renderPeriod(m);
     renderSource(m);
     renderDates(m);
+    renderAxisTitles(d);
+    rangePaint();
     renderKpis(d);
     renderPivotBlocks(d);
     renderZoneTable(d);
     renderPersonTable(d);
     renderDist(d);
     renderRowsStat(d);
+    renderQtyStat(d);
     renderTimeoutPerson(d);
     renderTimeoutZone(d);
     sortTimelineRows(d);   // 图表与下方「人·日 班次明细」共用同一排序（就地排序，保持数组引用）
     renderTimeline(d);
     HEMA.charts.render(d);
+    if (timelineLayoutDirty) {   // 时间轴粒度切换使「人员工作时间图」显隐变化：重新测量图表尺寸
+      timelineLayoutDirty = false;
+      if (HEMA.charts.resize) HEMA.charts.resize();
+    }
     syncGate(d);           // 数据集内没有今天的日期时，提示「今日暂无数据」
     animateTableRows();    // 表格行交错入场
   }
@@ -895,10 +1067,13 @@
     renderSource(null);
     renderDates(null);
     ['kpis', 'kpisSub', 'pivotBlocks', 'tableZone', 'tableEffBin', 'tableStab',
-      'tableRowsBin', 'tableTimeline', 'tableTimeoutPerson'].forEach(function (id) {
+      'tableRowsBin', 'qtyStat', 'qtyTop', 'tableQtyBin',
+      'tableTimeline', 'tableTimeoutPerson'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.innerHTML = '';
     });
+    var qc = document.getElementById('qtyCard');
+    if (qc) qc.classList.add('hidden');
     var tp = document.getElementById('tablePerson');
     if (tp) tp.innerHTML = '';
     // 重新取数后回到「默认折叠」初始态：否则上一份数据展开过时会被带过来
@@ -962,11 +1137,47 @@
     syncHistory();
   }
 
-  /* 按当前数据集 + 当前所选日期重新拉取（服务端按日期重算并只返回该日数据）；
-     id 为 null 时取最新数据集 */
+  // 日期 → YYYY-MM-DD（本地时区）
+  function ymd(dt) {
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
+  }
+
+  /* 「周视图 / 月视图」聚合区间：自然周（周一 ~ 周日）、自然月（1 日 ~ 月末）。
+     基准日 = 当前所选日期（curDate），日视图返回 null（按单日出数） */
+  function viewRange() {
+    if (viewMode === 'day') return null;
+    var base = curDate || todayStr();
+    var d = new Date(base + 'T00:00:00');
+    if (isNaN(d.getTime())) return null;
+    var from, to;
+    if (viewMode === 'week') {
+      var dow = (d.getDay() + 6) % 7;                       // 周一 = 0
+      from = new Date(d); from.setDate(d.getDate() - dow);
+      to = new Date(from); to.setDate(from.getDate() + 6);
+    } else {
+      from = new Date(d.getFullYear(), d.getMonth(), 1);
+      to = new Date(d.getFullYear(), d.getMonth() + 1, 0);  // 下月第 0 天 = 本月最后一天
+    }
+    return { from: ymd(from), to: ymd(to) };
+  }
+
+  /* 按当前视图范围重新拉取：
+     - 周 / 月视图：/api/range?from=&to= —— 服务端汇总区间内「所有」数据集的明细
+       （库内每个数据集通常只含一天，跨数据集合并才有整周 / 整月的数据），不依赖单个数据集
+     - 日视图：指定数据集 + 日期；没有具体数据集时按日期跨数据集定位（/api/day） */
   function refetch(id) {
-    var url = id == null ? API + '/latest' : API + '/datasets/' + encodeURIComponent(id);
-    if (curDate) url += '?date=' + encodeURIComponent(curDate);
+    var url, r = viewRange();
+    if (r) {
+      // 周视图按天分桶（7 个点）；月视图按自然周分桶（以周为数值，不是整月一个总计）
+      url = API + '/range?from=' + r.from + '&to=' + r.to +
+        '&bucket=' + (viewMode === 'month' ? 'week' : 'date');
+    } else if (id == null && curDate) {
+      url = API + '/day?date=' + encodeURIComponent(curDate);
+    } else {
+      url = id == null ? API + '/latest' : API + '/datasets/' + encodeURIComponent(id);
+      if (curDate) url += '?date=' + encodeURIComponent(curDate);
+    }
     return fetch(url).then(readJson).then(function (ds) { render(ds); return ds; });
   }
 
@@ -2471,14 +2682,118 @@
     refetch(current.id).catch(function (e) { notice('切换日期失败：' + esc(e.message || e), 'err'); });
   });
 
+  /* 顶栏「周视图 / 月视图」：主页面点击时另开一个独立页面（新标签页），读库内已有数据
+     按自然周（周一 ~ 周日）/ 自然月聚合；主页面保持日视图不受影响。
+     在视图页面内点击则在「本页」切换视图范围，再次点击同一个按钮回到日视图 */
+  var viewWeekBtn = document.getElementById('viewWeek');
+  var viewMonthBtn = document.getElementById('viewMonth');
+  function viewPaint() {
+    if (viewWeekBtn) viewWeekBtn.className = 'btn view-btn' + (viewMode === 'week' ? ' on' : '');
+    if (viewMonthBtn) viewMonthBtn.className = 'btn view-btn' + (viewMode === 'month' ? ' on' : '');
+  }
+
+  /* 周 / 月视图的日期步进控件：◀ / ▶ 按自然周（±7 天）或自然月（±1 月）移动锚点日期，
+     中间显示当前统计区间；日视图隐藏。原日期下拉保留，可直接跳到某天所在的周 / 月 */
+  var rangeNavEl = document.getElementById('rangeNav');
+  var rangeLabelEl = document.getElementById('rangeLabel');
+  var rangePrevBtn = document.getElementById('rangePrev');
+  var rangeNextBtn = document.getElementById('rangeNext');
+
+  function rangePaint() {
+    if (!rangeNavEl) return;
+    if (viewMode === 'day') { rangeNavEl.classList.add('hidden'); return; }
+    var unit = viewMode === 'month' ? '月' : '周';
+    var r = viewRange();
+    if (rangeLabelEl) rangeLabelEl.textContent = r ? (r.from + ' ~ ' + r.to) : '';
+    if (rangePrevBtn) rangePrevBtn.title = '上一个' + unit;
+    if (rangeNextBtn) rangeNextBtn.title = '下一个' + unit;
+    rangeNavEl.classList.remove('hidden');
+  }
+
+  /* 锚点日期整体前 / 后移一个自然周（±7 天）或自然月（±1 月，月末自动收敛，如 1/31 + 1 月 → 2/28） */
+  function shiftAnchor(delta) {
+    var d = new Date((curDate || todayStr()) + 'T00:00:00');
+    if (isNaN(d.getTime())) return null;
+    if (viewMode === 'month') {
+      var day = d.getDate();
+      d.setDate(1);
+      d.setMonth(d.getMonth() + delta);
+      d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+    } else {
+      d.setDate(d.getDate() + delta * 7);
+    }
+    return ymd(d);
+  }
+
+  function rangeStep(delta) {
+    var next = shiftAnchor(delta);
+    if (!next || next === curDate) return;
+    var prev = curDate;
+    curDate = next;
+    rangePaint();
+    refetch(current ? current.id : null).then(function () {
+      var r = viewRange();
+      notice('已切换到 ' + r.from + ' ~ ' + r.to, 'ok');
+    }).catch(function (e) {
+      curDate = prev;              // 目标区间无数据：回退锚点，避免停在空白页
+      rangePaint();
+      notice('切换失败：' + esc(e.message || e), 'err');
+    });
+  }
+
+  if (rangePrevBtn) rangePrevBtn.addEventListener('click', function () { rangeStep(-1); });
+  if (rangeNextBtn) rangeNextBtn.addEventListener('click', function () { rangeStep(1); });
+
+  function setView(mode) {
+    var next = viewMode === mode ? 'day' : mode;      // 再点一次 → 回到日视图
+    if (next === viewMode) return;
+    viewMode = next;
+    viewPaint();
+    rangePaint();
+    notice(next === 'day' ? '已切回日视图'
+      : (next === 'week' ? '周视图：按自然周（周一 ~ 周日）聚合' : '月视图：按自然月聚合'), 'ok');
+    if (!current) return;
+    refetch(current.id).catch(function (e) { notice('切换视图失败：' + esc(e.message || e), 'err'); });
+  }
+  /* 另开独立视图页面：URL 带上视图类型与当前锚点日期，新页面自行读取已有数据并聚合 */
+  function openView(mode) {
+    var u = new URL(global.location.href);
+    u.search = '?view=' + mode + (curDate ? '&date=' + encodeURIComponent(curDate) : '');
+    u.hash = '';
+    var w = global.open(u.toString(), '_blank');
+    if (!w) notice('浏览器拦截了新窗口，请允许本站弹出窗口后重试', 'err');
+  }
+  function onViewClick(mode) {
+    if (viewPage) setView(mode);   // 视图页面内：本页切换
+    else openView(mode);           // 主页面：另开新页面
+  }
+  if (viewWeekBtn) viewWeekBtn.addEventListener('click', function () { onViewClick('week'); });
+  if (viewMonthBtn) viewMonthBtn.addEventListener('click', function () { onViewClick('month'); });
+  viewPaint();
+  rangePaint();
+  if (viewPage) {
+    document.title = '拣货效率统计 · ' + (viewMode === 'week' ? '周视图' : '月视图') +
+      (curDate ? '（' + curDate + '）' : '');
+  }
+
   /* ---------- 启动：只加载「含今天日期」的数据集；今天没单就不加载任何数据，只给遮罩提示 ---------- */
   injectCardTools();
   renderAccess();
+  if (viewPage) gateDismissed = true;   // 视图页面展示的是指定区间，不弹「今日暂无数据」遮罩
   if (typeof echarts === 'undefined') {
     notice('图表库 ECharts 未加载（可能无外网），页面其余内容仍可正常使用', 'err');
   }
   fetch(API + '/datasets').then(readJson).then(function (list) {
     var today = todayStr();
+    // 视图页面：不绑定单个数据集 —— 由服务端按区间汇总「所有」数据集（每个数据集常只含一天）
+    if (viewPage) {
+      loadHistory(null, list);
+      return refetch(null).then(function (ds) {
+        var rg = (ds.meta && ds.meta.range) || null;
+        notice('已按' + (viewMode === 'week' ? '自然周' : '自然月') + '汇总区间内所有数据集' +
+          (rg ? '（' + rg.from + ' ~ ' + rg.to + '）' : ''), 'ok');
+      });
+    }
     // 列表按 id 倒序：只要某条数据集的日期集合里有今天就用它。今天的数据常不是最新一条
     //（例如先传今日单、再补传历史单），只用 /latest 会误判成「今日暂无数据」
     var hit = (list || []).filter(function (x) {

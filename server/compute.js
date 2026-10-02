@@ -40,6 +40,21 @@ function parseTime(v) {
 
 const dateStr = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 
+/* 自然周起点（周一）的日期：'2026-10-02' -> '2026-09-28'。
+   月视图按「周」分桶时用（结果只依赖入参字符串，缓存避免逐条明细重复计算） */
+const WEEK_START_CACHE = {};
+function weekStartOf(ds) {
+  if (WEEK_START_CACHE[ds]) return WEEK_START_CACHE[ds];
+  const d = new Date(ds + 'T00:00:00');
+  let out = ds;
+  if (!isNaN(d.getTime())) {
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));   // 回退到本周一
+    out = dateStr(d);
+  }
+  WEEK_START_CACHE[ds] = out;
+  return out;
+}
+
 // 作业类型：拣货单类型为「一体化」时优先；否则按映射表取前后场分区，未命中归入「未匹配分区」
 function jobType(part, orderType, map) {
   if (String(orderType == null ? '' : orderType).trim() === CFG.INTEGRATED_ORDER_TYPE) return '一体化';
@@ -85,9 +100,9 @@ function dateSetOf(recs) {
 }
 
 function sum(rs) {
-  let h = 0, t = 0;
-  for (const r of rs) { h += r.rows; t += r.hours; }
-  return [h, t];
+  let h = 0, t = 0, q = 0;
+  for (const r of rs) { h += r.rows; t += r.hours; q += (r.qty || 0); }
+  return [h, t, q];
 }
 const eff = (h, t) => (t ? Math.round(h / t * 100) / 100 : null);
 const r2 = v => Math.round(v * 100) / 100;
@@ -107,17 +122,20 @@ function groupBy(recs, key) {
 // 分档区间：固定档位便于跨数据集对比；含下界不含上界，末档开区间
 const EFF_BINS = [[0, 60], [60, 90], [90, 120], [120, 180], [180, 240], [240, Infinity]];
 const ROWS_BINS = [[0, 100], [100, 250], [250, 500], [500, 800], [800, Infinity]];
+const QTY_BINS = [[0, 200], [200, 500], [500, 1000], [1000, 2000], [2000, Infinity]];
 
 const binLabel = b => (b[1] === Infinity ? '≥ ' + b[0] : b[0] + ' – ' + b[1]);
 
-// 按 key 落档，归集每档人数、行数（忽略空值）
-function binAgg(list, key, bins) {
+/* 按 key 落档，归集每档人数与产出量（忽略空值）。
+   valKey：产出量取哪个字段（默认 rows；拣货数量分档传 'qty'），结果统一放在 out[].rows */
+function binAgg(list, key, bins, valKey) {
+  const vk = valKey || 'rows';
   const out = bins.map(b => ({ label: binLabel(b), n: 0, rows: 0 }));
   list.forEach(x => {
     const v = x[key];
     if (v == null) return;
     for (let i = 0; i < bins.length; i++) {
-      if (v >= bins[i][0] && v < bins[i][1]) { out[i].n++; out[i].rows += x.rows || 0; return; }
+      if (v >= bins[i][0] && v < bins[i][1]) { out[i].n++; out[i].rows += x[vk] || 0; return; }
     }
   });
   return out;
@@ -211,33 +229,45 @@ function paretoTop(desc, totalRows, frac) {
 /* ---------- 数据集构建 ---------- */
 
 function buildDataset(recs, meta) {
+  /* 时间轴粒度：
+       hour = 单日视图（横轴为小时，含半小时细分刻度）
+       date = 周视图（横轴为日期）
+       week = 月视图（横轴为自然周，值 = 该周的周一日期）
+     hours / byHour / jobTypeByHour / zoneByHour / personByHour / timeout 等字段名保持不变，
+     仅把「刻度值」换成对应粒度，前端据 meta.bucket 决定轴标签格式 */
+  const bUnit = (meta && (meta.bucket === 'week' || meta.bucket === 'date')) ? meta.bucket : 'hour';
+  const byDate = bUnit !== 'hour';
+  const bk = bUnit === 'hour' ? (r => r.hour)
+    : (bUnit === 'week' ? (r => weekStartOf(r.date)) : (r => r.date));
   const hours = [], dates = [], personSet = {}, jtSet = {};
   for (const r of recs) {
-    if (hours.indexOf(r.hour) < 0) hours.push(r.hour);
+    const k = bk(r);
+    if (hours.indexOf(k) < 0) hours.push(k);
     if (dates.indexOf(r.date) < 0) dates.push(r.date);
     personSet[r.person] = 1;
     jtSet[r.jobType] = 1;
   }
-  hours.sort((a, b) => a - b);
+  hours.sort(byDate ? ((a, b) => (a < b ? -1 : (a > b ? 1 : 0))) : ((a, b) => a - b));
   dates.sort();
 
   const H = sum(recs), totalEff = eff(H[0], H[1]);
+  const hasQty = recs.some(r => r.qty != null);   // 是否含「拣货数量」字段（旧数据没有则该卡片整卡隐藏）
 
   const byJobType = Object.keys(jtSet).map(k => {
     const a = sum(groupBy(recs, x => x.jobType)[k] || []);
-    return { name: k, rows: Math.round(a[0]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
+    return { name: k, rows: Math.round(a[0]), qty: Math.round(a[2]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
   }).sort((a, b) => b.eff - a.eff);
 
   const gp = groupBy(recs, x => x.person);
   const byPerson = Object.keys(gp).map(k => {
     const a = sum(gp[k]);
-    return { name: k, rows: Math.round(a[0]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
+    return { name: k, rows: Math.round(a[0]), qty: Math.round(a[2]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
   }).sort((a, b) => b.eff - a.eff);
 
-  const gh = groupBy(recs, x => x.hour);
+  const gh = groupBy(recs, bk);
   const byHour = hours.map(h => {
     const a = sum(gh[h]);
-    return { hour: h, rows: Math.round(a[0]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
+    return { hour: h, rows: Math.round(a[0]), qty: Math.round(a[2]), hours: r4(a[1]), eff: eff(a[0], a[1]) };
   });
 
   // 细分：作业类型 × 拣货分区
@@ -251,7 +281,7 @@ function buildDataset(recs, meta) {
     const pv = Object.keys(gp).map(n => eff(...sum(gp[n]))).filter(v => v != null);
     return {
       type: p[0], zone: p[1], code: zoneCode(p[1]),
-      rows: Math.round(a[0]), hours: r4(a[1]), eff: eff(a[0], a[1]),
+      rows: Math.round(a[0]), qty: Math.round(a[2]), hours: r4(a[1]), eff: eff(a[0], a[1]),
       avg: pv.length ? r2(meanOf(pv)) : null,
       share: Math.round(a[0] / (H[0] || 1) * 1000) / 10
     };
@@ -262,7 +292,7 @@ function buildDataset(recs, meta) {
     return {
       name: d.name,
       data: hours.map(h => {
-        const sub = rs.filter(x => x.hour === h);
+        const sub = rs.filter(x => bk(x) === h);
         return sub.length ? eff(...sum(sub)) : null;
       })
     };
@@ -275,7 +305,7 @@ function buildDataset(recs, meta) {
       return {
         name: z.type + '·' + z.code, type: z.type,
         data: hours.map(h => {
-          const sub = rs.filter(x => x.hour === h);
+          const sub = rs.filter(x => bk(x) === h);
           return sub.length ? eff(...sum(sub)) : null;
         })
       };
@@ -283,9 +313,12 @@ function buildDataset(recs, meta) {
   };
 
   // 半小时刻度（细分粒度，仅供「作业类型 × 小时 效率」「各小时效率趋势」两张图使用；透视仍按整点小时）
+  // 周 / 月聚合视图按日期出数，无半小时概念：slots 留空，前端自动回落到按天的 byHour / jobTypeByHour
   const slots = [];
-  for (const r of recs) if (slots.indexOf(r.slot) < 0) slots.push(r.slot);
-  slots.sort((a, b) => a - b);
+  if (!byDate) {
+    for (const r of recs) if (slots.indexOf(r.slot) < 0) slots.push(r.slot);
+    slots.sort((a, b) => a - b);
+  }
 
   const gsl = groupBy(recs, x => x.slot);
   const bySlot = slots.map(s => {
@@ -336,7 +369,7 @@ function buildDataset(recs, meta) {
       personRows.push({
         jobType: jt.name, person: p,
         data: hours.map(h => {
-          const sub = rs2.filter(x => x.hour === h);
+          const sub = rs2.filter(x => bk(x) === h);
           return sub.length ? eff(...sum(sub)) : null;
         }),
         rows: Math.round(a[0]), hours: r4(a[1]), total: eff(a[0], a[1])
@@ -354,7 +387,7 @@ function buildDataset(recs, meta) {
       type: jt.name,
       rows: Math.round(a[0]), hours: r4(a[1]), total: eff(a[0], a[1]),
       hourly: hours.map(h => {
-        const sub = rs.filter(x => x.hour === h);
+        const sub = rs.filter(x => bk(x) === h);
         return sub.length ? eff(...sum(sub)) : null;
       }),
       persons,
@@ -416,18 +449,18 @@ function buildDataset(recs, meta) {
       types,
       zones,
       byPerson,
-      hourly: hours.map(h => tRecs.filter(r => r.hour === h).length),
+      hourly: hours.map(h => tRecs.filter(r => bk(r) === h).length),
       series: duties.map(d => ({
         name: d.name,
-        data: hours.map(h => tRecs.filter(r => r.hour === h && dutyOf(r) === d.name).length)
+        data: hours.map(h => tRecs.filter(r => bk(r) === h && dutyOf(r) === d.name).length)
       })),
       typeSeries: types.map(d => ({
         name: d.name,
-        data: hours.map(h => tRecs.filter(r => r.hour === h && typeOf(r) === d.name).length)
+        data: hours.map(h => tRecs.filter(r => bk(r) === h && typeOf(r) === d.name).length)
       })),
       zoneSeries: zones.map(z => ({
         name: z.name,
-        data: hours.map(h => tRecs.filter(r => r.hour === h && zoneOf(r) === z.name).length)
+        data: hours.map(h => tRecs.filter(r => bk(r) === h && zoneOf(r) === z.name).length)
       }))
     };
   }
@@ -437,12 +470,13 @@ function buildDataset(recs, meta) {
       sourceFile: meta.sourceFile,
       dates: meta.dates || dates,     // 时间维度：上传文件的完整日期集合（不受忽略分区影响）
       hours,
+      bucket: bUnit,   // 时间轴粒度：'hour' 单日按小时；'date' 周视图按日期；'week' 月视图按自然周
       period,
       recordCount: recs.length, dropped: meta.dropped || 0, ignored: meta.ignored || 0,
       otherStore: meta.otherStore || 0
     },
     totals: {
-      rows: Math.round(H[0]), hours: r4(H[1]), eff: totalEff,
+      rows: Math.round(H[0]), qty: Math.round(H[2]), hours: r4(H[1]), eff: totalEff,
       persons: byPerson.length, jobTypes: byJobType.length
     },
     byJobType, byPerson, byHour, byZone,
@@ -451,7 +485,7 @@ function buildDataset(recs, meta) {
     bySlot,
     jobTypeBySlot: { slots, series: seriesJTSlot, total: bySlot.map(d => d.eff), groups: groupsSlot, unweighted: uwSlot },
     personByHour: { hours, rows: personRows, groups },
-    stats: buildStats(recs, groups, byPerson, H),
+    stats: buildStats(recs, groups, byPerson, H, hasQty),
     timeline: buildTimeline(recs),
     timeout
   };
@@ -558,7 +592,7 @@ function groupStat(persons) {
 }
 
 /* 统计口径（前端直接渲染） */
-function buildStats(recs, groups, byPerson, H) {
+function buildStats(recs, groups, byPerson, H, hasQty) {
   const totalRows = Math.round(H[0]);
   const allPersons = [];
   groups.forEach(g => { allPersons.push.apply(allPersons, g.persons || []); });
@@ -586,6 +620,11 @@ function buildStats(recs, groups, byPerson, H) {
   const rowsArr = numsOf(byPerson, 'rows');
   const desc = byPerson.slice().sort((a, b) => b.rows - a.rows);
 
+  // 拣货数量（件数）分布与集中度：数据里没有「拣货数量」字段时整体为 null / 空（前端整卡隐藏）
+  const totalQty = Math.round(H[2]);
+  const qtyArr = hasQty ? numsOf(byPerson, 'qty') : [];
+  const qtyDesc = byPerson.slice().sort((a, b) => b.qty - a.qty);
+
   return {
     personMean,
     personDist,
@@ -604,7 +643,20 @@ function buildStats(recs, groups, byPerson, H) {
       name: r.name, rows: r.rows,
       share: totalRows ? r2(r.rows / totalRows * 100) : 0
     })),
-    rowsBins: binAgg(byPerson, 'rows', ROWS_BINS)
+    rowsBins: binAgg(byPerson, 'rows', ROWS_BINS),
+    qtyStat: qtyArr.length ? {
+      n: byPerson.length, total: totalQty,
+      avg: totalQty / byPerson.length,
+      median: quantile(qtyArr, 0.5),
+      min: qtyArr[0], max: qtyArr[qtyArr.length - 1],
+      top10: paretoTop(qtyDesc, totalQty, 0.1),
+      top25: paretoTop(qtyDesc, totalQty, 0.25)
+    } : null,
+    qtyTop: qtyArr.length ? qtyDesc.slice(0, 10).map(r => ({
+      name: r.name, qty: r.qty,
+      share: totalQty ? r2(r.qty / totalQty * 100) : 0
+    })) : [],
+    qtyBins: hasQty ? binAgg(byPerson, 'qty', QTY_BINS, 'qty') : []
   };
 }
 
@@ -675,6 +727,8 @@ function buildFromMatrix(matrix, meta, map) {
   // 超时相关列在旧文件里可能不存在：缺失时该明细的 timeout 记 null，前端不展示超时统计
   const tmIdx = CFG.TIMEOUT_COLUMN in idx ? idx[CFG.TIMEOUT_COLUMN] : null;
   const dutyIdx = CFG.TIMEOUT_DUTY_COLUMN in idx ? idx[CFG.TIMEOUT_DUTY_COLUMN] : null;
+  // 「拣货数量」（件数）列同样可选：缺失或空值时 qty 记 null，前端不展示「拣货数量统计」
+  const qtyIdx = CFG.QTY_COLUMN in idx ? idx[CFG.QTY_COLUMN] : null;
 
   const recs = [];
   let dropped = 0;
@@ -706,6 +760,9 @@ function buildFromMatrix(matrix, meta, map) {
       no: String(no).trim(),          // 拣货单号：增量获取合并去重的键
       person: String(person).trim(),
       rows: toNumber(row[idx['拣货行数']]), hours: hrs,
+      // 拣货数量（件数）：列缺失或该行为空时记 null（不参与数量统计）
+      qty: (qtyIdx == null || row[qtyIdx] == null || String(row[qtyIdx]).trim() === '')
+        ? null : toNumber(row[qtyIdx]),
       timeout: tmIdx == null ? null : isTimeout(row[tmIdx]),
       duty: dutyIdx == null ? '' : String(row[dutyIdx] == null ? '' : row[dutyIdx]).trim()
     };
@@ -742,18 +799,22 @@ function buildFromBuffer(buf, sourceFile, map, ignore) {
   };
 }
 
-// 用新映射与忽略列表重算作业类型并重建数据集（改「分区设置」后调用）
-// date 非空时只重算该日期的明细（前端日期下拉切换用），时间维度仍保留原数据集的完整日期集合
-function rebuild(recs, meta, map, ignore, date) {
+/* 用新映射与忽略列表重算作业类型并重建数据集（改「分区设置」后调用）
+   days：日视图传单日字符串、周 / 月视图传日期数组、省略 = 整份数据；
+   meta.bucket = 'date' 按日期出数（周视图）、'week' 按自然周出数（月视图）、否则按小时（单日）；
+   时间维度（meta.dates）仍保留原数据集的完整日期集合，供日期下拉使用 */
+function rebuild(recs, meta, map, ignore, days) {
   const mapped = recs.map(r => Object.assign({}, r, { jobType: jobType(r.zone, r.orderType, map) }));
-  const scope = date ? mapped.filter(r => r.date === date) : mapped;
-  if (!scope.length) throw new Error('数据集内没有日期 ' + date + ' 的明细');
+  const set = days == null ? null : (Array.isArray(days) ? days : [days]);
+  const scope = set ? mapped.filter(r => set.indexOf(r.date) >= 0) : mapped;
+  if (!scope.length) throw new Error('数据集内没有所选日期范围的明细');
   const kept = splitIgnored(scope, ignore);
   if (!kept.recs.length) throw new Error('全部有效明细的分区都被「忽略分区」排除，无数据可统计');
   return buildDataset(kept.recs, {
     sourceFile: meta.sourceFile, dropped: meta.dropped || 0, ignored: kept.ignored,
     otherStore: meta.otherStore || 0,
-    dates: meta.dates || dateSetOf(mapped)
+    dates: meta.dates || dateSetOf(mapped),
+    bucket: meta.bucket
   });
 }
 
@@ -761,7 +822,7 @@ function rebuild(recs, meta, map, ignore, date) {
    接口字段与 xlsx「门店视角：拣货单」导出列一一对应，这里拼成同样的表头矩阵后
    直接复用 buildFromMatrix，口径（门店筛选 / 丢弃计数 / 时间维度）与上传完全一致 */
 
-const UMS_COLUMNS = ['拣货单号', '拣货人', CFG.TIME_COLUMN, '拣货完成时间', '拣货行数',
+const UMS_COLUMNS = ['拣货单号', '拣货人', CFG.TIME_COLUMN, '拣货完成时间', '拣货行数', CFG.QTY_COLUMN,
   '拣货分区', '拣货单类型', CFG.TIMEOUT_COLUMN, CFG.TIMEOUT_DUTY_COLUMN];
 
 function umsRow(it) {
@@ -771,6 +832,7 @@ function umsRow(it) {
     it.startPickingDate,
     it.endPickingDate,
     it.pickLineNum,
+    it[CFG.QTY_FIELD],          // 拣货数量（件数）：接口字段 pickNum，缺失时记 null
     it.partitionText || it.partitionCode,
     it.pickOrderType,
     it.pickTimeOutFlag ? CFG.TIMEOUT_YES : '否',

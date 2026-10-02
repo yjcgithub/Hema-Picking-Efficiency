@@ -282,31 +282,87 @@ function rebuildAll(map, ignore) {
   return { updated, skipped: db.withoutRecs().map(x => x.id), failed };
 }
 
-/* 出数范围：隔天不显示前天，默认只取数据集内最新日期，其他日期由前端日期下拉手动选择。
-   - 响应 meta.dates 仍是完整日期集合（下拉用），meta.date 为本次实际展示的日期
+/* 单日出数：隔天不显示前天，缺省取数据集内最新日期，其他日期由前端下拉手动选择（?date=YYYY-MM-DD）。
+   - 响应 meta.dates 仍是完整日期集合（下拉用），meta.date 为本次展示的日期
    - 有原始明细的一律按最新口径重算：库里的 payload 是上传时算好的旧版，
      直接返回会缺后加的字段（统计时间段 / 超时统计 / 分区人均等）
    - 缺原始明细的老数据集、或重算失败：退回原 payload，只补 meta.date */
 function withDate(ds, date) {
   if (!ds) return ds;
   const dates = (ds.meta && ds.meta.dates) || [];
-  const pick = dates.indexOf(date) >= 0 ? date : (dates[dates.length - 1] || '');
-  if (!pick) return ds;
+  const anchor = dates.indexOf(date) >= 0 ? date : (dates[dates.length - 1] || '');
+  const days = anchor ? [anchor] : [];
+  if (!days.length) return ds;
   const recs = ds.id == null ? null : db.recsOf(ds.id);
-  if (!recs || !recs.length) {
-    ds.meta.date = pick;
-    return ds;
-  }
+  if (!recs || !recs.length) { ds.meta.date = anchor; return ds; }
   try {
     const out = compute.rebuild(recs,
-      { sourceFile: ds.meta.sourceFile, dropped: ds.meta.dropped, otherStore: ds.meta.otherStore, dates },
-      currentMap(), currentIgnore(), pick);
+      { sourceFile: ds.meta.sourceFile, dropped: ds.meta.dropped, otherStore: ds.meta.otherStore,
+        dates, bucket: 'hour' },
+      currentMap(), currentIgnore(), days);
     out.id = ds.id;
-    out.meta.date = pick;
+    out.meta.date = anchor;
     return out;
+  } catch (e) { ds.meta.date = anchor; return ds; }
+}
+
+const isYmd = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+
+/* 周 / 月视图（?from=&to=）：汇总区间内「所有」数据集的明细后重算
+   —— 库内每个数据集通常只含一天（每天各自入库），跨数据集合并才有整周 / 整月的数据。
+   - 命中：数据集的日期集合与 [from,to] 有交集
+   - 去重：键 = 拣货单号 + 拣货分区（同一单被重复抓取时不重复计数）；list() 按 id 倒序，保留较新的一条
+   - unit：'date' = 周视图（时间轴为日期）、'week' = 月视图（时间轴为自然周）
+   - meta.range 回传区间实际覆盖的日期；区间内无任何数据集 / 明细时返回 null（由调用方回 404） */
+function rangeDataset(from, to, unit) {
+  const days = [], allDates = [], merged = [], seen = {};
+  let files = 0;
+  db.list().forEach(row => {
+    const dsDates = String(row.dates == null ? '' : row.dates).split(',').filter(Boolean);
+    dsDates.forEach(d => { if (allDates.indexOf(d) < 0) allDates.push(d); });
+    const hit = dsDates.filter(d => d >= from && d <= to);
+    if (!hit.length) return;
+    hit.forEach(d => { if (days.indexOf(d) < 0) days.push(d); });
+    const recs = db.recsOf(row.id);
+    if (!recs || !recs.length) return;
+    files++;
+    recs.forEach(r => {
+      if (r.date < from || r.date > to) return;
+      const no = r.no != null ? String(r.no).trim() : '';
+      const key = no ? no + '\u0001' + String(r.zone == null ? '' : r.zone) : '';
+      if (key) { if (seen[key]) return; seen[key] = 1; }
+      merged.push(r);
+    });
+  });
+  if (!days.length || !merged.length) return null;
+  days.sort();
+  allDates.sort();
+  const out = compute.rebuild(merged, {
+    sourceFile: '区间汇总 ' + from + ' ~ ' + to + '（' + files + ' 个数据集）',
+    dropped: 0, otherStore: 0,
+    dates: allDates,
+    bucket: unit === 'week' ? 'week' : 'date'
+  }, currentMap(), currentIgnore(), days);
+  out.meta.date = days[days.length - 1];
+  out.meta.range = { from: days[0], to: days[days.length - 1], dates: days };
+  return out;
+}
+
+/* 请求是否带区间参数（三个取数接口共用：带 from&to 即视为跨数据集区间汇总）。
+   bucket=week 时按自然周分桶（月视图），否则按日期分桶（周视图） */
+function rangeQuery(req) {
+  const from = req.query.from, to = req.query.to;
+  if (!(isYmd(from) && isYmd(to) && to >= from)) return null;
+  return { from: from, to: to, bucket: req.query.bucket === 'week' ? 'week' : 'date' };
+}
+
+function sendRange(res, from, to, bucket) {
+  try {
+    const out = rangeDataset(from, to, bucket);
+    if (!out) return res.status(404).json({ error: '区间内暂无数据（' + from + ' ~ ' + to + '）' });
+    res.json(out);
   } catch (e) {
-    ds.meta.date = pick;
-    return ds;
+    res.status(400).json({ error: e.message || String(e) });
   }
 }
 
@@ -381,12 +437,16 @@ router.get('/api/datasets', (req, res) => {
 });
 
 router.get('/api/latest', (req, res) => {
+  const rq = rangeQuery(req);
+  if (rq) return sendRange(res, rq.from, rq.to, rq.bucket);
   const ds = db.latest();
   if (!ds) return res.status(404).json({ error: '暂无数据，请先上传拣货单' });
   res.json(withDate(ds, req.query.date));
 });
 
 router.get('/api/datasets/:id', (req, res) => {
+  const rq = rangeQuery(req);
+  if (rq) return sendRange(res, rq.from, rq.to, rq.bucket);
   const ds = db.get(req.params.id);
   if (!ds) return res.status(404).json({ error: '数据集不存在' });
   try {
@@ -394,6 +454,27 @@ router.get('/api/datasets/:id', (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message || String(e) });
   }
+});
+
+/* 周 / 月视图：汇总区间内所有数据集的明细后重算（每个数据集常只含一天）。
+   bucket=week 按自然周分桶（月视图），否则按日期分桶（周视图） */
+router.get('/api/range', (req, res) => {
+  const from = req.query.from, to = req.query.to;
+  if (!isYmd(from) || !isYmd(to) || to < from) {
+    return res.status(400).json({ error: '需要有效的 from / to（YYYY-MM-DD，且 to ≥ from）' });
+  }
+  sendRange(res, from, to, req.query.bucket);
+});
+
+/* 单日：按日期跨数据集定位数据集（视图页面切回日视图等场景） */
+router.get('/api/day', (req, res) => {
+  const date = req.query.date;
+  if (!isYmd(date)) return res.status(400).json({ error: '需要有效的 date（YYYY-MM-DD）' });
+  const rows = db.list().filter(r => String(r.dates == null ? '' : r.dates).split(',').indexOf(date) >= 0);
+  const ds = rows.length ? db.get(rows[0].id) : null;
+  if (!ds) return res.status(404).json({ error: '该日期暂无数据（' + date + '）' });
+  try { res.json(withDate(ds, date)); }
+  catch (e) { res.status(400).json({ error: e.message || String(e) }); }
 });
 
 // 上传：raw body 传 xlsx 字节，文件名通过 ?name= 或 x-filename 头传入
@@ -1040,7 +1121,7 @@ app.use(function (req, res) {
       ? '当前 BASE_PATH=' + BASE_PATH + '；请确认 nginx 转发时是否已剥掉该前缀（proxy_pass 末尾带 / 会剥掉）'
       : '当前未设置 BASE_PATH。若通过子路径访问（如 /hpe/api/...），请用 「BASE_PATH=前缀」 启动本服务；'
         + '或在 nginx 把 proxy_pass 改成 http://127.0.0.1:端口/（末尾加斜杠）',
-    availableApi: ['/api/health', '/api/logs', '/api/datasets', '/api/latest', '/api/datasets/:id', '/api/upload',
+    availableApi: ['/api/health', '/api/logs', '/api/datasets', '/api/latest', '/api/datasets/:id', '/api/range', '/api/day', '/api/upload',
       '/api/ums/fetch', '/api/ums/config', '/api/ums/cookie', '/api/ums/agent/data', '/api/ums/known', '/api/settings']
       .map(function (p) { return (BASE_PATH || '') + p; })
   });

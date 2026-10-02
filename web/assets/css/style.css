@@ -38,8 +38,8 @@ body {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
-  padding: 8px 20px 10px;
+  gap: 6px;
+  padding: 6px 20px 8px;
   background: #fff;
   border-bottom: none;
   position: sticky;
@@ -64,8 +64,8 @@ body {
 /* 顶栏信息条：整行浅色信息块；左侧时间范围（大字，与 h1 同级），右侧数据来源 / 有效明细 / 访问方式。
    独立成行后不再与右侧控件争抢宽度，宽度不足时块内自动折行 */
 .brand-meta {
-  display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 20px;
-  min-width: 0; padding: 6px 14px;
+  display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 3px 16px;
+  min-width: 0; padding: 4px 12px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
   color: var(--muted); font-size: 12.5px; line-height: 1.4;
   overflow-wrap: anywhere;
@@ -88,7 +88,7 @@ body {
   color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .5px;
 }
 .brand-meta .period-range {
-  color: var(--txt); font-size: 21px; line-height: 1.2; font-weight: 700;
+  color: var(--txt); font-size: 18px; line-height: 1.2; font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 /* 第二行小字：数据来源 / 有效明细 / 访问方式。
@@ -104,10 +104,10 @@ body {
 }
 .brand { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; }
 .logo {
-  width: 42px; height: 42px; border-radius: 12px;
+  width: 36px; height: 36px; border-radius: 11px;
   background: linear-gradient(135deg, #2563eb, #14b8a6);
   background-size: 200% 200%;
-  color: #fff; font-size: 22px; font-weight: 700;
+  color: #fff; font-size: 19px; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
   animation: logo-grad 4s ease infinite, logo-float 3s ease-in-out infinite;
   box-shadow: 0 4px 15px rgba(37, 99, 235, .25);
@@ -165,15 +165,29 @@ body {
   transition: all .18s cubic-bezier(.22, 1, .36, 1);
 }
 .mini:hover { border-color: var(--primary); color: var(--primary); background: #f8faff; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(37, 99, 235, .1); }
+/* 卡片工具按钮（导出为图片 / 复制为图片）：蓝色实底 + 白字，突出可操作性 */
+.card-tools .mini { background: var(--primary); border-color: var(--primary); color: #fff; }
+.card-tools .mini:hover { background: #1d4ed8; border-color: #1d4ed8; color: #fff; box-shadow: 0 3px 10px rgba(37, 99, 235, .3); }
 
 /* 口径开关（顶栏统一入口：人均 / 按工时加权） */
 .btn.switch { padding: 8px 14px; gap: 7px; font-size: 13px; color: var(--txt); }
 .btn.switch input { margin: 0; width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; }
 .btn.switch:has(input:checked) { border-color: var(--primary); color: var(--primary); background: #f0f6ff; }
+/* 顶栏「周视图 / 月视图」：选中态与「按工时加权」勾选态一致（浅蓝高亮） */
+.btn.view-btn.on { border-color: var(--primary); color: var(--primary); background: #f0f6ff; }
 
 /* 日期下拉（顶栏）：仅当数据集含多天时显示，默认选中数据集内最新日期 */
 .date-wrap { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 .date-sel { padding: 8px 10px; max-width: 160px; }
+
+/* 周 / 月视图：按周 / 月步进按钮 + 当前统计区间标签（日视图隐藏） */
+.range-nav { display: inline-flex; align-items: center; gap: 6px; }
+.range-nav .nav-btn { padding: 6px 10px; line-height: 1; }
+.range-label {
+  min-width: 168px; text-align: center;
+  color: var(--primary); font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 
 /* 导出/复制的范围气泡菜单（透视卡片：全部 / 前场 / 后场 / 一体化） */
 .menu-wrap { position: relative; display: inline-block; }
@@ -249,15 +263,18 @@ body {
 /* ---------- 主体 ---------- */
 main { padding: 14px 20px 6px; }
 
-/* 第一行固定 4 列（综合效率 + 3 个作业类型），第二行固定 3 列：列数不随内容变化，卡片宽度稳定 */
+/* 第一行固定 4 列（综合效率 + 3 个作业类型）：列数不随内容变化，卡片宽度稳定；
+   第二行为可变数量的规模指标（3 或 4 张），见下方 .kpis.sub */
 .kpis {
   display: grid; gap: 12px; margin-bottom: 12px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
-/* 第二行：规模指标，字号更小、卡片更紧凑。与第一行保持同样的 12px 行距 */
+/* 第二行：规模指标，字号更小、卡片更紧凑。与第一行保持同样的 12px 行距。
+   卡片数量随数据字段变化（含「拣货数量」时为 4 张，否则 3 张）：
+   用 flex 等分保证始终排在一行、不换行，且各卡片等宽 */
 .kpis.sub {
+  display: flex;
   gap: 12px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 /* 卡内固定三段式：标签（灰小字）→ 数值（大号加粗 + 单位）→ 脚注（最小号灰字），
    左对齐纵向堆叠；同一行卡片由 grid 拉伸等高，数值左边缘对齐，便于逐张横向比对 */
@@ -298,7 +315,7 @@ main { padding: 14px 20px 6px; }
 .kpi .value small { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-left: 4px; }
 .kpi .foot { margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--muted); }
 
-.kpis.sub .kpi { min-height: 76px; padding: 10px 14px; border-radius: 11px; }
+.kpis.sub .kpi { flex: 1 1 0; min-width: 0; min-height: 76px; padding: 10px 14px; border-radius: 11px; }
 .kpis.sub .kpi .label { font-size: 11.5px; }
 .kpis.sub .kpi .value { font-size: 19px; margin-top: 2px; }
 .kpis.sub .kpi .value small { font-size: 11px; }
@@ -312,10 +329,10 @@ main { padding: 14px 20px 6px; }
   /* period-range 缩小字号，保证窄窗口下单行不溢出；信息条本身已是整行，无需去掉边框 */
   .brand-meta .period-range { font-size: 17px; }
 
-  .kpis, .kpis.sub { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .kpis, .kpis.sub { grid-template-columns: minmax(0, 1fr); }
+  .kpis { grid-template-columns: minmax(0, 1fr); }
 }
 
 .grid {
@@ -452,6 +469,23 @@ td.eff-lo { color: #b45309; }
 .pivot-block:last-child { margin-bottom: 0; }
 /* 块与块之间加分隔线，三块界限更清晰 */
 .pivot-block + .pivot-block { border-top: 1px solid var(--line); padding-top: 14px; }
+/* 效率透视表：三块（前场合流 / 后场合流 / 一体化）按浏览器宽度平铺。
+   用 flex 自动换行：每块基准宽度 = 表格完整显示且不出现左右滑动的自然宽度
+   （由 JS 量取后写入 --pivot-min），一行放得下几块就并排几块；
+   换行后独占一行的块由 flex-grow:1 自动拉伸铺满整行（如 1、2 块并排时第 3 块铺满）。
+   窄屏单块时可收缩，不会溢出容器；块间距交给 flex，故取消纵向堆叠时的上分隔线与下外边距 */
+#pivotBlocks {
+  display: flex; flex-wrap: wrap; gap: 14px 16px;
+  align-items: flex-start;
+}
+#pivotBlocks .pivot-block {
+  margin-bottom: 0; min-width: 0;
+  flex: 1 1 var(--pivot-min, 520px);
+}
+/* 第一块（前场合流）独占整行；后两块（后场合流 / 一体化）在下一行自适应并排
+   —— 宽度够则并排两块，不够则各自换行铺满 */
+#pivotBlocks .pivot-block:first-child { flex-basis: 100%; }
+#pivotBlocks .pivot-block + .pivot-block { border-top: 0; padding-top: 0; }
 .pivot-title {
   display: flex; align-items: center; flex-wrap: wrap; gap: 7px;
   font-weight: 600; font-size: 14.5px; margin: 0 0 6px;
@@ -468,18 +502,21 @@ td.eff-lo { color: #b45309; }
 .pivot-block .table-wrap { overflow-x: auto; }
 /* 工作时间图明细列多，同样在容器内横向滚动 */
 .table-wrap.scroll-x { overflow-x: auto; }
-/* 透视表行多，行高压紧一点点（上下内边距 6px -> 4px） */
-.pivot-block th, .pivot-block td { padding-top: 4px; padding-bottom: 4px; }
+/* 透视表列数多：行高压紧（上下 6px -> 2px），左右也收窄（12px -> 8px），
+   使行高更小、表格自然宽度更小，平铺时每列更紧凑，一行能并排下的块更多 */
+.pivot-block th, .pivot-block td { padding: 2px 8px; }
 /* 透视卡片：表格边框略深于普通表格（外框 + 行/表头分隔线），但保持清爽不抢眼 */
 .pivot-block .table-wrap { border-color: var(--line-mid); }
 .pivot-block th, .pivot-block td { border-bottom-color: var(--line-mid); }
 .pivot-block thead th { border-bottom: 1px solid var(--line-mid); }
 .pivot-block + .pivot-block { border-top-color: var(--line-mid); }
 
-/* 分块内首列（拣货人）吸左：横向滚动时始终可见 */
+/* 分块内首列（拣货人）吸左：横向滚动时始终可见；固定为约 5 个字宽，
+   不随表格拉伸变宽，超长人名省略号截断 */
 .pivot-block th:nth-child(1), .pivot-block tbody td:nth-child(1) {
   position: sticky; left: 0; z-index: 2;
-  min-width: 84px; background: #fff;
+  width: 84px; max-width: 84px; overflow: hidden; text-overflow: ellipsis;
+  background: #fff;
 }
 .pivot-block thead th:nth-child(1) { z-index: 4; background: #f8fafc; box-shadow: 1px 0 0 var(--line-mid); }
 .pivot-block tbody td:nth-child(1) { box-shadow: 1px 0 0 var(--line-mid); }
