@@ -8,6 +8,8 @@
   var cache = null;
   var weighted = true;    // 效率口径：true = 按工时加权（默认），false = 人均
   var bucketUnit = 'hour'; // 时间轴粒度：'hour' 单日按小时；'date' 周视图按日期；'week' 月视图按自然周
+  var rangeFrom = null;    // 聚合区间（月视图）：首 / 末周跨出当月时，把周标签裁到区间内
+  var rangeTo = null;
 
   function inst(id) {
     var el = document.getElementById(id);
@@ -32,13 +34,18 @@
     if (mi >= 60) { h += 1; mi -= 60; }
     return (h < 10 ? '0' + h : h) + ':' + (mi < 10 ? '0' + mi : mi);
   }
-  /* 自然周标签：周一的日期 -> 'MM-DD~MM-DD'（周日起算） */
+  /* 自然周标签：周一日期 -> 'MM-DD~MM-DD'（周一 ~ 周日）。
+     首 / 末周跨出聚合区间时裁到区间内：如 10 月视图首周周一为 9-28，应显示「10-01~10-04」 */
   function weekLabel(monday) {
     var d = new Date(String(monday) + 'T00:00:00');
     if (isNaN(d.getTime())) return String(monday);
-    d.setDate(d.getDate() + 6);
+    var s = String(monday);
+    var e = new Date(d); e.setDate(d.getDate() + 6);
     var p = function (n) { return (n < 10 ? '0' : '') + n; };
-    return String(monday).slice(5) + '~' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    var eStr = e.getFullYear() + '-' + p(e.getMonth() + 1) + '-' + p(e.getDate());
+    if (rangeFrom && s < rangeFrom) s = rangeFrom;
+    if (rangeTo && eStr > rangeTo) eStr = rangeTo;
+    return s.slice(5) + '~' + eStr.slice(5);
   }
   /* 时间轴刻度文案：小时视图为「N点」（半小时为 H:MM）；周视图为日期 MM-DD；月视图为自然周 MM-DD~MM-DD */
   function timeText(v, jSlot) {
@@ -163,6 +170,9 @@
     cache = data;
     if (typeof echarts === 'undefined') return;
     bucketUnit = (data.meta && data.meta.bucket) || 'hour';   // 时间轴粒度：hour / date / week
+    var rg = (data.meta && data.meta.range) || null;          // 月视图聚合区间（首 / 末周标签裁剪用）
+    rangeFrom = (rg && rg.from) || null;
+    rangeTo = (rg && rg.to) || null;
 
     /* 1) 效率总览 · 效率趋势（合并为一张图）
           x 轴：单日视图为半小时刻度（旧数据无半小时时退回整点小时）；周 / 月聚合视图为日期（MM-DD）

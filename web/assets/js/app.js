@@ -333,14 +333,19 @@
     });
   }
 
-  /* 时间轴列头标签：小时「N点」/ 日期「MM-DD」/ 周「MM-DD~MM-DD」 */
+  /* 时间轴列头标签：小时「N点」/ 日期「MM-DD」/ 周「MM-DD~MM-DD」。
+     月视图按自然周分桶，首 / 末周会跨出当月（如 10 月 1 日所在周的周一为 9-28），
+     标签裁到当前聚合区间，避免 10 月视图出现 9 月的日期 */
   function axisColLabel(v, unit) {
     if (unit === 'week') {
-      var d = new Date(String(v) + 'T00:00:00');
-      if (isNaN(d.getTime())) return String(v);
-      d.setDate(d.getDate() + 6);
-      var p = function (n) { return (n < 10 ? '0' : '') + n; };
-      return String(v).slice(5) + '~' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+      var s = String(v);
+      var d = new Date(s + 'T00:00:00');
+      if (isNaN(d.getTime())) return s;
+      var e = new Date(d); e.setDate(d.getDate() + 6);
+      var eStr = ymd(e);
+      var r = viewRange();
+      if (r) { if (s < r.from) s = r.from; if (eStr > r.to) eStr = r.to; }
+      return s.slice(5) + '~' + eStr.slice(5);
     }
     if (unit === 'date') return String(v).slice(5);
     return v + '点';
@@ -1227,11 +1232,47 @@
     return (n / 1048576).toFixed(2) + ' MB';
   }
 
+  /* 进度浮层结构只建一次，之后只改文本与进度条宽度。
+     若每次刷新都重建 innerHTML，进度条 <i> 会被替换成新节点，
+     CSS 的 width 过渡无从触发，进度就会「一格一格」地跳 —— 这是卡顿的根源 */
+  function upMount(t) {
+    noticeEl.className = 'notice ok upload';
+    noticeEl.innerHTML =
+      '<button type="button" class="notice-close" title="关闭">×</button>' +
+      '<div class="up-head">' +
+        '<span class="up-title"></span>' +
+        '<span class="up-pct"></span>' +
+      '</div>' +
+      '<div class="up-bar"><i></i></div>' +
+      '<div class="up-meta"></div>';
+    t.dom = {
+      title: noticeEl.querySelector('.up-title'),
+      pct: noticeEl.querySelector('.up-pct'),
+      bar: noticeEl.querySelector('.up-bar'),
+      fill: noticeEl.querySelector('.up-bar > i'),
+      meta: noticeEl.querySelector('.up-meta')
+    };
+  }
+
   function upPaint(t) {
     if (upState !== t || t.hidden) return;
+    if (!t.dom) upMount(t);
+    var d = t.dom;
     var sec = (Date.now() - t.startedAt) / 1000;
     var computing = t.phase === 'compute';
     var pct = computing ? 100 : t.pct;
+
+    // 标题 / 百分比：仅在内容变化时写入，避免无谓重排
+    var titleHtml = (computing ? '上传完成，正在由服务端计算 ' : '正在上传并计算 ') +
+      '<b>' + esc(t.name) + '</b>';
+    if (t._title !== titleHtml) { d.title.innerHTML = titleHtml; t._title = titleHtml; }
+    if (t._pct !== pct) { d.pct.textContent = pct + '%'; t._pct = pct; }
+
+    // 进度条：复用同一个 <i>，只改 width，让 CSS 过渡平滑推进
+    if (t._indet !== computing) { d.bar.classList.toggle('indet', computing); t._indet = computing; }
+    d.fill.style.width = pct + '%';
+
+    // 明细 chips
     var items = ['大小 ' + fmtBytes(t.size)];
     if (computing) {
       items.push('已上传 ' + fmtBytes(t.size), '服务端解析计算中…');
@@ -1240,18 +1281,8 @@
       if (sec > 0.3) items.push('速度 ' + fmtBytes(t.loaded / sec) + '/s');
     }
     if (sec > 0.3) items.push('已用 ' + sec.toFixed(1) + ' s');
-    noticeEl.className = 'notice ok upload';
-    noticeEl.innerHTML =
-      '<button type="button" class="notice-close" title="关闭">×</button>' +
-      '<div class="up-head">' +
-        '<span class="up-title">' + (computing ? '上传完成，正在由服务端计算 ' : '正在上传并计算 ') +
-          '<b>' + esc(t.name) + '</b></span>' +
-        '<span class="up-pct">' + pct + '%</span>' +
-      '</div>' +
-      '<div class="up-bar' + (computing ? ' indet' : '') + '"><i style="width:' + pct + '%"></i></div>' +
-      '<div class="up-meta">' + items.map(function (s) {
-        return '<span>' + s + '</span>';
-      }).join('') + '</div>';
+    var metaHtml = items.map(function (s) { return '<span>' + s + '</span>'; }).join('');
+    if (t._meta !== metaHtml) { d.meta.innerHTML = metaHtml; t._meta = metaHtml; }
   }
 
   function upload(file) {
@@ -2753,7 +2784,17 @@
     notice(next === 'day' ? '已切回日视图'
       : (next === 'week' ? '周视图：按自然周（周一 ~ 周日）聚合' : '月视图：按自然月聚合'), 'ok');
     if (!current) return;
-    refetch(current.id).catch(function (e) { notice('切换视图失败：' + esc(e.message || e), 'err'); });
+    /* 聚合视图的锚点只是一个「区间位置」，不一定是数据日期（周 / 月步进后会停在区间中间的某天）。
+       切换后目标区间可能没有数据 —— 日视图 /api/day 或聚合 /api/range 都会 404（如 9-02 所在周 8-31~9-06）。
+       此时回退到上一区间内最后一个有数据的日期作锚点再试一次，保证切换总能落到有数据的区间 */
+    refetch(current.id).catch(function (e) {
+      if (e.status !== 404) throw e;                  // 非「无数据」错误（如网络）直接抛出
+      var rg = current.meta && current.meta.range;
+      var ds = (rg && rg.dates) || [];
+      if (!ds.length) throw e;
+      curDate = ds[ds.length - 1];
+      return refetch(null);
+    }).catch(function (e) { notice('切换视图失败：' + esc(e.message || e), 'err'); });
   }
   /* 另开独立视图页面：URL 带上视图类型与当前锚点日期，新页面自行读取已有数据并聚合 */
   function openView(mode) {

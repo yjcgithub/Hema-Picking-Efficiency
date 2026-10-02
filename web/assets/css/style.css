@@ -91,9 +91,11 @@ body {
   color: var(--txt); font-size: 18px; line-height: 1.2; font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
-/* 第二行小字：数据来源 / 有效明细 / 访问方式。
-   不用「｜」分隔符——元素折行时分隔符会孤零零落在行首，改用统一间距分隔 */
-.brand-meta-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 18px; }
+/* 第二行小字：数据来源 / 有效明细 / 访问方式 + 两个胶囊按钮。
+   不用「｜」分隔符——元素折行时分隔符会孤零零落在行首，改用统一间距分隔。
+   用 center 而非 baseline 对齐：角标带 ::before 圆点，其基线取自圆点底边，
+   会与「手动获取」的文字基线错开，两个按钮就会一高一低 */
+.brand-meta-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 18px; }
 .brand-meta-line > span:empty { display: none; }
 .brand-meta b { color: var(--txt); font-weight: 600; }
 .brand-meta a { color: var(--primary); font-weight: 600; }
@@ -233,12 +235,16 @@ body {
 .notice.upload .up-title { font-weight: 600; overflow-wrap: anywhere; }
 .notice.upload .up-pct { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .notice.upload .up-bar {
-  height: 8px; margin: 9px 0 7px; border-radius: 999px;
-  background: rgba(4, 120, 87, .16); overflow: hidden;
+  height: 8px; margin: 9px 0 7px; border-radius: 999px; overflow: hidden;
+  /* 槽底更浅 + 内阴影，营造凹陷感 */
+  background: rgba(4, 120, 87, .08);
+  box-shadow: inset 0 1px 2px rgba(4, 120, 87, .2), inset 0 0 0 1px rgba(4, 120, 87, .05);
 }
 .notice.upload .up-bar > i {
   display: block; height: 100%; border-radius: 999px;
-  background: linear-gradient(90deg, #34d399, #059669);
+  /* 已完成部分：三段绿色渐变 + 外发光 */
+  background: linear-gradient(90deg, #34d399, #10b981 55%, #059669);
+  box-shadow: 0 0 10px rgba(16, 185, 129, .45);
   transition: width .2s ease-out;
 }
 /* 服务端解析计算阶段：无法给出真实百分比，用滚动条纹表示仍在进行 */
@@ -542,8 +548,8 @@ td.eff-lo { color: #b45309; }
 .pivot-block tbody td.stat-cell { position: relative; }
 .pivot-block .stat-badge {
   position: absolute; top: -1px; right: 0; transform: translateY(-50%);
-  padding: 0 3px; border-radius: 3px; background: #fff; z-index: 4;
-  font-size: 9.5px; font-weight: 700; line-height: 1.5; letter-spacing: .2px;
+  padding: 0 2px; border-radius: 2px; background: #fff; z-index: 4;
+  font-size: 8.5px; font-weight: 700; line-height: 1.45; letter-spacing: 0;
   white-space: nowrap;
 }
 .pivot-block .stat-badge.avg { color: #1d4ed8; }
