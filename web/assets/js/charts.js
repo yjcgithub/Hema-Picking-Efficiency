@@ -23,6 +23,8 @@
   function colorOf(name) { return CFG.COLORS[name] || '#64748b'; }
   function fmt(v) { return v == null ? '-' : (Math.round(v * 100) / 100).toFixed(2); }
   function round2(v) { return Math.round(v * 100) / 100; }
+  /* 窄屏（手机）判定：图表边距 / 轴标签宽度据此收紧，避免绘图区被大边距挤没 */
+  function isNarrow() { return (global.innerWidth || 9999) < 640; }
   /* 半小时刻度取值（7 / 7.5 / 8 …）-> 轴与提示文案（7:00 / 7:30 / 8:00） */
   function slotText(v) {
     var h = Math.floor(v), m = Math.round((v - h) * 60);
@@ -706,6 +708,7 @@
         });
       });
 
+      var nar = isNarrow();
       c10.setOption({
         tooltip: {
           formatter: function (p) {
@@ -713,19 +716,21 @@
               '<br/>效率：<b>' + fmt(p.value[2]) + '</b> 行/h';
           }
         },
-        grid: { left: 140, right: 80, top: 10, bottom: 46 },
+        // 窄屏收窄左右边距与分区名标签宽度，避免绘图区被挤没
+        grid: nar ? { left: 92, right: 34, top: 8, bottom: 40 }
+                  : { left: 140, right: 80, top: 10, bottom: 46 },
         xAxis: Object.assign({
           type: 'category', data: zhHours, splitArea: { show: true }
         }, AXIS),
         yAxis: Object.assign({
           type: 'category', data: zhNames,
-          axisLabel: { color: '#475569', fontSize: 11, width: 120, overflow: 'truncate' }
+          axisLabel: { color: '#475569', fontSize: 11, width: nar ? 68 : 120, overflow: 'truncate' }
         }, {}),
         visualMap: {
           min: zhMin, max: zhMax, calculable: true,
-          orient: 'vertical', right: 6, top: 'center',
+          orient: 'vertical', right: 4, top: 'center',
           inRange: { color: ['#fee2e2', '#fef3c7', '#fef9c3', '#d9f99d', '#a7f3d0', '#6ee7b7', '#34d399'] },
-          textStyle: { color: '#64748b', fontSize: 11 }
+          textStyle: { color: '#64748b', fontSize: nar ? 10 : 11 }
         },
         series: [{
           type: 'heatmap', data: heatData,
@@ -741,12 +746,122 @@
     }
   };
 
-  /* 重新测量所有图表尺寸：折叠区块内的图表在隐藏状态下初始化只能拿到 0 尺寸，
-     展开后必须调用一次，否则画布宽高仍为 0、图表不可见 */
-  HEMA.charts.resize = function () {
-    Object.keys(instances).forEach(function (k) {
-      if (instances[k] && !instances[k].isDisposed()) instances[k].resize();
+  /* 透视小计折线图：把时段键换算成数值 x（小时数 / 以「天」计的日期），
+     使点间距与真实时间一致——缺失时段会留出空档，而不是被等距压缩 */
+  function pivotXNum(k, unit) {
+    if (unit === 'hour') return Number(k);
+    var t = Date.parse(String(k) + 'T00:00:00Z');   // 统一按 UTC 天计算，避免时区偏移
+    return isNaN(t) ? Number(k) : Math.round(t / 86400000);
+  }
+  /* 由「天」数值还原为 MM-DD（与 pivotXNum 的 UTC 口径一致） */
+  function pivotMD(dayNum) {
+    var d = new Date(dayNum * 86400000), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+  }
+  /* 数据起伏幅度（用于 y 轴留白）：全平时给一个兜底跨度，避免量程退化为 0 */
+  function pivotSpan(v) {
+    var d = v.max - v.min;
+    return d > 0 ? d : Math.max(1, Math.abs(v.max) * 0.05);
+  }
+  /* 时间轴：数值轴 + 固定步长（1 小时 / 1 天 / 7 天），刻度与真实时间成正比 */
+  function pivotXAxis(unit) {
+    var label = { color: '#94a3b8', fontSize: 10, margin: 6, hideOverlap: true };
+    var axis = {
+      type: 'value', min: 'dataMin', max: 'dataMax',
+      axisLine: { lineStyle: { color: '#e2e8f0' } },
+      axisTick: { show: false }, splitLine: { show: false }
+    };
+    if (unit === 'hour') {
+      axis.interval = 1;
+      axis.axisLabel = Object.assign({}, label, { formatter: function (v) { return v + '点'; } });
+      return axis;
+    }
+    var weekly = unit === 'week';
+    axis.interval = weekly ? 7 : 1;
+    axis.axisLabel = Object.assign({}, label, {
+      formatter: function (v) { return weekly ? (pivotMD(v) + '~' + pivotMD(v + 6)) : pivotMD(v); }
     });
+    return axis;
+  }
+  /* 效率透视表 · 每块「小计」行下方的折线图（各时段小计效率）。
+     由 app.js 在重建透视表 DOM 后调用；容器每次都是新元素，用 echarts.getInstanceByDom
+     反查同一元素上的旧实例并释放，避免重渲染后实例残留在已卸载的节点上 */
+  HEMA.charts.renderPivotSubtotals = function (items) {
+    if (typeof echarts === 'undefined') return;
+    (items || []).forEach(function (it) {
+      var el = it.el;
+      if (!el || !el.clientWidth) return;               // 折叠 / 隐藏中的块尺寸为 0，跳过（展开时会重渲染）
+      var vals = (it.values || []).map(function (v) { return v == null ? null : round2(v); });
+      if (!vals.some(function (v) { return v != null; })) { el.style.display = 'none'; return; }
+      el.style.display = '';
+      var unit = it.unit || 'hour';
+      var keys = it.keys || [];
+      var labels = it.labels || [];
+      // x 用真实时间值 -> 点间距非等距（缺失时段留空档）
+      var data = keys.map(function (k, i) { return [pivotXNum(k, unit), vals[i]]; });
+      var old = echarts.getInstanceByDom(el);
+      if (old) old.dispose();
+      var c = echarts.init(el, null, { renderer: 'canvas' });
+      c.setOption({
+        tooltip: {
+          trigger: 'axis',
+          formatter: function (ps) {
+            var p = ps[0];
+            return (labels[p.dataIndex] || '') + '<br/>小计：<b>' +
+              (p.value[1] == null ? '-' : fmt(p.value[1])) + '</b> 行/h';
+          }
+        },
+        // 只保留时间轴（x 轴）用来看趋势：轴线与刻度尽量弱化，y 轴不画；
+        // 标签由 ECharts 自动抽稀（hideOverlap），避免时段密集时文字重叠
+        grid: { left: 4, right: 4, top: 6, bottom: 18 },
+        xAxis: pivotXAxis(unit),
+        // y 轴量程收紧到数据本身（上下各留 8% 余量）：避免自动取整或达标线把量程撑大，
+        // 折线的起伏占满纵向空间，趋势更明显
+        yAxis: {
+          type: 'value', show: false,
+          min: function (v) { return v.min - pivotSpan(v) * 0.08; },
+          max: function (v) { return v.max + pivotSpan(v) * 0.08; }
+        },
+        series: [{
+          type: 'line', smooth: true, connectNulls: true, showSymbol: false,
+          data: data,
+          lineStyle: { color: it.color, width: 2 },
+          itemStyle: { color: it.color },
+          areaStyle: { color: it.color, opacity: 0.1 },
+          markLine: it.target == null ? undefined : {
+            silent: true, symbol: 'none',
+            lineStyle: { color: '#f59e0b', type: 'dashed', width: 1 },
+            label: { formatter: '达标线 ' + it.target, color: '#b45309', fontSize: 10, position: 'insideEndTop' },
+            data: [{ yAxis: it.target }]
+          }
+        }]
+      }, true);
+    });
+  };
+
+  /* 实时测量所有图表尺寸：折叠区块内的图表在隐藏状态下初始化只能拿到 0 尺寸，
+     展开后必须调用一次，否则画布宽高仍为 0、图表不可见 */
+  function resizePivotCharts() {
+    if (typeof echarts === 'undefined') return;
+    Array.prototype.forEach.call(document.querySelectorAll('.pivot-chart'), function (el) {
+      var p = echarts.getInstanceByDom(el);
+      if (p && !p.isDisposed()) p.resize();
+    });
+  }
+  var lastNarrow = isNarrow();
+  HEMA.charts.resize = function () {
+    // 横竖屏切换跨越窄屏阈值时，图表边距需按新宽度重算——走一次重渲染（缓存数据仍在）
+    var nar = isNarrow();
+    if (nar !== lastNarrow && cache) {
+      lastNarrow = nar;
+      HEMA.charts.render(cache);
+    } else {
+      lastNarrow = nar;
+      Object.keys(instances).forEach(function (k) {
+        if (instances[k] && !instances[k].isDisposed()) instances[k].resize();
+      });
+    }
+    resizePivotCharts();
   };
 
   /* 切换效率口径：true = 按工时加权，false = 人均（由顶栏统一开关调用） */

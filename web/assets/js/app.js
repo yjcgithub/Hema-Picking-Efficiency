@@ -7,11 +7,10 @@
   var viewMode = 'day';   // 视图范围：day = 单日；week = 自然周（周一~周日）；month = 自然月
   var weighted = true;    // 全局效率口径：true = 按工时加权（默认），false = 人均；由顶栏开关统一切换
 
-  /* 「周视图 / 月视图」独立页面：主页面点击按钮另开新标签页进入（?view=week|month&date=YYYY-MM-DD）。
-     视图页面读取库内已有数据、按自然周 / 自然月单独聚合，与主页面（日视图）互不影响；
-     锚点日期由 URL 带入，缺失时用当天 */
-  var viewPage = false;   // 是否为独立的周 / 月视图页面
-  var qDate = null;       // 视图页面锚点日期（URL 带入）
+  /* 「周视图 / 月视图」：点击顶栏按钮在「本页」直接切换视图范围，读取库内已有数据按自然周 / 自然月聚合；
+     也支持用 ?view=week|month&date=YYYY-MM-DD 直接进入（此时 viewPage = true，锚点日期由 URL 带入） */
+  var viewPage = false;   // 由 URL 深链直接进入周 / 月视图（非本页切换）
+  var qDate = null;       // 视图锚点日期（URL 带入）
   try {
     var qs = new URLSearchParams(global.location.search);
     var qView = qs.get('view');
@@ -281,7 +280,7 @@
   }
 
   /* 达标值（行/h）：分块有达标线时按达标线分档，否则按块内相对色阶 */
-  var TARGETS = { '后场合流': 280 };
+  var TARGETS = { '后场合流': 260 };
 
   /* 色阶锚点：与「分区 × 小时效率热力图」visualMap.inRange.color 一致（7 档：红→黄→绿） */
   var HEAT_STOPS = [
@@ -369,19 +368,27 @@
       .concat([{ key: 'total', label: '总计' }]);
     var pSt = sortState('pivot', null, -1);
     var head = theadHtml(cols, pSt);
-    var foot = '<tfoot><tr><td colspan="' + cols.length + '" class="table-note">' +
+    /* 口径说明：原先作为表格末尾的一行（td.table-note），现移到该块折线图下方，故单独成串 */
+    var noteText =
       '小计＝该范围内 Σ拣货行数 ÷ Σ拣货时长（按工时加权）；取消勾选顶栏「按工时加权」后，' +
       '小计改为该范围内各人效率的算术平均（人均口径，随开关同步）；' +
       '「平均值 / 中位数」按各人总计效率统计，浅蓝 / 浅紫边框标出与之最接近的人员行；「-」表示该' +
-      (unit === 'hour' ? '时段' : (unit === 'week' ? '周' : '日')) + '无记录。' +
-      '</td></tr></tfoot>';
+      (unit === 'hour' ? '时段' : (unit === 'week' ? '周' : '日')) + '无记录。';
     // 点击表头可排序：按人或按某个小时（或总计）的效率升降序
     var getters = { person: function (r) { return r.person; }, total: function (r) { return r.total; } };
     hours.forEach(function (h, i) { getters['h' + h] = function (r) { return r.data[i]; }; });
 
     var blocks = orderBlocks((pb.groups && pb.groups.length) ? pb.groups : fallbackGroups(pb));
 
-    host.innerHTML = blocks.map(function (g) {
+    var subCharts = [];   // 每块「小计」折线图的数据（HTML 建好后统一渲染到对应容器）
+    // 重建 DOM 前先释放上一轮的折线图实例，否则它们会残留在被移除的节点上造成泄漏
+    if (typeof echarts !== 'undefined') {
+      Array.prototype.forEach.call(host.querySelectorAll('.pivot-chart'), function (el) {
+        var p = echarts.getInstanceByDom(el);
+        if (p) p.dispose();
+      });
+    }
+    host.innerHTML = blocks.map(function (g, bi) {
       var color = colors[g.type] || '#64748b';
       var isCol = collapsed.indexOf(g.type) >= 0;
       var gs = g.stat || {};
@@ -413,17 +420,35 @@
       body += '<tr class="total"><td>小计</td>' + cellArr(hourly) + cell(bTotal) + '</tr>';
 
       var target = TARGETS[g.type];
+      var chartId = 'pvSub' + bi;
+      subCharts.push({
+        id: chartId,
+        color: color,
+        target: target == null ? null : target,
+        unit: unit,
+        keys: hours.slice(),   // 原始时间值（小时数 / 日期 / 周起始日）：折线按真实时间定位，非等距
+        labels: hours.map(function (h) { return axisColLabel(h, unit); }),
+        values: hourly
+      });
+      /* 折线图行：紧贴「小计」行（tfoot 首行）。左右各留一个空单元格，
+         使绘图区只覆盖时段列（不含首列「拣货人」与末列「总计」） */
+      var subRow = '<tfoot><tr class="pivot-chart-row">' +
+        '<td class="pivot-chart-pad"></td>' +
+        '<td colspan="' + hours.length + '" class="pivot-chart-cell">' +
+        '<div class="pivot-chart" id="' + chartId + '"></div></td>' +
+        '<td class="pivot-chart-pad"></td></tr></tfoot>';
       return '<div class="pivot-block' + (isCol ? ' collapsed' : '') + '">' +
         '<div class="pivot-title" data-toggle="' + esc(g.type) + '" title="点击折叠 / 展开">' +
         '<span class="caret">' + (isCol ? '▶' : '▼') + '</span>' +
         '<span class="dot" style="background:' + color + '"></span>' + esc(g.type) +
         '<small>整体 ' + fmt(bTotal, 1) + ' 行/h · ' + g.rows.toLocaleString() + ' 行 · ' +
         fmt(g.hours, 2) + ' h · ' + g.persons.length + ' 人' +
-        (target ? ' · 达标线 ' + target + ' 行/h' : '') +
-        (avg == null ? '' : ' · <span class="dot avg"></span>平均 ' + fmt(avg, 1) + ' 行/h') +
-        (med == null ? '' : ' · <span class="dot median"></span>中位数 ' + fmt(med, 1) + ' 行/h') +
-        '</small></div>' +
-        '<div class="table-wrap"><table>' + head + '<tbody>' + body + '</tbody>' + foot + '</table></div>' +
+        (target ? ' · 达标线 ' + target + ' 行/h' : '') + '</small>' +
+        (avg == null ? '' : '<span class="pv-legend"><span class="dot avg"></span>平均 ' + fmt(avg, 1) + ' 行/h</span>') +
+        (med == null ? '' : '<span class="pv-legend"><span class="dot median"></span>中位数 ' + fmt(med, 1) + ' 行/h</span>') +
+        '</div>' +
+        '<div class="table-wrap"><table>' + head + '<tbody>' + body + '</tbody>' + subRow + '</table></div>' +
+        '<div class="note">' + noteText + '</div>' +
         '</div>';
     }).join('');
 
@@ -440,6 +465,13 @@
       t.style.width = prevW;
     });
     if (minW > 0) host.style.setProperty('--pivot-min', (minW + 2) + 'px');   // +2：表格容器左右各 1px 边框
+
+    /* 每块「小计」行下方的折线图：数据为该块各时段的小计效率（口径随顶栏开关）。
+       折叠中的块尺寸为 0，跳过绘制，展开时会重渲染本函数再画 */
+    if (HEMA.charts && HEMA.charts.renderPivotSubtotals) {
+      subCharts.forEach(function (s) { s.el = document.getElementById(s.id); });
+      HEMA.charts.renderPivotSubtotals(subCharts);
+    }
   }
 
   /* ---------- 细分明细（表头可点击升/降序） ---------- */
@@ -2713,9 +2745,8 @@
     refetch(current.id).catch(function (e) { notice('切换日期失败：' + esc(e.message || e), 'err'); });
   });
 
-  /* 顶栏「周视图 / 月视图」：主页面点击时另开一个独立页面（新标签页），读库内已有数据
-     按自然周（周一 ~ 周日）/ 自然月聚合；主页面保持日视图不受影响。
-     在视图页面内点击则在「本页」切换视图范围，再次点击同一个按钮回到日视图 */
+  /* 顶栏「周视图 / 月视图」：点击在「本页」切换视图范围，读库内已有数据按自然周（周一 ~ 周日）/
+     自然月聚合；再次点击同一个按钮回到日视图 */
   var viewWeekBtn = document.getElementById('viewWeek');
   var viewMonthBtn = document.getElementById('viewMonth');
   function viewPaint() {
@@ -2779,37 +2810,27 @@
     var next = viewMode === mode ? 'day' : mode;      // 再点一次 → 回到日视图
     if (next === viewMode) return;
     viewMode = next;
+    if (next !== 'day') gateDismissed = true;         // 聚合视图与「今日」无关：不弹「今日暂无数据」遮罩
     viewPaint();
     rangePaint();
     notice(next === 'day' ? '已切回日视图'
       : (next === 'week' ? '周视图：按自然周（周一 ~ 周日）聚合' : '月视图：按自然月聚合'), 'ok');
-    if (!current) return;
-    /* 聚合视图的锚点只是一个「区间位置」，不一定是数据日期（周 / 月步进后会停在区间中间的某天）。
-       切换后目标区间可能没有数据 —— 日视图 /api/day 或聚合 /api/range 都会 404（如 9-02 所在周 8-31~9-06）。
-       此时回退到上一区间内最后一个有数据的日期作锚点再试一次，保证切换总能落到有数据的区间 */
-    refetch(current.id).catch(function (e) {
+    /* 聚合视图不依赖单个数据集：即使日视图这边没有数据（current 为空）也照常按区间取数。
+       回退：聚合视图的锚点只是「区间位置」，不一定是数据日期，目标区间可能 404
+       （如锚点 9-02 所在周 8-31~9-06 无数据）；此时改用上一区间内最后一个有数据的日期再试一次 */
+    refetch(current ? current.id : null).catch(function (e) {
       if (e.status !== 404) throw e;                  // 非「无数据」错误（如网络）直接抛出
-      var rg = current.meta && current.meta.range;
+      var rg = current && current.meta && current.meta.range;
       var ds = (rg && rg.dates) || [];
       if (!ds.length) throw e;
       curDate = ds[ds.length - 1];
       return refetch(null);
     }).catch(function (e) { notice('切换视图失败：' + esc(e.message || e), 'err'); });
   }
-  /* 另开独立视图页面：URL 带上视图类型与当前锚点日期，新页面自行读取已有数据并聚合 */
-  function openView(mode) {
-    var u = new URL(global.location.href);
-    u.search = '?view=' + mode + (curDate ? '&date=' + encodeURIComponent(curDate) : '');
-    u.hash = '';
-    var w = global.open(u.toString(), '_blank');
-    if (!w) notice('浏览器拦截了新窗口，请允许本站弹出窗口后重试', 'err');
-  }
-  function onViewClick(mode) {
-    if (viewPage) setView(mode);   // 视图页面内：本页切换
-    else openView(mode);           // 主页面：另开新页面
-  }
-  if (viewWeekBtn) viewWeekBtn.addEventListener('click', function () { onViewClick('week'); });
-  if (viewMonthBtn) viewMonthBtn.addEventListener('click', function () { onViewClick('month'); });
+  /* 点击「周视图 / 月视图」：在「本页」直接切换视图范围（不再另开标签页），
+     再次点击同一个按钮回到日视图；URL 仍支持 ?view=week|month&date=… 直接进入聚合视图 */
+  if (viewWeekBtn) viewWeekBtn.addEventListener('click', function () { setView('week'); });
+  if (viewMonthBtn) viewMonthBtn.addEventListener('click', function () { setView('month'); });
   viewPaint();
   rangePaint();
   if (viewPage) {

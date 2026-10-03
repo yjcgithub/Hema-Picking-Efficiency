@@ -87,7 +87,7 @@ module.exports = {
   UMS_LAST_TRY_KEY: 'umsLastTryAt',
 
   // 每页条数（num）设置
-  UMS_NUM_KEY: 'umsNum',
+  UMS_NUM_KEY: 'umsNumber',
 
   // 取数条件（页面「开始日期 / 结束日期」）：手动与自动获取共用同一区间
   UMS_RANGE_KEY: 'umsRange',

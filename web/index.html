@@ -27,8 +27,8 @@
       <span class="range-label" id="rangeLabel"></span>
       <button type="button" class="btn nav-btn" id="rangeNext" title="下一个周 / 月">▶</button>
     </div>
-    <button type="button" class="btn view-btn" id="viewWeek" title="新页面打开周视图：读取已有数据，按自然周（周一 ~ 周日）聚合当前所选日期所在周；主页面保持日视图不变。已在视图页面内时点击可切换 / 回到日视图">周视图</button>
-    <button type="button" class="btn view-btn" id="viewMonth" title="新页面打开月视图：读取已有数据，按自然月聚合当前所选日期所在月；主页面保持日视图不变。已在视图页面内时点击可切换 / 回到日视图">月视图</button>
+    <button type="button" class="btn view-btn" id="viewWeek" title="切换到周视图：读取已有数据，按自然周（周一 ~ 周日）聚合当前所选日期所在周；再次点击回到日视图">周视图</button>
+    <button type="button" class="btn view-btn" id="viewMonth" title="切换到月视图：读取已有数据，按自然月聚合当前所选日期所在月；再次点击回到日视图">月视图</button>
     <label class="btn switch" title="勾选 = 按工时加权（Σ拣货行数 ÷ Σ拣货时长）；不勾选 = 人均（各人效率的算术平均）。切换后所有汇总口径同步（卡片 / 图表 / 各表合计行）">
       <input type="checkbox" id="weightedToggle" checked>按工时加权
     </label>
@@ -49,8 +49,11 @@
     <button class="btn" id="logsBtn" title="查看服务端日志（取数 / 自动获取 / 入库 / 设置等关键动作，最多保留最近 500 条）">日志</button>
   </div>
   </div>
-  <!-- 顶栏信息条：独立整行，含「统计时间段 + 数据来源 / 有效明细 / 访问方式」
-       与标题行分离，避免与右侧控件互相挤压（与 app.js 通过 id 关联） -->
+</header>
+
+<!-- 信息条：页面唯一的吸顶元素（统计时间段 / 数据来源 / 访问方式 + 实时获取角标 / 手动获取）。
+     标题行不吸顶、随页面滚走，向下滚动时只剩这一条常显（与 app.js 通过 id 关联） -->
+<div class="meta-bar">
   <div class="brand-meta">
     <div class="period-bar hidden" id="periodBar">
       <span class="period-label">统计时间段</span><span class="period-range" id="periodRange"></span>
@@ -63,7 +66,7 @@
     </div>
   </div>
   <div class="ip-warn hidden" id="ipWarn"></div>
-</header>
+</div>
 
 <div id="notice" class="notice hidden"></div>
 

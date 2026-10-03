@@ -34,27 +34,28 @@ body {
 ::selection { background: rgba(37, 99, 235, .18); color: inherit; }
 
 /* ---------- 顶栏 ---------- */
+/* 标题行（品牌 + 操作按钮）：不吸顶，随页面滚动自然移出，不改变文档流高度 */
 .topbar {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  padding: 6px 20px 8px;
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 6px; padding: 6px 20px 0;
   background: #fff;
-  border-bottom: none;
-  position: sticky;
-  top: 0;
-  z-index: 20;
 }
-/* 顶栏底部渐变分割线：蓝→青循环流动 */
-.topbar::after {
+/* 信息条：页面唯一的吸顶元素（统计时间段 / 数据来源 / 访问方式 + 实时获取角标 / 手动获取）。
+   标题行滚走后它留在顶部常显，滚动时不发生布局变化，因此不会闪烁 */
+.meta-bar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 20px 8px; background: #fff;
+}
+/* 信息条底部渐变分割线：蓝→青循环流动 */
+.meta-bar::after {
   content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
   background: linear-gradient(90deg, #2563eb, #14b8a6, #2563eb);
   background-size: 200% 100%;
   animation: topbar-line 3s linear infinite;
 }
 @keyframes topbar-line { from { background-position: 0% 0; } to { background-position: 200% 0; } }
-/* IP 访问限制提示条：位于顶栏主行下方（顶栏为纵向 flex），随顶栏一起吸顶常显 */
+/* IP 访问限制提示条：位于信息条内，随信息条一起吸顶常显 */
 .ip-warn {
   padding: 7px 14px; border-radius: 9px;
   background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
@@ -338,7 +339,8 @@ main { padding: 14px 20px 6px; }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .kpis { grid-template-columns: minmax(0, 1fr); }
+  /* 窄屏改 2 列：1 列会把 4 张卡拉得很长、滚动距离过大；2 列在 320px 宽下数值仍不溢出 */
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .grid {
@@ -500,10 +502,28 @@ td.eff-lo { color: #b45309; }
 .pivot-title:hover { color: var(--primary); }
 .pivot-title .caret { font-size: 10px; color: var(--muted); width: 10px; }
 .pivot-title small { font-weight: 400; color: var(--muted); font-size: 11.5px; margin-left: 2px; }
+/* 「平均 / 中位数」图例：用 inline-flex 让色点与中文垂直居中
+   （inline 的 vertical-align: middle 按西文 x-height 对齐，中文里会偏低） */
+.pivot-title .pv-legend {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-weight: 400; color: var(--muted); font-size: 11.5px;
+}
+.pivot-title .pv-legend .dot { flex: 0 0 auto; }
 .pivot-block.collapsed .table-wrap { display: none; }
 /* 折叠时区块内的图表与子标题一并隐藏（「按人员统计」内的两张堆积图） */
 .pivot-block.collapsed .chart, .pivot-block.collapsed .chart-sub { display: none; }
 .pivot-block .chart { margin-bottom: 10px; }
+/* 每块「小计」行下方紧贴的折线图（容器由 app.js 生成，ECharts 在此初始化） */
+.pivot-chart { height: 70px; }
+/* 折叠时折线图一并隐藏（展开会重渲染透视分块，图表随之重画） */
+.pivot-block.collapsed .pivot-chart { display: none; }
+/* 口径说明已从表格内移到折线图下方，折叠时同样收起 */
+.pivot-block.collapsed .note { display: none; }
+/* 折线图行：紧贴「小计」行；左右各一个空单元格，使绘图区只覆盖时段列（不含拣货人 / 总计列）；
+   单元格不留左右内边距，图表用满列宽 */
+.pivot-chart-row td { border-top: 1px solid var(--line-mid); }
+.pivot-block td.pivot-chart-cell { padding: 4px 0; }
+.pivot-block td.pivot-chart-pad { padding: 0; }
 /* 透视列数随小时数变化，列多时在容器内横向滚动，避免撑出屏幕 */
 .pivot-block .table-wrap { overflow-x: auto; }
 /* 工作时间图明细列多，同样在容器内横向滚动 */
@@ -557,12 +577,6 @@ td.eff-lo { color: #b45309; }
 /* 标题图例色点与边框同色 */
 .dot.avg { background: #93c5fd; }
 .dot.median { background: #d8b4fe; }
-/* 每个分块表格底部的口径说明行 */
-.pivot-block td.table-note {
-  text-align: left; white-space: normal; color: var(--muted);
-  font-size: 11.5px; line-height: 1.7; background: #fff;
-  border-top: 1px solid var(--line); padding-top: 8px; padding-bottom: 8px;
-}
 
 /* ---------- 分布 / 集中度分析卡片 ---------- */
 /* 段落小标题（分档表 / 稳定性榜 / TOP 10） */
@@ -1056,7 +1070,7 @@ body.intro-flash::after {
   .ok-burst, body.intro-flash::after { display: none; }
   /* 炫酷动画降级 */
   .logo { animation: none; }
-  .topbar::after { animation: none; }
+  .meta-bar::after { animation: none; }
   .brand-meta::after { display: none; }
   .kpi:hover, .card:hover, .stat-chip:hover { transform: none; box-shadow: var(--shadow); border-color: var(--line); }
   .btn:hover, .mini:hover { transform: none; box-shadow: none; }
@@ -1081,7 +1095,7 @@ body.intro-flash::after {
   .topbar h1 { font-size: 17px; }
   .brand-meta .period-range { font-size: 15px; }
   .brand { gap: 10px; }
-  main, .topbar, footer { padding-left: 14px; padding-right: 14px; }
+  main, .topbar, .meta-bar, footer { padding-left: 14px; padding-right: 14px; }
   .notice {
     left: 12px; right: 12px; top: 12px; max-width: none;
     transform: none; animation: notice-fade .18s ease-out;
@@ -1097,13 +1111,17 @@ body.intro-flash::after {
 @media (max-width: 900px) {
   .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .table-wrap > table { width: max-content; min-width: 100%; }
+  /* 透视表底部的口径说明是跨列长文本（table-note）：max-content 会把它当成不折行的一整行，
+     把每一列都撑得极宽。改用 min-content，列宽回到数据列自身的紧凑宽度，脚注在表内折行 */
+  .pivot-block .table-wrap > table { width: min-content; min-width: 100%; }
 }
 
-/* 手机（≤640px）：取消顶栏吸顶、压缩留白、弹窗全屏、表单纵向铺满 */
+/* 手机（≤640px）：压缩留白、弹窗全屏、表单纵向铺满 */
 @media (max-width: 640px) {
-  /* 顶栏在手机上会折成多行，吸顶会长期占掉近三成屏幕；改为随内容滚动。
-     保留 relative 以承载底部的渐变分割线（::after 需要定位祖先） */
-  .topbar { position: relative; gap: 6px; padding: 8px 12px 10px; }
+  /* 与桌面一致：标题行随页面滚走，信息条吸顶常显（向下滚动后只保留信息条）。
+     吸顶沿用基类的 position: sticky，这里只调内边距 */
+  .topbar { padding: 8px 12px 0; }
+  .meta-bar { gap: 6px; padding: 6px 12px 8px; }
   main { padding: 12px 12px 6px; }
   footer { padding: 4px 12px 16px; }
   .brand-meta { padding: 6px 10px; gap: 2px 14px; }
@@ -1122,8 +1140,15 @@ body.intro-flash::after {
   .chart { height: 210px; }
   .chart.tall { height: 260px; }
   .chart.xtall { height: 420px; }
+  .pivot-chart { height: 60px; }
   .stat-strip { grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); gap: 8px; }
   .bar-item { grid-template-columns: 72px minmax(0, 1fr) 92px; font-size: 12px; }
+
+  /* KPI 第二行：一行 4 张在手机上会把数值挤到溢出，改为两列自动换行（不足两张时独占整行） */
+  .kpis.sub { flex-wrap: wrap; }
+  .kpis.sub .kpi { flex: 1 1 calc(50% - 6px); }
+  /* 透视表首列（拣货人）在窄屏收窄，给数据列留出更多可视宽度（表格仍可横向滑动） */
+  .pivot-block th:nth-child(1), .pivot-block tbody td:nth-child(1) { width: 68px; max-width: 68px; }
 
   /* 弹窗铺满全屏（:has 已在本文件使用；只匹配含 .modal 的遮罩，不影响门禁遮罩） */
   .mask:has(.modal) { padding: 0; align-items: stretch; }
