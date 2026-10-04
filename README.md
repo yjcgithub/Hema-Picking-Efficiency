@@ -65,6 +65,7 @@ npm test
 |------|------|
 | 拣货单上传 | 上传 xlsx，以文件内「拣货开始时间」的**日期集合**为时间维度：命中同维度历史记录则整条覆盖，否则新增一条 |
 | 实时获取（服务端） | 后端带 Cookie 逐页请求拣货单接口，按**取数条件**的日期区间入库；支持「增量」（从最新页往回取，遇到整页单号都已入库即停） |
+| 备用 Cookie | 弹窗可再保存第二份（备用）Cookie；主 Cookie **鉴权失败（登录态过期）或遇到风控（限流）时自动改用备用 Cookie 重试**（超时 / 网络错误等其它错误不换），手动与自动获取都生效 |
 | 实时获取（油猴脚本） | UMS 登录态是 HttpOnly Cookie，脚本读不到；改为在 ums 页面内用登录态**同源**取数后回传后端 —— 后端无需 Cookie，也能自动同步 |
 | 自动获取 | 服务端定时任务按设置的间隔，自动增量获取**页面「取数条件」的日期区间**（默认当天），可设每日执行时段（如 07:00 ~ 22:30），时段外自动暂停；**时段开始 / 结束时刻各额外强制获取一次** |
 | 手动获取 | 顶栏「手动获取」按钮，一键按**页面「取数条件」的日期区间**增量获取，不用打开弹窗；与自动获取共用 **60 秒冷却**窗口 |
@@ -99,7 +100,7 @@ npm test
 | 表格排序 | 所有表格表头均可点击切换升 / 降序（空值恒排在末尾） |
 | 卡片折叠 | 超时数统计、透视分块可折叠 / 展开 |
 | 内容导出 | 每张卡片支持「导出为图片 / 复制为图片」（html2canvas），透视卡片可按分类选择导出范围；**截图时会临时关闭克隆体的入场动画**，避免图片内容缺失 |
-| 手机适配 | 纯 CSS 响应式（1100 / 900 / 720 / 640px 断点）：窄屏下宽表格改为横向滑动、弹窗铺满全屏、表单字段纵向铺满、图表降高、KPI 改两列、热力图收紧边距；顶栏与桌面一致（标题行随滚动移出、信息条吸顶常显）；输入框字号 16px 以避免 iOS 聚焦缩放 |
+| 手机适配 | 纯 CSS 响应式（1100 / 900 / 720 / 640px 断点）：窄屏下宽表格改为横向滑动、弹窗铺满全屏、表单字段纵向铺满、图表降高、KPI 改两列、热力图收紧边距；顶栏与桌面一致（标题行随滚动移出、信息条吸顶常显）；**手机端信息条压成两行**（数据来源过长时省略、隐藏「访问方式」）；**手机用 IP 访问时自动跳转到域名**（IP 为 http 非安全上下文，移动端能力受限）；输入框字号 16px 以避免 iOS 聚焦缩放 |
 | 分区设置 | 维护「拣货分区 → 前后场分区（作业类型）」映射，支持「忽略（排除统计）」，保存后自动重算全部历史数据集 |
 | 数据管理 | 顶栏「数据管理」弹窗：切换查看、删除单条、批量删除、清空 |
 
@@ -169,6 +170,7 @@ Hema-Picking-Efficiency/
 | `HEMA_DB_PATH` | `server/data/hema.db` | SQLite 库文件路径（测试用独立库） |
 | `HEMA_STATIC` | `auto` | 静态资源托管方式，见下表 |
 | `STATIC_DIR` / `HEMA_WEB_DIR` | 空 | 指定前端目录绝对路径（优先级最高，用于前后端分离部署） |
+| `HEMA_UMS_URL` | 盒马 UMS 接口地址 | 覆盖实时取数接口地址（本地模拟 / 联调时指向假接口） |
 
 `HEMA_STATIC` 取值：
 
@@ -183,7 +185,7 @@ Hema-Picking-Efficiency/
 
 ### 前端后端地址
 
-`web/assets/js/config.js` 的 `API_BASE` 按访问来源自动选择后端地址：本地调试走本机 `http://localhost:3001/hpe/api`，域名访问走 `https://api.yjmc.xyz/hpe/api`，IP 访问走 `http://8.137.63.172:3001/hpe/api`。部署到其他环境时需改这里，油猴脚本的后端地址则在面板里填写。
+`web/assets/js/config.js` 的 `API_BASE` 按访问来源自动选择后端地址：本地调试走本机 `http://localhost:3001/hpe/api`，域名访问走 `https://api.yjmc.xyz/hpe/api`，IP 访问走 `http://8.137.63.172:3001/hpe/api`。部署到其他环境时需改这里，油猴脚本的后端地址则在面板里填写。前端还会识别访问来源（本地 / IP / 域名）：**手机用 IP 访问时自动跳转到 `https://xl.yjmc.xyz/`**（IP 为 http 非安全上下文，移动端剪贴板等能力受限）；桌面用 IP 访问时保留红色提示条引导改用域名。
 
 ### 口径与接口常量
 
@@ -228,10 +230,10 @@ Hema-Picking-Efficiency/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/ums/config` | 配置与状态：`cookieSet`（只回布尔）、`build`、`num`、`numChoices`、`range`、`auto`、`agent`、`lastFetch`、`progress`、`cooldown` |
-| GET | `/api/ums/cookie` | 读取已保存的 Cookie 原文（仅点击「Cookie 设置」时按需调用，不放进轮询接口） |
-| POST | `/api/ums/config` | 保存设置：`{ cookie? }`（传空字符串清除）、`{ num? }`（每页条数）、`{ range? }`（取数条件 `{ startDate, endDate }`）、`{ auto? }`（开关 / 间隔 / 执行时段） |
-| POST | `/api/ums/fetch` | 服务端带 Cookie 按日期区间取数入库：`{ startDate, endDate, incremental, cookie? }`。冷却中返回 429、已有任务返回 409 |
+| GET | `/api/ums/config` | 配置与状态：`cookieSet` / `cookieBackupSet`（只回布尔）、`build`、`num`、`numChoices`、`range`、`auto`、`agent`、`lastFetch`、`progress`、`cooldown` |
+| GET | `/api/ums/cookie` | 读取已保存的 Cookie 原文 `{ cookie, backup }`（仅点击「Cookie 设置」时按需调用，不放进轮询接口） |
+| POST | `/api/ums/config` | 保存设置：`{ cookie?, force? }` / `{ cookieBackup? }`（传空字符串清除）、`{ num? }`（每页条数）、`{ range? }`（取数条件 `{ startDate, endDate }`）、`{ auto? }`（开关 / 间隔 / 执行时段）。`force: true` = 页面显式写入主 Cookie；不带 `force` 视为脚本推送（见「备用 Cookie」） |
+| POST | `/api/ums/fetch` | 服务端带 Cookie 按日期区间取数入库：`{ startDate, endDate, incremental, cookie?, cookieBackup? }`（主 Cookie 鉴权失败或遇风控时自动回退备用）。冷却中返回 429、已有任务返回 409 |
 | POST | `/api/ums/agent/data` | 油猴脚本回传逐页结果入库：`{ startDate, endDate, pages[], complete?, reached? }` |
 | POST | `/api/ums/known` | 判定这批拣货单号已入库多少条：`{ codes[] }` → `{ known, total }`（脚本增量追平判据） |
 
@@ -280,10 +282,28 @@ Hema-Picking-Efficiency/
 
 | 路径 | 依赖 | 适用 |
 |------|------|------|
-| 服务端带 Cookie | 先在弹窗里粘贴保存一次 Cookie（登录态过期后需重粘） | 浏览器不用开着，可在服务器常驻自动获取 |
+| 服务端带 Cookie | 先在弹窗里粘贴保存一次 Cookie（登录态过期后需重粘）；可再存一份**备用 Cookie** 兜底 | 浏览器不用开着，可在服务器常驻自动获取 |
 | 油猴脚本同源取数（推荐） | 保持 ums 页面标签开着 | 无需配置 Cookie；脚本会把读到的 Cookie 一并保存到服务端 |
 
 接口分页语义：`index` 是**页码**（0 起，0 = 倒序第一页 = 最新），`num` 是每页条数（页面可选 50 / 100 / 200），总页数 `ceil(totalNum / num)`，逐页 `index++`。
+
+### 备用 Cookie（鉴权失败 / 风控自动回退）
+
+弹窗「接口 Cookie」区可再保存一份**备用 Cookie**（`settings.umsCookieBackup`，与主 Cookie 分开存储）。服务端取数时按「主 → 备用」的顺序尝试当前可用的 Cookie：
+
+- **鉴权类错误**（HTTP 401 / 403、返回登录页、响应非 JSON 疑似登录态失效）会改用下一份 Cookie 重试；
+- **风控类错误**（返回「人太多，被挤爆了」、HTTP 429 限流）也会改用下一份 Cookie 重试；
+- 超时、网络错误、其它 HTTP 错误**不换** Cookie（换一份也解决不了，反而多打接口）；
+- 主 / 备用都没有时直接报「未配置接口 Cookie」；
+- 命中备用时页面提示「主 Cookie 未成功，本次改用备用 Cookie 获取」；服务端日志记「…Cookie 鉴权失败 / 被风控，改用下一份 Cookie 重试」「备用 Cookie 取数成功（已回退）」；
+- 手动获取与自动获取共用同一套回退逻辑；60 秒取数冷却照常作用于整次尝试（回退不会绕过冷却）。
+
+**脚本推送 Cookie 的落位规则**（油猴脚本每次同步成功后会把读到的 Cookie `POST /api/ums/config { cookie }`）：
+
+- 与已存的主 **或** 备用 Cookie **相同** → **跳过**（不重复写库、不刷日志）；
+- 与主 Cookie **不同** → 写入**备用 Cookie** 槽，**不覆盖主 Cookie**（主失效时自动回退到它）；
+- 主 Cookie **尚未设置**时 → 这份作为**主** Cookie 保存；
+- 页面弹窗里的「保存到服务端 / 清除」带 `force: true`，始终显式写入主 Cookie（不受上述规则影响）。
 
 入库口径与上传完全一致：
 
@@ -320,10 +340,10 @@ Hema-Picking-Efficiency/
 
 1. Tampermonkey 中新建脚本，粘贴 `userscript/` 下**任选其一**：
    - `hema-pick-sync.user.js` —— 只有同步面板
-   - `选中文本生成条码For Hema(拖拽跟随) CODE-128.js` —— 条码脚本 + 内置同步面板（V4.6，UI 在「条码设置」里）
+   - `选中文本生成条码For Hema(拖拽跟随) CODE-128.js` —— 条码脚本 + 内置同步面板（V4.7，UI 在「条码设置」里）
 2. 打开盒马工作台 / UMS 页面，面板会自动出现
 3. 「后端地址」填本服务地址（如 `http://localhost:3001/hpe`，无子路径则 `http://localhost:3001`），点「立即同步」验证连通
-4. 脚本会先 `fetch`（自动带 Cookie），被 CORS 拦则降级 `GM_xmlhttpRequest`；取数结果回传 `/api/ums/agent/data`，读到的 Cookie 同步保存到服务端（`POST /api/ums/config`）
+4. 脚本会先 `fetch`（自动带 Cookie），被 CORS 拦则降级 `GM_xmlhttpRequest`；取数结果回传 `/api/ums/agent/data`，读到的 Cookie 同步推送到服务端（`POST /api/ums/config`，落位规则见[备用 Cookie](#备用-cookie鉴权失败--风控自动回退)）
 5. **「自动同步」默认关闭**：需要定时同步时在面板里勾选它并设置间隔，之后保持该标签页开着即可；登录态过期时重新登录一次
 
 > 两个脚本顶部都有一段统一配置区 `US_CFG`，集中了接口路径、超时、重试、间隔、面板尺寸、DOM 选择器与存储键名，改配置只需改这一处。
