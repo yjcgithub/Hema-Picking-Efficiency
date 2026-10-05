@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         选中文本生成条码For Hema(拖拽跟随) CODE-128
 // @namespace    http://tampermonkey.net/
-// @version      V4.6
+// @version      V4.7
 // @description  选中文字后拖动显示悬浮窗并跟随，拖拽到悬浮窗生成CODE-128条形码并跟随鼠标；同时内置「拣货效率同步」面板：在 UMS 页面取数回传到拣货效率统计后端
 // @author       YJC / hema-picking-efficiency
 // @match        https://portalpro.hemaos.com/*
@@ -1239,8 +1239,9 @@ var US_CFG = {
     });
   }
 
-  /* 把捕获到的 Cookie 存到后端（POST /api/ums/config {cookie}）：
-     存好后后端就能自己带 Cookie 取数，不再依赖脚本同步。
+  /* 把捕获到的 Cookie 推送到后端（POST /api/ums/config {cookie}）：
+     后端规则：与已存的主 / 备用 Cookie 相同 → 跳过；与主不同 → 写入「备用 Cookie」槽
+     （不覆盖主 Cookie，主失效时自动回退到它）；主 Cookie 为空时这份作为主 Cookie。
      auto=true 时不弹「没读到」的错误（同步成功后的自动推送用） */
   function saveCookie(auto) {
     function doSave(str) {
@@ -1249,13 +1250,13 @@ var US_CFG = {
         return;
       }
       http('POST', api('/api/ums/config'), { cookie: str }).then(function (j) {
-        var ok = !!(j && j.cookieSet);
-        dbg('Cookie 已保存到服务端（' + str.length + ' 字符' + (ok ? '，服务端已确认' : '') + '）', 'ok');
-        tip('Cookie 已保存到服务端' + (ok ? '' : '（服务端未确认）'), ok ? 'ok' : 'err');
+        var ok = !!(j && (j.cookieSet || j.cookieBackupSet));
+        dbg('Cookie 已推送到服务端（' + str.length + ' 字符' + (ok ? '，服务端已确认' : '') + '）', 'ok');
+        tip('Cookie 已推送到服务端' + (ok ? '' : '（服务端未确认）'), ok ? 'ok' : 'err');
       }, function (e) {
         var msg = (e && e.message) || e;
-        dbg('Cookie 保存到服务端失败：' + msg, 'err');
-        tip('Cookie 保存失败：' + msg, 'err');
+        dbg('Cookie 推送到服务端失败：' + msg, 'err');
+        tip('Cookie 推送失败：' + msg, 'err');
       });
     }
     var cur = (elCkVal.value || '').trim();

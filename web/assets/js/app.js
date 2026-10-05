@@ -66,6 +66,14 @@
     return '<a href="' + ACCESS.domain + '" target="_blank" rel="noopener">域名访问 ' + ACCESS.domain + '</a>';
   }
 
+  /* 手机 + IP 访问：自动跳到域名。IP 是 http 非安全上下文，移动端剪贴板等能力受限；
+     只在 IP 访问时跳转，已用域名访问时不再跳（避免死循环）。保留 query / hash（如 ?view=week） */
+  var MOBILE_UA = /Android|iPhone|iPad|iPod|Mobile|Windows Phone|BlackBerry|HarmonyOS|MicroMessenger/i;
+  if (ACCESS.kind === 'IP' && MOBILE_UA.test((global.navigator && global.navigator.userAgent) || '')) {
+    global.location.replace(ACCESS.domain + (global.location.search || '') + (global.location.hash || ''));
+    return;   // 已发起跳转，不再继续初始化本页
+  }
+
   /* 顶栏品牌区右侧（h1 右边）：常显当前访问方式；IP 访问的剪贴板限制说明与域名入口
      由顶栏主行下方的红色提示条（#ipWarn）常显给出 */
   function renderAccess() {
@@ -1398,6 +1406,10 @@
   var umsCookieInput = document.getElementById('umsCookie');
   var umsCookieState = document.getElementById('umsCookieState');
   var umsCookieToggle = document.getElementById('umsCookieToggle');
+  var umsCookieBackupWrap = document.getElementById('umsCookieBackupWrap');
+  var umsCookieBackupInput = document.getElementById('umsCookieBackup');
+  var umsCookieBackupState = document.getElementById('umsCookieBackupState');
+  var umsCookieBackupToggle = document.getElementById('umsCookieBackupToggle');
   var umsChip = document.getElementById('umsChip');
   var umsManualBtn = document.getElementById('umsManual');
   var umsIncChk = document.getElementById('umsIncremental');
@@ -1407,11 +1419,13 @@
   var umsAutoStateEl = document.getElementById('umsAutoState');
   var umsAutoStart = document.getElementById('umsAutoStart');
   var umsAutoEnd = document.getElementById('umsAutoEnd');
-  var umsCfg = { cookieSet: false, num: 100, numChoices: [50, 100, 200], auto: {}, lastFetch: null, progress: null };
-  var umsRunning = false, umsT0 = 0, umsLast = null, umsTick = null, umsCookieShown = false;
+  var umsCfg = { cookieSet: false, cookieBackupSet: false, num: 100, numChoices: [50, 100, 200], auto: {}, lastFetch: null, progress: null };
+  var umsRunning = false, umsT0 = 0, umsLast = null, umsTick = null, umsCookieShown = false, umsCookieBackupShown = false;
   var umsPrev = null;   // 上一次获取结果（成功 / 失败），首页角标据它显示
   var umsCdUntil = 0;   // 取数冷却截止时间戳（与服务端 60 秒窗口对应，手动 / 自动共用）
   var umsCdSec = 60;    // 冷却时长（秒），由服务端配置返回
+  var umsManualWait = false;   // 已启动后台手动取数任务、等待结果
+  var umsManualAt = null;      // 已领取过的手动结果时间戳（避免轮询重复领取）
 
   // Cookie 失效 / 未保存时的统一指引：跑一次油猴脚本即会重新读取并保存 Cookie
   var UMS_COOKIE_HINT = '请打开盒马工作台页面，点右下角插件面板里的「立即同步」手动同步一次，脚本会重新读取并保存 Cookie';
@@ -1450,7 +1464,7 @@
     var win = umsAutoWindow(auto);
     var range = win ? '（时段 ' + win + '，首尾各额外获取一次）' : '（全天）';
 
-    if (!umsCfg.cookieSet) {
+    if (!umsCfg.cookieSet && !umsCfg.cookieBackupSet) {
       umsAutoStateEl.className = 'ums-auto-state err';
       umsAutoStateEl.textContent = '未保存 Cookie，自动获取不会执行。' + UMS_COOKIE_HINT;
     } else if (!auto.enabled) {
@@ -1479,7 +1493,7 @@
       body: JSON.stringify(body)
     }).then(readJson).then(function (j) {
       umsCfg = j;
-      umsSetCookieState(j.cookieSet);
+      umsSetCookieState(j.cookieSet, j.cookieBackupSet);
       umsAutoPaint();
       return j;
     });
@@ -1611,7 +1625,7 @@
       notice('冷却中：为避免触发接口风控，请 ' + left + ' 秒后再试（自动获取同样计入冷却）', 'err');
       return;
     }
-    if (!umsCfg.cookieSet) {
+    if (!umsCfg.cookieSet && !umsCfg.cookieBackupSet) {
       notice('未保存接口 Cookie。' + UMS_COOKIE_HINT, 'err');
       openUms();
       return;
@@ -1664,13 +1678,16 @@
     umsChipPaint();
   }
 
-  function umsProxy(s, e, incremental) {
+  /* 启动取数：服务端只「接单」后立即返回（202），实际取数在后台跑。
+     完成与否由轮询 /ums/config（progress / manual）感知，避免全量取数时长连接被中间层掐断而误报失败 */
+  function umsStartReq(s, e, incremental) {
     return fetch(API + '/ums/fetch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         startDate: s, endDate: e, incremental: !!incremental,
-        cookie: (umsCookieInput.value || '').trim()
+        cookie: (umsCookieInput.value || '').trim(),
+        cookieBackup: (umsCookieBackupInput.value || '').trim()
       })
     }).then(readJson);
   }
@@ -1703,7 +1720,8 @@
       '，丢弃 ' + j.meta.dropped +
       ' 条' + (j.meta.otherStore ? '，已过滤 ' + j.meta.otherStore + ' 条（非本门店）' : '') +
       (j.meta.ignored ? '，已忽略 ' + j.meta.ignored + ' 条（分区设置）' : '') +
-      '，综合效率 ' + fmt(j.totals.eff) + ' 行/h', 'ok');
+      '，综合效率 ' + fmt(j.totals.eff) + ' 行/h' +
+      (j.cookieFallback ? '（注：本次首选的 Cookie 未成功，已改用' + (j.cookieTag || '另一份') + ' Cookie 获取）' : ''), 'ok');
   }
 
   function umsStop() {
@@ -1732,23 +1750,19 @@
     umsSaveRange(s, e);   // 记录本次取数条件，自动获取跟随同一区间
 
     var incFlag = inc == null ? umsIncremental() : !!inc;
-    var label = '实时接口 ' + s + (e === s ? '' : ' ~ ' + e) + (incFlag ? '（增量）' : '');
     umsRunning = true;
     umsStartBtn.disabled = true;
     umsCdUntil = Date.now() + umsCdSec * 1000;   // 冷却窗口与服务端一致，含自动获取
     umsT0 = Date.now();
-    umsLast = { phase: 'proxy' };
+    umsLast = { phase: 'run' };
+    umsManualWait = false;
     umsPaint();
     umsTick = setInterval(umsPaint, 300);
 
-    umsProxy(s, e, incFlag).then(function (j) {
-      umsStop();
-      umsLast = null;
-      umsBar.classList.add('hidden');
-      umsMetaEl.innerHTML = '';
-      umsSum.textContent = '已完成：' + label + '（共 ' + (j.pages || 1) + '/' + (j.totalPages || 1) + ' 页' +
-        (j.reached ? '，已追平提前结束' : '') + '）';
-      umsAfterImport(j, label);
+    umsStartReq(s, e, incFlag).then(function () {
+      // 服务端已在后台开始取数：保持「获取中」，完成与结果由轮询感知
+      umsManualWait = true;
+      umsLoadCfg();
     }).catch(function (err) {
       umsStop();
       umsLast = null;
@@ -1759,6 +1773,38 @@
       umsSum.textContent = '获取失败';
       umsMetaEl.innerHTML = '<span>' + esc(msg) + '</span>';
       notice('实时获取失败：' + esc(msg), 'err');
+    });
+  }
+
+  /* 领取后台手动取数结果并按成功 / 失败收尾（由 umsLoadCfg 在任务结束时触发） */
+  function umsTakeResult() {
+    return fetch(API + '/ums/result', { cache: 'no-store' }).then(readJson).then(function (r) {
+      umsManualWait = false;
+      umsStop();
+      umsLast = null;
+      if (r && r.ok) {
+        var j = r.out || {};
+        var label = (j.last && j.last.label) || ('实时接口 ' + (r.range || ''));
+        umsBar.classList.add('hidden');
+        umsMetaEl.innerHTML = '';
+        umsSum.textContent = '已完成：' + label + '（共 ' + (j.pages || 1) + '/' + (j.totalPages || 1) + ' 页' +
+          (j.reached ? '，已追平提前结束' : '') + '）';
+        umsAfterImport(j, label);
+        return;
+      }
+      var msg = (r && r.error) || '获取失败';
+      umsPrev = { ok: false, at: (r && r.at) || new Date().toISOString(), msg: msg };
+      umsChipPaint();
+      umsBar.classList.add('hidden');
+      umsSum.textContent = '获取失败';
+      umsMetaEl.innerHTML = '<span>' + esc(msg) + '</span>';
+      notice('实时获取失败：' + esc(msg), 'err');
+    }).catch(function (err) {
+      umsManualWait = false;
+      umsStop();
+      umsLast = null;
+      umsBar.classList.add('hidden');
+      notice('领取获取结果失败：' + esc((err && err.message) || String(err)), 'err');
     });
   }
 
@@ -1809,7 +1855,7 @@
     return fetch(API + '/ums/config', { cache: 'no-store' }).then(readJson).then(function (j) {
       umsCfg = j;
       umsStale = !!(j.build && umsBuild && j.build !== umsBuild);
-      umsSetCookieState(j.cookieSet);
+      umsSetCookieState(j.cookieSet, j.cookieBackupSet);
       // 取数冷却：以服务端为准往前推（只延长不缩短，避免在途响应把倒计时拉回）
       var cd = j.cooldown || {};
       umsCdSec = cd.sec || umsCdSec;
@@ -1833,45 +1879,60 @@
           replaced: lf.replaced || 0, id: lf.id, label: lf.label
         };
       }
+      // 后台手动取数完成：领取完整结果并按成功 / 失败收尾；
+      // 本轮跳过通用 lastFetch 刷新，避免与手动结果重复提示 / 重复刷新
+      var manualDone = false;
+      if (umsManualWait && j.manual && j.manual.at && j.manual.at !== umsManualAt) {
+        manualDone = true;
+        umsManualAt = j.manual.at;
+        umsTakeResult();
+      }
       umsChipPaint();
-      umsApplyServerFetch(lf);
+      if (!manualDone) umsApplyServerFetch(lf);
     }).catch(function (e) {
       umsCookieState.className = 'ums-cookie-state err';
       umsCookieState.textContent = '接口配置读取失败：' + ((e && e.message) || e);
     });
   }
 
-  function umsSetCookieState(ok) {
+  function umsSetCookieState(ok, backupOk) {
     umsCookieState.className = 'ums-cookie-state' + (ok ? ' ok' : '');
     umsCookieState.textContent = ok ? '服务端已保存 Cookie' : '服务端未保存 Cookie';
+    umsCookieBackupState.className = 'ums-cookie-state' + (backupOk ? ' ok' : '');
+    umsCookieBackupState.textContent = backupOk ? '已保存备用 Cookie' : '';
   }
 
   function umsSyncCookie() {
     umsCookieWrap.classList.toggle('hidden', !umsCookieShown);
     umsCookieToggle.textContent = umsCookieShown ? '收起' : '设置';
+    umsCookieBackupWrap.classList.toggle('hidden', !umsCookieBackupShown);
+    umsCookieBackupToggle.textContent = umsCookieBackupShown ? '收起' : '设置';
   }
 
   // 打开「Cookie 设置」时从服务端拉取已保存的 Cookie 回填（用户手动改过则不覆盖）
-  var umsCookieDirty = false;
+  var umsCookieDirty = false, umsCookieBackupDirty = false;
   umsCookieInput.addEventListener('input', function () { umsCookieDirty = true; });
+  umsCookieBackupInput.addEventListener('input', function () { umsCookieBackupDirty = true; });
   function umsLoadCookie() {
     return fetch(API + '/ums/cookie', { cache: 'no-store' }).then(readJson).then(function (j) {
       if (!umsCookieDirty && j && j.cookie) umsCookieInput.value = j.cookie;
+      if (!umsCookieBackupDirty && j && j.backup) umsCookieBackupInput.value = j.backup;
     }).catch(function () { /* 读取失败静默：不打扰正在编辑的用户 */ });
   }
 
   function openUms() {
     umsDateSync();   // 默认当天；跨过 0 点则自动翻到新的一天
-    // 未保存 Cookie 时默认展开粘贴框（服务端代取必须先有 Cookie）
-    if (!umsCfg.cookieSet) umsCookieShown = true;
+    // 主 / 备用 Cookie 都没保存时默认展开粘贴框（服务端代取必须先有 Cookie）
+    if (!umsCfg.cookieSet && !umsCfg.cookieBackupSet) umsCookieShown = true;
     umsSyncCookie();
-    if (umsCookieShown) umsLoadCookie();
+    if (umsCookieShown || umsCookieBackupShown) umsLoadCookie();
     umsMask.classList.remove('hidden');
     umsLoadCfg();
   }
   function closeUms() {
     umsMask.classList.add('hidden');
-    umsCookieShown = false;   // 关闭后恢复折叠，下次打开从「设置」按钮进入
+    umsCookieShown = false;          // 关闭后恢复折叠，下次打开从「设置」按钮进入
+    umsCookieBackupShown = false;
     umsSyncCookie();
   }
 
@@ -1892,10 +1953,16 @@
     umsSyncCookie();
     if (umsCookieShown) umsLoadCookie();   // 展开时回填服务端已保存的 Cookie
   });
+  umsCookieBackupToggle.addEventListener('click', function () {
+    umsCookieBackupShown = !umsCookieBackupShown;
+    umsSyncCookie();
+    if (umsCookieBackupShown) umsLoadCookie();
+  });
   document.getElementById('umsCookieSave').addEventListener('click', function () {
     var cookie = (umsCookieInput.value || '').trim();
     if (!cookie) { notice('请先粘贴 Cookie', 'err'); return; }
-    umsSaveCfg({ cookie: cookie }).then(function () {
+    // force：页面显式保存 = 覆盖主 Cookie（脚本推送才走「相同跳过 / 不同写备用」）
+    umsSaveCfg({ cookie: cookie, force: true }).then(function () {
       umsCookieInput.value = '';
       umsCookieDirty = false;
       umsCookieShown = false;
@@ -1906,9 +1973,27 @@
   document.getElementById('umsCookieClear').addEventListener('click', function () {
     umsCookieInput.value = '';
     umsCookieDirty = false;
-    umsSaveCfg({ cookie: '' })
+    umsSaveCfg({ cookie: '', force: true })
       .then(function () { notice('接口 Cookie 已清除', 'ok'); })
       .catch(function (e) { notice('Cookie 清除失败：' + esc((e && e.message) || e), 'err'); });
+  });
+  document.getElementById('umsCookieBackupSave').addEventListener('click', function () {
+    var cookie = (umsCookieBackupInput.value || '').trim();
+    if (!cookie) { notice('请先粘贴备用 Cookie', 'err'); return; }
+    umsSaveCfg({ cookieBackup: cookie }).then(function () {
+      umsCookieBackupInput.value = '';
+      umsCookieBackupDirty = false;
+      umsCookieBackupShown = false;
+      umsSyncCookie();
+      notice('备用 Cookie 已保存到服务端', 'ok');
+    }).catch(function (e) { notice('备用 Cookie 保存失败：' + esc((e && e.message) || e), 'err'); });
+  });
+  document.getElementById('umsCookieBackupClear').addEventListener('click', function () {
+    umsCookieBackupInput.value = '';
+    umsCookieBackupDirty = false;
+    umsSaveCfg({ cookieBackup: '' })
+      .then(function () { notice('备用 Cookie 已清除', 'ok'); })
+      .catch(function (e) { notice('备用 Cookie 清除失败：' + esc((e && e.message) || e), 'err'); });
   });
 
   // 使用说明：默认收起，点击标题展开 / 收起

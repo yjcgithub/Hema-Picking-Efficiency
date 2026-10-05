@@ -371,7 +371,7 @@ router.get('/api/health', (req, res) => {
     ok: true, datasets: db.count(), basePath: BASE_PATH || '/',
     staticMode: STATIC_MODE, staticDesc: STATIC.desc,
     // 已实现的接口能力：油猴脚本启动时自检，用于识别「后端是旧版本」
-    features: ['ums.fetch', 'ums.config', 'ums.cookie', 'ums.agentData', 'ums.known']
+    features: ['ums.fetch', 'ums.config', 'ums.cookie', 'ums.cookieBackup', 'ums.agentData', 'ums.known']
   });
 });
 
@@ -574,6 +574,33 @@ function umsCookie() {
   return String(db.getSetting(CFG.UMS_COOKIE_KEY) || process.env.HEMA_UMS_COOKIE || '').trim();
 }
 
+// 备用 Cookie：与主 Cookie 一起随机先后使用；某份鉴权失败（登录态过期）或被风控（限流）时改用另一份
+function umsCookieBackup() {
+  return String(db.getSetting(CFG.UMS_COOKIE_BACKUP_KEY) || '').trim();
+}
+
+/* 本次取数可用的 Cookie 候选（去重、忽略空值），带角色标记 tag：
+   primary / backup 传入时优先（页面本次填写的），否则用已保存的主 / 备用。
+   返回 [{ cookie, tag }]，执行时由 umsRunFetch 随机打乱先后顺序 */
+function umsCookieCandidates(primary, backup) {
+  const p = String(primary || '').trim() || umsCookie();
+  const b = String(backup || '').trim() || umsCookieBackup();
+  const out = [];
+  if (p) out.push({ cookie: p, tag: '主' });
+  if (b && b !== p) out.push({ cookie: b, tag: '备用' });
+  return out;
+}
+
+// Fisher-Yates 洗牌：每次取数随机决定先用哪份 Cookie，分摊请求以降低单份被风控的概率
+function umsShuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+
 // 每页条数（num）：页面可设置，未设置或非法时用默认值
 function umsNum() {
   const n = Number(db.getSetting(CFG.UMS_NUM_KEY));
@@ -688,6 +715,7 @@ function umsCooldownInfo() {
 function umsConfigPayload() {
   return {
     cookieSet: !!umsCookie(),
+    cookieBackupSet: !!umsCookieBackup(),
     build: BUILD_ID,
     num: umsNum(),
     numChoices: CFG.UMS_NUM_CHOICES,
@@ -696,7 +724,9 @@ function umsConfigPayload() {
     agent: db.getSetting(CFG.UMS_AGENT_STATE_KEY) || null,
     lastFetch: db.getSetting(CFG.UMS_LAST_KEY) || null,
     progress: umsProgressInfo(),
-    cooldown: umsCooldownInfo()
+    cooldown: umsCooldownInfo(),
+    // 最近一次手动获取结果的轻量摘要（完整结果由 /api/ums/result 领取，避免轮询反复传大对象）
+    manual: UMS_MANUAL ? { at: UMS_MANUAL.at, ok: UMS_MANUAL.ok, range: UMS_MANUAL.range } : null
   };
 }
 
@@ -709,6 +739,21 @@ function umsSleep(ms) {
    放在错误信息开头，页面弹窗与自动获取失败提示都能直接看到。 */
 const UMS_COOKIE_HINT = 'Cookie 已失效（登录态过期）：请打开盒马工作台页面，点右下角插件面板里的'
   + '「立即同步」手动同步一次，脚本会重新读取并保存 Cookie';
+
+// 鉴权类错误（登录态失效）：打上 umsAuth 标记，取数时据此改用备用 Cookie 重试
+function umsAuthError(msg) {
+  const e = new Error(msg);
+  e.umsAuth = true;
+  return e;
+}
+
+// 风控类错误（限流）：打上 umsThrottle 标记，取数时据此改用备用 Cookie 重试。
+// 风控按 IP / 请求频次判定，但换一份 Cookie 有时能命中不同的限流维度，故也回退试一次
+function umsThrottleError(msg) {
+  const e = new Error(msg);
+  e.umsThrottle = true;
+  return e;
+}
 
 // 逐页拉取直到取满 totalNum；incremental 时遇到「整页单号都已入库」提前结束
 // 返回 { info: { list, totalNum }, pages, totalPages, reached, complete }
@@ -738,7 +783,11 @@ async function umsFetchAll(startDate, endDate, cookie, opts) {
     if (!resp.ok) {
       // 401 / 403：登录态问题，直接给出手动同步一次的指引
       if (resp.status === 401 || resp.status === 403) {
-        throw new Error(UMS_COOKIE_HINT + '（接口返回 HTTP ' + resp.status + '）');
+        throw umsAuthError(UMS_COOKIE_HINT + '（接口返回 HTTP ' + resp.status + '）');
+      }
+      // 429：请求过于频繁被限流，标记为风控类，可改用备用 Cookie 重试
+      if (resp.status === 429) {
+        throw umsThrottleError('接口被限流（HTTP 429）：请求过于频繁，本次未取到数据，稍后会自动重试');
       }
       throw new Error('接口返回 HTTP ' + resp.status);
     }
@@ -750,13 +799,13 @@ async function umsFetchAll(startDate, endDate, cookie, opts) {
       // UMS 出错时返回的是 HTML 页面，转成简短可读的原因（页面上会直接展示）
       const snippet = text.replace(/<[^>]*>/g, ' ').replace(/[\s\u00a0]+/g, ' ').trim().slice(0, 80);
       if (/被挤爆|人太多/.test(text)) {
-        throw new Error('接口被限流：UMS 返回「亲~人太多，被挤爆了！」（请求过于频繁），本次未取到数据，稍后会自动重试');
+        throw umsThrottleError('接口被限流：UMS 返回「亲~人太多，被挤爆了！」（请求过于频繁），本次未取到数据，稍后会自动重试');
       }
       if (/登录|login|passport|sso/i.test(text)) {
         // 登录页整页都是 HTML/CSS 噪声，不回片段，只给「手动同步一次」的指引
-        throw new Error(UMS_COOKIE_HINT);
+        throw umsAuthError(UMS_COOKIE_HINT);
       }
-      throw new Error('接口未返回 JSON，可能是 Cookie 失效：' + UMS_COOKIE_HINT + (snippet ? '（' + snippet + '）' : ''));
+      throw umsAuthError('接口未返回 JSON，可能是 Cookie 失效：' + UMS_COOKIE_HINT + (snippet ? '（' + snippet + '）' : ''));
     }
     if (json.code !== 200 || !json.info) {
       throw new Error('接口返回异常：' + JSON.stringify(json).slice(0, 200));
@@ -788,7 +837,7 @@ function umsRemember(state) {
 /* 一次完整获取：翻页拉取 -> 解析 -> 入库（merge=incremental），手动与自动获取共用
    整段抓取完整（complete）时把抓取日期范围内的旧明细整条替换：
    手动上传的当天数据没有单号、无法按单号合并，覆盖掉才不会与新抓的同一单重复计数 */
-async function umsRunFetch(startDate, endDate, incremental, cookie) {
+async function umsRunFetchOnce(startDate, endDate, incremental, cookie, tag) {
   const size = umsNum();
   UMS_PROGRESS = {
     active: true, pages: 0, totalPages: 0, got: 0, total: 0,
@@ -818,7 +867,57 @@ async function umsRunFetch(startDate, endDate, incremental, cookie) {
     label, mode: out.mode, added: out.added || 0, replaced: out.replaced || 0,
     records: out.meta.recordCount, id: out.id
   });
-  return Object.assign(out, { pages: r.pages, totalPages: r.totalPages, reached: r.reached, last: last });
+  return Object.assign(out, { pages: r.pages, totalPages: r.totalPages, reached: r.reached, last: last, cookieTag: tag || '主' });
+}
+
+/* 取数：把候选 Cookie（主 / 备用）随机排序后依次尝试 —— 每次随机先用主或备用，
+   摊薄单份 Cookie 的请求频次；鉴权失效（登录态过期）或遇到风控（限流）时改用下一份重试；
+   超时 / 网络错误 / 其它 HTTP 错误直接抛出（换 Cookie 也解决不了，重试只会徒增请求） */
+async function umsRunFetch(startDate, endDate, incremental, candidates) {
+  const list = umsShuffle((Array.isArray(candidates) ? candidates : [candidates])
+    .map(function (c) { return (c && typeof c === 'object') ? c : { cookie: c, tag: '主' }; })
+    .filter(function (c) { return !!(c && c.cookie); }));
+  if (!list.length) throw new Error('未配置接口 Cookie，无法获取（请在弹窗中粘贴一次 Cookie 后重试）');
+  if (list.length > 1) logInfo('[取数] 本次随机先用 ' + list[0].tag + ' Cookie');
+  let lastErr;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
+    const tag = it.tag || (i === 0 ? '主' : '备用');
+    try {
+      const out = await umsRunFetchOnce(startDate, endDate, incremental, it.cookie, tag);
+      if (i > 0) logInfo('[取数] ' + tag + ' Cookie 取数成功（已回退）');
+      out.cookieFallback = i > 0;          // 首个 Cookie 未成功、已改用后续 Cookie
+      return out;
+    } catch (e) {
+      lastErr = e;
+      const retryable = e.umsAuth || e.umsThrottle;
+      if (!retryable || i === list.length - 1) throw e;   // 不可回退 / 已无更多候选：抛出
+      logWarn('[取数] ' + tag + ' Cookie ' + (e.umsAuth ? '鉴权失败' : '被风控') + '，改用下一份 Cookie 重试');
+    }
+  }
+  throw lastErr;
+}
+
+/* 后台跑一次手动获取，结果写入 UMS_MANUAL 供页面领取。
+   为什么不在 HTTP 请求里 await 结果：全量取数页数多、耗时长，长连接挂着等结果时
+   容易被中间层（nginx / 网关 / 网络）掐断，出现「前端报 Failed to fetch，但后端其实已成功入库」。
+   改为「启动即返回 + 页面轮询进度」后，连接只是短请求，不受取数耗时影响 */
+let UMS_MANUAL = null;   // { at, ok:true, range, out } | { at, ok:false, range, error }
+async function umsRunManualJob(startDate, endDate, incremental, cookies, range) {
+  const t0 = Date.now();
+  umsBusy = true;                                   // 同步置忙，防止启动返回后紧接着又来一次
+  try {
+    const out = await umsRunFetch(startDate, endDate, incremental, cookies);
+    logInfo('[取数] 手动获取完成：' + out.pages + '/' + out.totalPages + ' 页，明细 ' + out.meta.recordCount +
+      ' 条，新增 ' + (out.added || 0) + ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
+      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+    UMS_MANUAL = { at: new Date().toISOString(), ok: true, range: range, out: out };
+  } catch (e) {
+    logWarn('[取数] 手动获取 ' + range + ' 失败（耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's）：' + (e.message || e));
+    UMS_MANUAL = { at: new Date().toISOString(), ok: false, range: range, error: String(e.message || e) };
+  } finally {
+    umsBusy = false;
+  }
 }
 
 /* ---------- 油猴脚本同步（userscript/hema-pick-sync.user.js） ----------
@@ -889,8 +988,10 @@ router.post('/api/ums/known', express.json({ limit: '1mb' }), (req, res) => {
   res.json({ known: n, total: codes.length });
 });
 
-// 手动获取：需要 Cookie（页面里保存或环境变量 HEMA_UMS_COOKIE）
-router.post('/api/ums/fetch', express.json({ limit: '1mb' }), async (req, res) => {
+/* 手动获取：需要 Cookie（页面里保存或环境变量 HEMA_UMS_COOKIE）。
+   只「启动」任务并立即返回（202）：实际取数在后台跑，前端轮询 /api/ums/config 看进度、
+   轮询 /api/ums/result 领取结果 —— 全量取数耗时长，避免长连接被中间层掐断导致误报失败 */
+router.post('/api/ums/fetch', express.json({ limit: '1mb' }), (req, res) => {
   const body = req.body || {};
   const startDate = String(body.startDate || '').trim();
   const endDate = String(body.endDate || startDate).trim();
@@ -898,8 +999,8 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), async (req, res) =
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
     return res.status(400).json({ error: '日期格式应为 YYYY-MM-DD' });
   }
-  const cookie = String(body.cookie || '').trim() || umsCookie();
-  if (!cookie) {
+  const cookies = umsCookieCandidates(String(body.cookie || '').trim(), String(body.cookieBackup || '').trim());
+  if (!cookies.length) {
     logWarn('[取数] 未配置 Cookie，无法手动获取');
     return res.status(400).json({ error: '未配置接口 Cookie，无法获取（请在弹窗中粘贴一次 Cookie 后重试）' });
   }
@@ -917,21 +1018,15 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), async (req, res) =
     });
   }
   const range = startDate + ' ~ ' + endDate;
-  const t0 = Date.now();
   logInfo('[取数] 手动获取 ' + range + (incremental ? '（增量）' : '（全量）') + ' 开始');
-  umsBusy = true;
-  try {
-    const out = await umsRunFetch(startDate, endDate, incremental, cookie);
-    logInfo('[取数] 手动获取完成：' + out.pages + '/' + out.totalPages + ' 页，明细 ' + out.meta.recordCount +
-      ' 条，新增 ' + (out.added || 0) + ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
-      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
-    res.json(out);
-  } catch (e) {
-    logWarn('[取数] 手动获取 ' + range + ' 失败（耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's）：' + (e.message || e));
-    res.status(400).json({ error: e.message || String(e) });
-  } finally {
-    umsBusy = false;
-  }
+  UMS_MANUAL = null;                                // 清掉上一次结果，供本次完成后领取
+  umsRunManualJob(startDate, endDate, incremental, cookies, range);   // 不 await：后台跑
+  res.status(202).json({ started: true, range: range, progress: umsProgressInfo() });
+});
+
+/* 领取最近一次手动获取结果：页面启动任务后轮询到这里取完整结果（含入库后的数据集） */
+router.get('/api/ums/result', (req, res) => {
+  res.json(UMS_MANUAL || { ok: null });
 });
 
 /* ---------- 自动获取：服务端按间隔轮询，每次取「页面取数条件」的日期区间增量并入 ----------
@@ -965,8 +1060,8 @@ async function umsAutoTick() {
   if (umsBusy) return;
   const auto = umsAutoCfg();
   if (!auto.enabled) return;
-  const cookie = umsCookie();
-  if (!cookie) return;
+  const cookies = umsCookieCandidates();
+  if (!cookies.length) return;
   const st = umsAutoState();
   const edge = umsEdgeHit(auto, st);      // 时段「开始 / 结束」时刻：额外强制取数一次
   if (!edge) {
@@ -991,7 +1086,7 @@ async function umsAutoTick() {
   const t0 = Date.now();
   umsBusy = true;
   try {
-    const out = await umsRunFetch(range.startDate, range.endDate, true, cookie);
+    const out = await umsRunFetch(range.startDate, range.endDate, true, cookies);
     const at = new Date();
     const nextAt = new Date(at.getTime() + auto.intervalMin * 60000 * umsJitter());
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
@@ -1030,17 +1125,38 @@ router.get('/api/ums/config', (req, res) => {
 
 // 读取已保存的 Cookie 原文：仅点击「Cookie 设置」时按需拉取回填输入框，不放进轮询接口
 router.get('/api/ums/cookie', (req, res) => {
-  res.json({ cookie: umsCookie() });
+  res.json({ cookie: umsCookie(), backup: umsCookieBackup() });
 });
 
-// 保存设置：Cookie（传空字符串清除）/ 每页条数 / 自动获取开关与间隔
+// 保存设置：Cookie（传空字符串清除）/ 备用 Cookie / 每页条数 / 自动获取开关与间隔
 router.post('/api/ums/config', express.json({ limit: '32kb' }), (req, res) => {
   const body = req.body || {};
   if (typeof body.cookie === 'string') {
     const v = body.cookie.trim();
-    db.setSetting(CFG.UMS_COOKIE_KEY, v);
-    // 只记长度，不把 Cookie 原文写进日志
-    logInfo('[设置] 接口 Cookie ' + (v ? '已保存（' + v.length + ' 字符）' : '已清除'));
+    if (body.force) {
+      // 页面「保存到服务端 / 清除」：显式写入主 Cookie（空字符串 = 清除）
+      db.setSetting(CFG.UMS_COOKIE_KEY, v);
+      // 只记长度，不把 Cookie 原文写进日志
+      logInfo('[设置] 接口 Cookie ' + (v ? '已保存（' + v.length + ' 字符）' : '已清除'));
+    } else if (!v) {
+      // 脚本推送的空值：忽略（脚本读不到 Cookie 时不会推送，这里兜底）
+    } else if (v === umsCookie() || v === umsCookieBackup()) {
+      // 脚本推送：与已存的主 / 备用 Cookie 相同 → 跳过，不重复写库、不刷日志
+      logInfo('[设置] 脚本推送的 Cookie 与已存相同，已跳过');
+    } else if (!umsCookie()) {
+      // 脚本推送且主 Cookie 尚未设置：首次以脚本推来的这份作为主 Cookie
+      db.setSetting(CFG.UMS_COOKIE_KEY, v);
+      logInfo('[设置] 脚本推送的 Cookie 已作为主 Cookie 保存（' + v.length + ' 字符）');
+    } else {
+      // 脚本推送：与主 Cookie 不同 → 写入备用槽，不覆盖主 Cookie（主失效时自动回退到它）
+      db.setSetting(CFG.UMS_COOKIE_BACKUP_KEY, v);
+      logInfo('[设置] 脚本推送的 Cookie 与主不同，已写入备用 Cookie（' + v.length + ' 字符）');
+    }
+  }
+  if (typeof body.cookieBackup === 'string') {
+    const v = body.cookieBackup.trim();
+    db.setSetting(CFG.UMS_COOKIE_BACKUP_KEY, v);
+    logInfo('[设置] 备用 Cookie ' + (v ? '已保存（' + v.length + ' 字符）' : '已清除'));
   }
   if (body.num != null && CFG.UMS_NUM_CHOICES.indexOf(Number(body.num)) >= 0) {
     db.setSetting(CFG.UMS_NUM_KEY, Number(body.num));
@@ -1122,7 +1238,7 @@ app.use(function (req, res) {
       : '当前未设置 BASE_PATH。若通过子路径访问（如 /hpe/api/...），请用 「BASE_PATH=前缀」 启动本服务；'
         + '或在 nginx 把 proxy_pass 改成 http://127.0.0.1:端口/（末尾加斜杠）',
     availableApi: ['/api/health', '/api/logs', '/api/datasets', '/api/latest', '/api/datasets/:id', '/api/range', '/api/day', '/api/upload',
-      '/api/ums/fetch', '/api/ums/config', '/api/ums/cookie', '/api/ums/agent/data', '/api/ums/known', '/api/settings']
+      '/api/ums/fetch', '/api/ums/result', '/api/ums/config', '/api/ums/cookie', '/api/ums/agent/data', '/api/ums/known', '/api/settings']
       .map(function (p) { return (BASE_PATH || '') + p; })
   });
 });
@@ -1138,7 +1254,8 @@ if (require.main === module) {
     const auto = umsAutoCfg();
     logInfo('自动获取：' + (auto.enabled ? '已开启（每 ' + auto.intervalMin + ' 分钟，时段 ' +
       (auto.timeStart || '不限') + ' ~ ' + (auto.timeEnd || '不限') + '）' : '未开启') +
-      '，接口 Cookie：' + (umsCookie() ? '已保存' : '未保存'));
+      '，接口 Cookie：' + (umsCookie() ? '已保存' : '未保存') +
+      '，备用 Cookie：' + (umsCookieBackup() ? '已保存' : '未保存'));
   });
 }
 

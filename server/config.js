@@ -44,7 +44,7 @@ module.exports = {
   // 拣货数量（件数）列（非必需：旧文件 / 接口没有该字段时不统计数量，也不阻塞上传）
   // 实时接口对应字段见 QTY_FIELD（listPickOrderForB2C 明细里的 pickNum）
   QTY_COLUMN: '拣货数量',
-  QTY_FIELD: 'pickNum',
+  QTY_FIELD: 'pickNumber',
 
   // 门店编码：拣货单号的前缀。导入时按此鉴别门店，只接收该编码开头的明细
   STORE_CODE: '20005',
@@ -53,8 +53,9 @@ module.exports = {
   REQUIRED_COLUMNS: ['拣货单号', '拣货人', '拣货开始时间', '拣货完成时间', '拣货行数', '拣货分区', '拣货单类型'],
 
   /* ---------- 实时拣货单接口（ums）：后端带 Cookie 拉取 ---------- */
-  UMS_URL: 'https://ums.hemaos.com/out/PickOrderManager/listPickOrderForB2C.json',
-  UMS_PAGE_SIZE: 100,                     // 默认每页条数（接口 num，index=0 为倒序第一页）
+  // 可用环境变量 HEMA_UMS_URL 覆盖（本地模拟 / 联调时指向假接口）
+  UMS_URL: process.env.HEMA_UMS_URL || 'https://ums.hemaos.com/out/PickOrderManager/listPickOrderForB2C.json',
+  UMS_PAGE_SIZE: 200,                     // 默认每页条数（接口 num，index=0 为倒序第一页）
   UMS_NUM_CHOICES: [50, 100, 200],        // 「每页条数」可选项（页面里设置，存 settings 表）
   UMS_EXTRA_QUERY: { pickOperateType: '3' },
   UMS_TIMEOUT_MS: 20000,                  // 单页请求超时
@@ -79,6 +80,9 @@ module.exports = {
 
   // 设置表里保存接口 Cookie 用的键名（服务端代取时使用）
   UMS_COOKIE_KEY: 'umsCookie',
+
+  // 备用接口 Cookie：与主 Cookie 一起随机先后使用（分摊请求降低风控），失败（鉴权 / 风控）时互相回退
+  UMS_COOKIE_BACKUP_KEY: 'umsCookieBackup',
 
   // 设置表里保存「最近一次实时获取结果」的键名（首页角标显示 状态 + 距上次获取的时长）
   UMS_LAST_KEY: 'umsLastFetch',

@@ -65,7 +65,7 @@ npm test
 |------|------|
 | 拣货单上传 | 上传 xlsx，以文件内「拣货开始时间」的**日期集合**为时间维度：命中同维度历史记录则整条覆盖，否则新增一条 |
 | 实时获取（服务端） | 后端带 Cookie 逐页请求拣货单接口，按**取数条件**的日期区间入库；支持「增量」（从最新页往回取，遇到整页单号都已入库即停） |
-| 备用 Cookie | 弹窗可再保存第二份（备用）Cookie；主 Cookie **鉴权失败（登录态过期）或遇到风控（限流）时自动改用备用 Cookie 重试**（超时 / 网络错误等其它错误不换），手动与自动获取都生效 |
+| 备用 Cookie | 弹窗可再保存第二份（备用）Cookie；取数时主 / 备用**随机先后**使用，某份**鉴权失败（登录态过期）或遇风控（限流）时自动改用另一份重试**（超时 / 网络错误等其它错误不换），手动与自动获取都生效 |
 | 实时获取（油猴脚本） | UMS 登录态是 HttpOnly Cookie，脚本读不到；改为在 ums 页面内用登录态**同源**取数后回传后端 —— 后端无需 Cookie，也能自动同步 |
 | 自动获取 | 服务端定时任务按设置的间隔，自动增量获取**页面「取数条件」的日期区间**（默认当天），可设每日执行时段（如 07:00 ~ 22:30），时段外自动暂停；**时段开始 / 结束时刻各额外强制获取一次** |
 | 手动获取 | 顶栏「手动获取」按钮，一键按**页面「取数条件」的日期区间**增量获取，不用打开弹窗；与自动获取共用 **60 秒冷却**窗口 |
@@ -230,10 +230,11 @@ Hema-Picking-Efficiency/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/ums/config` | 配置与状态：`cookieSet` / `cookieBackupSet`（只回布尔）、`build`、`num`、`numChoices`、`range`、`auto`、`agent`、`lastFetch`、`progress`、`cooldown` |
+| GET | `/api/ums/config` | 配置与状态：`cookieSet` / `cookieBackupSet`（只回布尔）、`build`、`num`、`numChoices`、`range`、`auto`、`agent`、`lastFetch`、`progress`、`cooldown`、`manual`（最近一次手动取数的轻量摘要 `{ at, ok, range }`） |
 | GET | `/api/ums/cookie` | 读取已保存的 Cookie 原文 `{ cookie, backup }`（仅点击「Cookie 设置」时按需调用，不放进轮询接口） |
 | POST | `/api/ums/config` | 保存设置：`{ cookie?, force? }` / `{ cookieBackup? }`（传空字符串清除）、`{ num? }`（每页条数）、`{ range? }`（取数条件 `{ startDate, endDate }`）、`{ auto? }`（开关 / 间隔 / 执行时段）。`force: true` = 页面显式写入主 Cookie；不带 `force` 视为脚本推送（见「备用 Cookie」） |
-| POST | `/api/ums/fetch` | 服务端带 Cookie 按日期区间取数入库：`{ startDate, endDate, incremental, cookie?, cookieBackup? }`（主 Cookie 鉴权失败或遇风控时自动回退备用）。冷却中返回 429、已有任务返回 409 |
+| POST | `/api/ums/fetch` | **启动**后台取数任务并**立即返回** `202 { started, range, progress }`（入参 `{ startDate, endDate, incremental, cookie?, cookieBackup? }`）。全量取数页数多、耗时长，任务在后台跑，页面轮询 `/api/ums/config` 看进度；冷却中返回 429、已有任务返回 409 |
+| GET | `/api/ums/result` | 领取最近一次手动取数结果：成功 `{ at, ok:true, range, out }`、失败 `{ at, ok:false, range, error }`、无结果 `{ ok:null }` |
 | POST | `/api/ums/agent/data` | 油猴脚本回传逐页结果入库：`{ startDate, endDate, pages[], complete?, reached? }` |
 | POST | `/api/ums/known` | 判定这批拣货单号已入库多少条：`{ codes[] }` → `{ known, total }`（脚本增量追平判据） |
 
@@ -287,16 +288,16 @@ Hema-Picking-Efficiency/
 
 接口分页语义：`index` 是**页码**（0 起，0 = 倒序第一页 = 最新），`num` 是每页条数（页面可选 50 / 100 / 200），总页数 `ceil(totalNum / num)`，逐页 `index++`。
 
-### 备用 Cookie（鉴权失败 / 风控自动回退）
+### 备用 Cookie（随机使用 / 鉴权失败·风控自动回退）
 
-弹窗「接口 Cookie」区可再保存一份**备用 Cookie**（`settings.umsCookieBackup`，与主 Cookie 分开存储）。服务端取数时按「主 → 备用」的顺序尝试当前可用的 Cookie：
+弹窗「接口 Cookie」区可再保存一份**备用 Cookie**（`settings.umsCookieBackup`，与主 Cookie 分开存储）。服务端取数时把「主 / 备用」**随机排序**后依次尝试，每次随机决定先用哪一份（摊薄单份 Cookie 的请求频次，降低风控概率）：
 
 - **鉴权类错误**（HTTP 401 / 403、返回登录页、响应非 JSON 疑似登录态失效）会改用下一份 Cookie 重试；
 - **风控类错误**（返回「人太多，被挤爆了」、HTTP 429 限流）也会改用下一份 Cookie 重试；
 - 超时、网络错误、其它 HTTP 错误**不换** Cookie（换一份也解决不了，反而多打接口）；
 - 主 / 备用都没有时直接报「未配置接口 Cookie」；
-- 命中备用时页面提示「主 Cookie 未成功，本次改用备用 Cookie 获取」；服务端日志记「…Cookie 鉴权失败 / 被风控，改用下一份 Cookie 重试」「备用 Cookie 取数成功（已回退）」；
-- 手动获取与自动获取共用同一套回退逻辑；60 秒取数冷却照常作用于整次尝试（回退不会绕过冷却）。
+- 命中回退时页面提示「本次首选的 Cookie 未成功，已改用 X Cookie 获取」；服务端日志记「本次随机先用 X Cookie」「…Cookie 鉴权失败 / 被风控，改用下一份 Cookie 重试」「X Cookie 取数成功（已回退）」；
+- 手动获取与自动获取共用同一套逻辑（两者都随机）；60 秒取数冷却照常作用于整次尝试（回退不会绕过冷却）。
 
 **脚本推送 Cookie 的落位规则**（油猴脚本每次同步成功后会把读到的 Cookie `POST /api/ums/config { cookie }`）：
 
@@ -343,7 +344,7 @@ Hema-Picking-Efficiency/
    - `选中文本生成条码For Hema(拖拽跟随) CODE-128.js` —— 条码脚本 + 内置同步面板（V4.7，UI 在「条码设置」里）
 2. 打开盒马工作台 / UMS 页面，面板会自动出现
 3. 「后端地址」填本服务地址（如 `http://localhost:3001/hpe`，无子路径则 `http://localhost:3001`），点「立即同步」验证连通
-4. 脚本会先 `fetch`（自动带 Cookie），被 CORS 拦则降级 `GM_xmlhttpRequest`；取数结果回传 `/api/ums/agent/data`，读到的 Cookie 同步推送到服务端（`POST /api/ums/config`，落位规则见[备用 Cookie](#备用-cookie鉴权失败--风控自动回退)）
+4. 脚本会先 `fetch`（自动带 Cookie），被 CORS 拦则降级 `GM_xmlhttpRequest`；取数结果回传 `/api/ums/agent/data`，读到的 Cookie 同步推送到服务端（`POST /api/ums/config`，落位规则见[备用 Cookie](#备用-cookie随机使用--鉴权失败风控自动回退)）
 5. **「自动同步」默认关闭**：需要定时同步时在面板里勾选它并设置间隔，之后保持该标签页开着即可；登录态过期时重新登录一次
 
 > 两个脚本顶部都有一段统一配置区 `US_CFG`，集中了接口路径、超时、重试、间隔、面板尺寸、DOM 选择器与存储键名，改配置只需改这一处。
