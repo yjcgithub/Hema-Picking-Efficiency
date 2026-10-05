@@ -2569,6 +2569,7 @@
 
   function injectCardTools() {
     Array.prototype.forEach.call(document.querySelectorAll('main .card'), function (card) {
+      if (card.id === 'timeoutCard') return;   // 「超时数统计」卡片不提供导出 / 复制图片
       if (card.querySelector('.card-tools')) return;
       var h3 = card.querySelector('h3');
       if (!h3) return;
@@ -2618,7 +2619,9 @@
     });
     if (!delta) return null;
     var prev = node.style.width;
-    node.style.width = node.clientWidth + delta + 'px';
+    // 用 border-box 实际宽度（getBoundingClientRect，含 padding / border）加溢出量 + 2px 余量：
+    // box-sizing:border-box 下 clientWidth 不含边框，直接用它会把卡片少加宽，宽表最右列仍被裁
+    node.style.width = (node.getBoundingClientRect().width + delta + 2) + 'px';
     return function () { node.style.width = prev; };
   }
 
@@ -2627,6 +2630,16 @@
       return Promise.reject(new Error('图片库 html2canvas 未加载（可能无外网）'));
     }
     var restore = widenForCapture(card);
+    // 卡片被加宽后，卡内 ECharts（趋势图 / 透视小计折线）不会自动跟随新宽度，
+    // 只会占左侧一小块、右侧大片留白（看起来像「图表区域空白」）。这里让它按新宽度重画，
+    // 截图后再 resize 回页面原宽度
+    var resizeCharts = !!(restore && HEMA.charts && HEMA.charts.resize);
+    if (resizeCharts) HEMA.charts.resize();
+    var done = function () {
+      if (!restore) return;
+      restore();
+      if (resizeCharts) HEMA.charts.resize();
+    };
     return html2canvas(card, {
       backgroundColor: '#ffffff',
       scale: window.devicePixelRatio > 1 ? 2 : 1.5,
@@ -2642,10 +2655,10 @@
         (doc.head || doc.documentElement).appendChild(st);
       }
     }).then(function (canvas) {
-      if (restore) restore();
+      done();
       return canvas;
     }, function (e) {
-      if (restore) restore();
+      done();
       throw e;
     });
   }
