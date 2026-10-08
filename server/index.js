@@ -15,12 +15,14 @@
 */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 
 const CFG = require('./config');
 const compute = require('./compute');
 const db = require('./db');
 const build = require('./build');
+const dingCapture = require('./capture');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -371,7 +373,7 @@ router.get('/api/health', (req, res) => {
     ok: true, datasets: db.count(), basePath: BASE_PATH || '/',
     staticMode: STATIC_MODE, staticDesc: STATIC.desc,
     // 已实现的接口能力：油猴脚本启动时自检，用于识别「后端是旧版本」
-    features: ['ums.fetch', 'ums.config', 'ums.cookie', 'ums.cookieBackup', 'ums.agentData', 'ums.known']
+    features: ['ums.fetch', 'ums.config', 'ums.cookie', 'ums.cookieBackup', 'ums.agentData', 'ums.known', 'ding.push', 'ding.auto']
   });
 });
 
@@ -502,6 +504,7 @@ function saveBuilt(built, opts) {
       db.overwrite(target.id, m.dataset, m.recs);
       logInfo('[入库] ' + src + '：增量并入数据集 #' + target.id +
         '，新增 ' + m.added + ' 条、覆盖 ' + m.replaced + ' 条，有效明细 ' + m.dataset.meta.recordCount + ' 条');
+      markDataChanged();   // 有新数据：供定时推送判断「有新数据才推」
       return Object.assign({ id: target.id, mode: 'merge', added: m.added, replaced: m.replaced }, m.dataset);
     }
   }
@@ -513,6 +516,7 @@ function saveBuilt(built, opts) {
   logInfo('[入库] ' + src + '：' + (hit ? '覆盖数据集 #' + id : '新建数据集 #' + id) +
     '，明细 ' + built.recs.length + ' 条' + (before ? '（替换旧明细 ' + before + ' 条）' : '') +
     '，日期 ' + dates.join('、'));
+  markDataChanged();   // 有新数据：供定时推送判断「有新数据才推」
   return Object.assign({
     id: id, mode: hit ? 'overwrite' : 'create',
     added: built.recs.length, replaced: before
@@ -1200,6 +1204,334 @@ router.delete('/api/datasets/:id', (req, res) => {
   res.json({ removed: removed });
 });
 
+/* ---------- 钉钉群机器人推送（效率透视图截图发到群） ----------
+   自定义机器人 Webhook 不支持「图片」消息类型（只支持 text / markdown / link / 卡片），
+   图片无法直接上传，只能用 markdown 语法嵌入一个「公网可访问的图片 URL」，由钉钉客户端拉取显示。
+   因此这里把前端截好的 PNG 落到 data/ding（公开只读路由 /api/ding/img/<file> 提供），
+   拼出公网 URL 后用 markdown 消息发给群机器人。 */
+const DING_DIR = process.env.HEMA_DING_DIR
+  ? path.resolve(process.env.HEMA_DING_DIR)
+  : path.join(__dirname, 'data', 'ding');
+fs.mkdirSync(DING_DIR, { recursive: true });
+
+/* 图片对外 URL 的路径前缀（拼在「公网地址」之后）：
+   默认走本服务的只读路由 <BASE_PATH>/api/ding/img；
+   若把图片目录挂到 nginx 站点目录、由 nginx 直接静态托管，可设 HEMA_DING_URL_PREFIX=/ding */
+const DING_URL_PREFIX = (function () {
+  const v = process.env.HEMA_DING_URL_PREFIX;
+  if (v != null && String(v).trim() !== '') {
+    return '/' + String(v).trim().replace(/^\/+/, '').replace(/\/+$/, '');
+  }
+  return BASE_PATH + '/api/ding/img';
+})();
+
+function dingWebhook() { return String(db.getSetting(CFG.DING_WEBHOOK_KEY) || '').trim(); }
+function dingSecret() { return String(db.getSetting(CFG.DING_SECRET_KEY) || '').trim(); }
+function dingPublicBase() { return String(db.getSetting(CFG.DING_PUBLIC_BASE_KEY) || '').trim().replace(/\/+$/, ''); }
+
+// 掩码展示：Webhook / 密钥含 access_token 与签名密钥，不回明文给前端
+function dingMask(s) {
+  s = String(s || '');
+  if (!s) return '';
+  return s.length <= 16 ? s.slice(0, 4) + '****' : s.slice(0, 8) + '……' + s.slice(-4);
+}
+
+function dingConfigPayload() {
+  const wh = dingWebhook(), sec = dingSecret();
+  return {
+    webhookSet: !!wh, webhookMask: dingMask(wh),
+    secretSet: !!sec, secretMask: dingMask(sec),
+    publicBase: dingPublicBase(),
+    pageUrl: String(db.getSetting(CFG.DING_PAGE_URL_KEY) || '').trim(),   // 已保存的原始值（可空）
+    pageUrlEffective: dingPageUrl(),                                       // 实际会用的地址（留空时为推断值）
+    auto: Object.assign(dingAutoCfg(), { state: dingAutoState() }),
+    // 定时推送依赖无头浏览器：未安装 puppeteer 时前端给出提示
+    captureOk: dingCapture.available(),
+    captureError: dingCapture.unavailableReason()
+  };
+}
+
+/* ---------- 定时推送：看板地址与排期（跟随「自动获取拣货单」） ---------- */
+
+// 无头浏览器打开的看板地址；留空 = 按本机端口 / 子路径推断（服务端自访问）
+function dingPageUrl() {
+  const v = String(db.getSetting(CFG.DING_PAGE_URL_KEY) || '').trim();
+  return v || ('http://127.0.0.1:' + PORT + BASE_PATH + '/');
+}
+
+// 数据变更打点：入库发生新增/覆盖时写入当前时间（自动获取 / 手动 / 脚本同步 / 上传共用）
+function markDataChanged() {
+  db.setSetting(CFG.DING_DATA_AT_KEY, new Date().toISOString());
+}
+
+// 最近一次数据变更的时间戳（无则空串），与「上次成功推送时记录的时间戳」比较即可判断是否有新数据
+function dingHasNewData() {
+  const data = String(db.getSetting(CFG.DING_DATA_AT_KEY) || '');
+  const pushed = String(db.getSetting(CFG.DING_PUSHED_AT_KEY) || '');
+  return !!data && data > pushed;
+}
+
+// 定时推送设置：开关来自钉钉配置；时段与间隔跟随「自动获取拣货单」（umsAutoCfg），不再单独配置
+function dingAutoCfg() {
+  const a = db.getSetting(CFG.DING_AUTO_KEY) || {};
+  const u = umsAutoCfg();
+  return {
+    enabled: !!a.enabled,
+    intervalMin: u.intervalMin,
+    timeStart: u.timeStart,
+    timeEnd: u.timeEnd
+  };
+}
+
+// 当前是否在配置的执行时段内（东八区）；未设时段 = 全天
+function dingInWindow(cfg) {
+  if (!cfg.timeStart && !cfg.timeEnd) return true;
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const cur = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const [sh, sm] = (cfg.timeStart || '00:00').split(':').map(Number);
+  const [eh, em] = (cfg.timeEnd || '23:59').split(':').map(Number);
+  return cur >= (sh * 60 + sm) && cur <= (eh * 60 + em);
+}
+
+function dingAutoState() {
+  const s = db.getSetting(CFG.DING_AUTO_STATE_KEY) || {};
+  return { at: s.at || null, ok: s.ok == null ? null : !!s.ok, error: s.error || '', reason: s.reason || '', count: s.count || 0 };
+}
+
+// 推送时图片要用的公网基址：优先设置里的固定域名，否则取看板地址的来源（仅供本机 / 内网自测）
+function dingPushBase() {
+  const b = dingPublicBase();
+  if (b) return b;
+  try { return new URL(dingPageUrl()).origin; } catch (e) { return ''; }
+}
+
+/* 加签（机器人安全设置选「加签」时必填）：
+   sign = Base64(HmacSHA256(timestamp + "\n" + secret))，作为查询参数拼到 Webhook 上 */
+function dingSignUrl(url, secret) {
+  if (!secret) return url;
+  const ts = String(Date.now());
+  const sign = crypto.createHmac('sha256', secret).update(ts + '\n' + secret).digest('base64');
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') +
+    'timestamp=' + ts + '&sign=' + encodeURIComponent(sign);
+}
+
+// 钉钉配置读取（Webhook / 密钥只回掩码，不回明文）
+router.get('/api/ding/config', (req, res) => {
+  res.json(dingConfigPayload());
+});
+
+// 保存钉钉配置：Webhook / 加签密钥 / 公网地址 / 定时推送（传空字符串 = 清除）
+router.post('/api/ding/config', express.json({ limit: '16kb' }), (req, res) => {
+  const b = req.body || {};
+  if (typeof b.webhook === 'string') {
+    const v = b.webhook.trim();
+    db.setSetting(CFG.DING_WEBHOOK_KEY, v);
+    logInfo('[钉钉] Webhook ' + (v ? '已保存' : '已清除'));
+  }
+  if (typeof b.secret === 'string') {
+    const v = b.secret.trim();
+    db.setSetting(CFG.DING_SECRET_KEY, v);
+    logInfo('[钉钉] 加签密钥 ' + (v ? '已保存（' + v.length + ' 字符）' : '已清除'));
+  }
+  if (typeof b.publicBase === 'string') {
+    const v = b.publicBase.trim().replace(/\/+$/, '');
+    db.setSetting(CFG.DING_PUBLIC_BASE_KEY, v);
+    logInfo('[钉钉] 公网地址 ' + (v || '（已清除，按请求 Host 推断）'));
+  }
+  if (typeof b.pageUrl === 'string') {
+    const v = b.pageUrl.trim();
+    db.setSetting(CFG.DING_PAGE_URL_KEY, v);
+    logInfo('[钉钉] 定时推送看板地址 ' + (v || '（已清除，用本机默认）'));
+  }
+  if (b.auto && typeof b.auto === 'object') {
+    db.setSetting(CFG.DING_AUTO_KEY, { enabled: !!b.auto.enabled });
+    const a = dingAutoCfg();
+    logInfo('[钉钉] 定时推送 ' + (a.enabled ? '开启' : '关闭') +
+      '（时段 / 间隔跟随自动获取：每 ' + a.intervalMin + ' 分钟，时段 ' +
+      (a.timeStart || '不限') + ' ~ ' + (a.timeEnd || '不限') + '）');
+  }
+  res.json(dingConfigPayload());
+});
+
+/* 图片落盘：data URL → data/ding/<md5-16>.<ext>（同图不重复写）；返回 { file, bytes } */
+function dingSaveImage(dataUrl) {
+  const m = /^data:image\/(png|jpe?g);base64,(.+)$/i.exec(String(dataUrl || ''));
+  if (!m) throw new Error('图片数据格式不合法（应为 data:image/png;base64,…）');
+  const buf = Buffer.from(m[2], 'base64');
+  if (!buf.length) throw new Error('图片数据为空');
+  if (buf.length > 30 * 1024 * 1024) throw new Error('图片过大（超过 30MB）');
+  const ext = m[1].toLowerCase() === 'png' ? 'png' : 'jpg';
+  const file = crypto.createHash('md5').update(buf).digest('hex').slice(0, 16) + '.' + ext;
+  const fp = path.join(DING_DIR, file);
+  if (!fs.existsSync(fp)) fs.writeFileSync(fp, buf);
+  return { file: file, bytes: buf.length, path: fp };
+}
+
+// 效率数值：保留 1 位小数，缺失 / 非数 → '-'
+function dingFmtNum(v) {
+  return (v == null || v === '' || isNaN(Number(v))) ? '-' : Number(v).toFixed(1);
+}
+
+/* 组装 markdown：结构化（效率透视表：统计时间段 + 每块「图片 + 效率 / 平均值 / 中位数」） */
+function dingBuildBlocksText(blocks, period, base) {
+  const parts = [], urls = [];
+  let bytes = 0;
+  const p = String(period || '').trim();
+  if (p) parts.push('#### 统计时间段：\n \n#### ' + p);
+  blocks.forEach(function (bk, i) {
+    const name = String(bk.name || '').trim() || '分块';
+    const saved = dingSaveImage(bk.image);
+    bytes += saved.bytes;
+    const url = base + DING_URL_PREFIX + '/' + saved.file;
+    urls.push(url);
+    logInfo('[钉钉] 图片 ' + (i + 1) + '/' + blocks.length + '「' + name + '」落盘 ' + saved.path +
+      '（' + (saved.bytes / 1024).toFixed(0) + 'KB）→ URL ' + url);
+    parts.push('#### ' + name + ':\n' +
+      '![' + name + '](' + url + ')\n' +
+      '#### 效率:' + dingFmtNum(bk.eff) + ' \n 平均值:' + dingFmtNum(bk.avg) + ' 中位数:' + dingFmtNum(bk.median));
+  });
+  return { text: parts.join('\n\n'), urls: urls, bytes: bytes };
+}
+
+// 单图（测试推送 / 兜底）
+function dingBuildSingleText(image, title, base) {
+  const saved = dingSaveImage(image);
+  const url = base + DING_URL_PREFIX + '/' + saved.file;
+  logInfo('[钉钉] 图片 1/1「' + title + '」落盘 ' + saved.path +
+    '（' + (saved.bytes / 1024).toFixed(0) + 'KB）→ URL ' + url);
+  return { text: '#### ' + title + '\n\n![' + title + '](' + url + ')', urls: [url], bytes: saved.bytes };
+}
+
+// 发送 markdown 到群（按需加签）；返回 { ok, error? }
+async function dingPostMarkdown(webhook, title, text) {
+  const sendUrl = dingSignUrl(webhook, dingSecret());
+  const r = await fetch(sendUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ msgtype: 'markdown', markdown: { title: title, text: text } })
+  });
+  const j = await r.json().catch(function () { return null; });
+  if (!j || j.errcode !== 0) {
+    return { ok: false, error: (j && (j.errmsg || ('errcode ' + j.errcode))) || ('HTTP ' + r.status) };
+  }
+  return { ok: true };
+}
+
+/* 推送：接收前端截图（data:image/png;base64,...）→ 落盘 → 发 markdown 到群。两种入参：
+   · 结构化（效率透视表）：{ title?, period?, blocks: [{ name, image, eff, avg, median }] }
+   · 单图（测试推送 / 兜底）：{ image, title? }。
+   图片走公网 URL 由钉钉客户端拉取，故必须配置可被公网访问的地址（或按本次请求 Host 推断）。 */
+router.post('/api/ding/push', express.json({ limit: '48mb' }), async (req, res) => {
+  try {
+    const webhook = dingWebhook();
+    if (!webhook) {
+      return res.status(400).json({ error: '未配置钉钉机器人 Webhook，请先在「钉钉推送」设置中填写并保存' });
+    }
+    const b = req.body || {};
+    // 公网地址：优先用设置里的固定域名，否则按本次请求的 Host / 协议推断
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+    const base = dingPublicBase() || (proto + '://' + req.headers.host);
+    const title = String(b.title || '效率透视表').slice(0, 60);
+    const structured = Array.isArray(b.blocks) && b.blocks.length > 0;
+    const out = structured ? dingBuildBlocksText(b.blocks, b.period, base)
+      : dingBuildSingleText(b.image, title, base);
+    const r = await dingPostMarkdown(webhook, title, out.text);
+    if (!r.ok) {
+      logWarn('[钉钉] 推送失败：' + r.error);
+      return res.status(502).json({ error: '钉钉推送失败：' + r.error });
+    }
+    const n = structured ? (b.blocks.length + ' 块') : '1 张图';
+    logInfo('[钉钉] 已推送「' + title + '」（' + n + '，共 ' + (out.bytes / 1024).toFixed(0) + 'KB）到群');
+    res.json({ ok: true, urls: out.urls, bytes: out.bytes });
+  } catch (e) {
+    logWarn('[钉钉] 推送异常：' + (e.message || e));
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+/* ---------- 定时推送：服务端无头浏览器截图后自动发到群 ----------
+   看板图只能在浏览器里出，故定时任务用 puppeteer 打开看板（默认本机地址）、
+   在页面内调 HEMA.dingPayload() 取回三块图与统计，再走与手动推送相同的 markdown 链路。 */
+
+let dingAutoRunning = false;
+let dingAutoLastAt = 0;   // 本轮已触发的执行时间戳（内存；重启后从状态记录里恢复）
+
+// 上次执行时间（毫秒）：内存里的在途触发优先，其次取状态记录（手动触发也会写状态）
+function dingLastRunMs() {
+  const s = dingAutoState();
+  const m = s.at ? (Date.parse(s.at) || 0) : 0;
+  return Math.max(dingAutoLastAt, m);
+}
+
+// 每 30 秒检查一次：在时段内、距上次执行已满一个间隔，且期间有新数据（新增/覆盖）才推一次
+function dingAutoTick() {
+  const cfg = dingAutoCfg();
+  if (!cfg.enabled) return;
+  if (!dingInWindow(cfg)) return;
+  if (Date.now() - dingLastRunMs() < cfg.intervalMin * 60 * 1000) return;
+  // 只在有新数据时推：自上次成功推送后没有新增/覆盖就跳过（不推进 lastRun，等有数据再推）
+  if (!dingHasNewData()) return;
+  dingAutoLastAt = Date.now();
+  dingRunAuto('定时（每 ' + cfg.intervalMin + ' 分钟）');
+}
+setInterval(dingAutoTick, 30 * 1000);
+
+// 执行一次「无头截图 + 推送」；reason 仅用于日志与状态展示
+async function dingRunAuto(reason) {
+  if (dingAutoRunning) { logWarn('[钉钉] 定时推送：上一次仍在进行，跳过本次（' + reason + '）'); return; }
+  const webhook = dingWebhook();
+  if (!webhook) { logWarn('[钉钉] 定时推送：未配置 Webhook，跳过（' + reason + '）'); return; }
+  dingAutoRunning = true;
+  const t0 = Date.now();
+  try {
+    const pageUrl = dingPageUrl();
+    logInfo('[钉钉] 定时推送开始（' + reason + '）：无头浏览器打开看板 ' + pageUrl + ' 截图…');
+    const payload = await dingCapture.capturePivot(pageUrl, {
+      log: function (m) { logInfo('[钉钉] ' + m); }
+    });
+    const base = dingPushBase();
+    if (!base) throw new Error('未配置公网地址，钉钉无法访问图片链接');
+    const out = dingBuildBlocksText(payload.blocks || [], payload.period, base);
+    const r = await dingPostMarkdown(webhook, '效率透视表', out.text);
+    if (!r.ok) throw new Error(r.error);
+    const n = (payload.blocks || []).length;
+    logInfo('[钉钉] 定时推送完成（' + reason + '）：' + n + ' 块，共 ' + (out.bytes / 1024).toFixed(0) +
+      'KB，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+    db.setSetting(CFG.DING_AUTO_STATE_KEY, {
+      at: new Date().toISOString(), ok: true, error: '', reason: reason, count: n
+    });
+    // 记录本次推送对应的数据版本：此后没有新增/覆盖就不再推送
+    db.setSetting(CFG.DING_PUSHED_AT_KEY, String(db.getSetting(CFG.DING_DATA_AT_KEY) || ''));
+  } catch (e) {
+    logWarn('[钉钉] 定时推送失败（' + reason + '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's）：' + (e.message || e));
+    db.setSetting(CFG.DING_AUTO_STATE_KEY, {
+      at: new Date().toISOString(), ok: false, error: String(e.message || e), reason: reason, count: 0
+    });
+  } finally {
+    dingAutoRunning = false;
+  }
+}
+
+// 立即执行一次定时推送（测试用）：后台跑，结果看 /api/ding/config 的 auto.state
+router.post('/api/ding/auto/run', (req, res) => {
+  if (dingAutoRunning) return res.status(409).json({ error: '已有定时推送在执行中，请稍候' });
+  if (!dingWebhook()) return res.status(400).json({ error: '未配置钉钉机器人 Webhook' });
+  if (!dingCapture.available()) return res.status(400).json({ error: dingCapture.unavailableReason() });
+  dingRunAuto('手动触发');
+  res.status(202).json({ started: true });
+});
+
+// 已推送图片的公开只读访问（供钉钉客户端拉取）；文件名限定为「16 位十六进制 + 扩展名」
+router.get('/api/ding/img/:file', (req, res) => {
+  const file = path.basename(String(req.params.file || ''));
+  if (!/^[0-9a-f]{16}\.(png|jpg)$/.test(file)) return res.status(404).json({ error: 'not found' });
+  const fp = path.join(DING_DIR, file);
+  if (!fs.existsSync(fp)) return res.status(404).json({ error: 'not found' });
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.type(file.slice(-3) === 'png' ? 'image/png' : 'image/jpeg');
+  fs.createReadStream(fp).pipe(res);
+});
+
 /* 旧指纹回退：资源内容变化后文件名会变，仍停留在旧页面的标签页可能请求上一版文件名。
    这里按「逻辑名」改写成当前指纹名，避免 404 白屏；新页面永远引用最新文件名。 */
 router.use(function (req, res, next) {
@@ -1238,7 +1570,8 @@ app.use(function (req, res) {
       : '当前未设置 BASE_PATH。若通过子路径访问（如 /hpe/api/...），请用 「BASE_PATH=前缀」 启动本服务；'
         + '或在 nginx 把 proxy_pass 改成 http://127.0.0.1:端口/（末尾加斜杠）',
     availableApi: ['/api/health', '/api/logs', '/api/datasets', '/api/latest', '/api/datasets/:id', '/api/range', '/api/day', '/api/upload',
-      '/api/ums/fetch', '/api/ums/result', '/api/ums/config', '/api/ums/cookie', '/api/ums/agent/data', '/api/ums/known', '/api/settings']
+      '/api/ums/fetch', '/api/ums/result', '/api/ums/config', '/api/ums/cookie', '/api/ums/agent/data', '/api/ums/known', '/api/settings',
+      '/api/ding/config', '/api/ding/push', '/api/ding/img/:file', '/api/ding/auto/run']
       .map(function (p) { return (BASE_PATH || '') + p; })
   });
 });
@@ -1250,6 +1583,9 @@ if (require.main === module) {
       (BASE_PATH ? '  （子路径 ' + BASE_PATH + '）' : '') + '  静态目录 ' + (STATIC.dir || '（未托管，仅 API）'));
     logInfo('静态资源：' + STATIC.desc);
     logInfo('可通过本地 IP 或域名访问');
+    logInfo('[钉钉] 图片输出目录 ' + DING_DIR + '（可写：' + (function () {
+      try { fs.accessSync(DING_DIR, fs.constants.W_OK); return '是'; } catch (e) { return '否 - ' + (e.message || e); }
+    })() + '），URL 前缀 ' + DING_URL_PREFIX + '，公网地址 ' + (dingPublicBase() || '（未配置，按请求 Host 推断）'));
     logInfo('历史数据集数量：' + db.count());
     const auto = umsAutoCfg();
     logInfo('自动获取：' + (auto.enabled ? '已开启（每 ' + auto.intervalMin + ' 分钟，时段 ' +

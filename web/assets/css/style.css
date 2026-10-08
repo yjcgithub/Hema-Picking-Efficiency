@@ -212,9 +212,11 @@ body {
 }
 .menu button:hover { background: #eef4ff; color: var(--primary); transform: translateX(3px); }
 
-/* ---------- 提示：屏幕居中上方浮层（不占文档流） ---------- */
+/* ---------- 提示：屏幕居中上方浮层（不占文档流） ----------
+   z-index 取 70：高于所有遮罩（门禁 30 / 弹窗 50 / 确认框 60），
+   这样在弹窗里点按钮弹出的提示不会被弹窗盖住 */
 .notice {
-  position: fixed; left: 50%; top: 74px; transform: translate(-50%, 0); z-index: 40;
+  position: fixed; left: 50%; top: 74px; transform: translate(-50%, 0); z-index: 70;
   max-width: min(880px, calc(100vw - 32px));
   padding: 13px 46px 13px 17px; border-radius: 11px;
   background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: 14.5px;
@@ -795,6 +797,9 @@ footer a:hover::after { width: 100%; }
   font: inherit; font-size: 14px; color: var(--txt); background: #fff; cursor: pointer;
 }
 .ums-field select:focus { outline: none; border-color: var(--primary); }
+/* 钉钉推送设置：Webhook / 密钥 / 公网地址为整行，输入框自适应宽度 */
+.ums-field.wide { flex: 1 1 100%; }
+.ums-field.wide input { flex: 1; min-width: 0; }
 /* 自动获取：开关 + 间隔 + 最近一次执行结果 */
 .ums-auto {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
@@ -907,7 +912,7 @@ footer a:hover::after { width: 100%; }
 .confirm-act { display: flex; justify-content: flex-end; gap: 12px; }
 
 /* ---------- 今日暂无数据：全屏遮罩（背景模糊）+ 登录页样式居中卡片 ---------- */
-/* z-index 取 30：盖住顶栏（20）与页面内容，但仍低于提示浮层（40）与各弹窗（50 / 60） */
+/* z-index 取 30：盖住顶栏（20）与页面内容，但仍低于各弹窗（50 / 60）与提示浮层（70） */
 .mask.gate {
   z-index: 30;
   background: rgba(15, 23, 42, .34);

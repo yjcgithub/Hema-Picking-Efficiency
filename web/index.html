@@ -47,6 +47,7 @@
     <button class="btn" id="zoneCfgBtn">分区设置</button>
     <button class="btn" id="dataMgrBtn">数据管理</button>
     <button class="btn" id="logsBtn" title="查看服务端日志（取数 / 自动获取 / 入库 / 设置等关键动作，最多保留最近 500 条）">日志</button>
+    <button class="btn" id="dingBtn" title="配置钉钉群机器人：把效率透视表截图直接发到群里">钉钉推送</button>
   </div>
   </div>
 </header>
@@ -374,6 +375,69 @@
           · 防风控：翻页之间随机停顿 300~900ms；自动间隔加 ±15% 抖动（避免固定时刻规律打点）；连续失败按指数退避重试（间隔翻倍，最多 60 分钟），成功后立即恢复正常间隔。手动 / 自动 / 脚本同步共用 60 秒取数冷却，冷却中「手动获取」按钮禁用并显示倒计时。首页角标只显示自动获取开关状态。<br>
           · 油猴脚本（推荐）：UMS 登录态是 HttpOnly Cookie，脚本读不到，所以脚本改为在本页面内用登录态取数后回传 ——
           安装 <b>userscript/hema-pick-sync.user.js</b> 后，后端不再需要 Cookie，也能自动同步（保持 ums 页面标签开着即可）。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 钉钉群机器人推送设置：Webhook / 加签密钥 / 公网地址；效率透视表卡片可一键把截图发到群 -->
+<div class="mask hidden" id="dingMask">
+  <div class="modal narrow">
+    <div class="modal-head">
+      <h3>钉钉群推送设置</h3>
+      <button type="button" class="modal-x" id="dingClose" title="关闭（Esc）">×</button>
+    </div>
+    <div class="modal-body">
+      <section class="ums-card">
+        <h4 class="ums-card-title">群机器人</h4>
+        <div class="ums-form">
+          <label class="ums-field wide">Webhook
+            <input type="text" id="dingWebhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=…">
+          </label>
+          <label class="ums-field wide">加签密钥
+            <input type="text" id="dingSecret" placeholder="SEC 开头；机器人安全设置选「加签」时填写">
+          </label>
+          <label class="ums-field wide" title="部署对公网可访问的地址，钉钉客户端要从这里拉取图片；留空 = 按本次请求的 Host 自动推断">公网地址
+            <input type="text" id="dingPublicBase" placeholder="如 https://xl.yjmc.xyz；留空 = 自动推断">
+          </label>
+        </div>
+        <div class="ums-cookie-bar">
+          <button type="button" class="btn primary" id="dingSave">保存设置</button>
+          <button type="button" class="btn" id="dingTest">测试推送</button>
+          <span class="ums-cookie-state" id="dingState"></span>
+        </div>
+      </section>
+      <section class="ums-card">
+        <div class="ums-card-head">
+          <h4 class="ums-card-title">定时推送</h4>
+          <span class="ums-auto-state" id="dingAutoState"></span>
+        </div>
+        <div class="ums-auto">
+          <label class="ums-radio" title="服务端按「自动获取拣货单」的时段与间隔，在有新数据时自动截图并发到群（需已安装 puppeteer）">
+            <input type="checkbox" id="dingAutoOn">启用定时推送
+          </label>
+          <span class="ums-cookie-state" id="dingAutoFollow"></span>
+        </div>
+        <div class="ums-form">
+          <label class="ums-field wide" title="无头浏览器打开的看板地址；留空 = 服务端按本机端口 / 子路径推断">看板地址
+            <input type="text" id="dingPageUrl" placeholder="留空 = 服务端按本机端口 / 子路径推断">
+          </label>
+        </div>
+        <div class="ums-cookie-bar">
+          <button type="button" class="btn" id="dingAutoRun">立即执行一次</button>
+          <span class="ums-cookie-state" id="dingAutoHint"></span>
+        </div>
+      </section>
+      <div class="ums-note">
+        <button type="button" class="ums-note-toggle" id="dingNoteToggle">使用说明 ▸</button>
+        <div class="note hidden" id="dingNoteBody">
+          · 群机器人 Webhook <b>不支持直接发图片</b>，这里改为把截图存到服务端、再用 <b>markdown 图片链接</b>发到群。<br>
+          · 因此图片 URL 必须<b>公网可访问</b>：请填写部署的对外地址（如 <b>https://xl.yjmc.xyz</b>，含反代子路径时也要带上）；留空则按本次请求的 Host 自动推断。<br>
+          · <b>加签密钥</b>：钉钉机器人「安全设置」勾选「加签」时，把 <b>SEC</b> 开头的密钥填到这里；选「自定义关键词」等方式可不填。<br>
+          · 手动推送：点击「效率透视表」卡片右上角的 <b>上传到钉钉群</b>（范围菜单可选分块）。<br>
+          · <b>定时推送</b>：服务端用无头浏览器（puppeteer）自行打开看板截图后发群，不用浏览器开着；<b>时段与间隔跟随「自动获取拣货单」</b>（在接口设置里配），且<b>只在有新数据（新增/覆盖）时才推</b>。需在服务器安装依赖（<code>npm install</code>，会自动下载 Chromium），容器内自装 Chromium 时可用环境变量 <b>HEMA_CHROME_PATH</b> 指定路径。<br>
+          · 图片保存在服务端 <b>data/ding</b> 目录，按内容哈希命名（同一张图不重复占用空间）。
         </div>
       </div>
     </div>

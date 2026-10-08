@@ -101,5 +101,21 @@ module.exports = {
   UMS_AUTO_STATE_KEY: 'umsAutoState',
 
   // 油猴脚本同步（在 ums 页面内用登录态取数后回传）最近一次结果
-  UMS_AGENT_STATE_KEY: 'umsAgentState'
+  UMS_AGENT_STATE_KEY: 'umsAgentState',
+
+  /* ---------- 钉钉群机器人推送（效率透视图发到群） ----------
+     自定义机器人 Webhook 不支持「图片」类型消息，只能把图片以 markdown 链接嵌入，
+     因此图片先存到服务端、由公网 URL 提供，再由钉钉客户端拉取显示 */
+  DING_WEBHOOK_KEY: 'dingWebhook',        // 机器人 Webhook 完整地址（含 access_token）
+  DING_SECRET_KEY: 'dingSecret',          // 安全设置「加签」的密钥（SEC 开头）
+  DING_PUBLIC_BASE_KEY: 'dingPublicBase', // 公网访问地址（如 https://xl.yjmc.xyz）；留空=按本次请求 Host 推断
+
+  /* ---------- 定时推送（服务端无头浏览器截图后自动发到群） ----------
+     服务端无法自己绘制看板，定时任务用 puppeteer 打开看板页（页面内调 HEMA.dingPayload 截图），
+     再走与手动推送相同的 markdown 链路发到群。需安装 puppeteer（见 server/capture.js）。 */
+  DING_PAGE_URL_KEY: 'dingPageUrl',       // 无头浏览器打开的看板地址；留空=按 PORT / BASE_PATH 推断本机
+  DING_AUTO_KEY: 'dingAuto',              // { enabled }：时段与间隔跟随「自动获取拣货单」配置，只在有新数据时推
+  DING_AUTO_STATE_KEY: 'dingAutoState',   // 最近一次定时推送结果 { at, ok, error, reason, count }
+  DING_DATA_AT_KEY: 'dingDataChangedAt',  // 最近一次「数据发生新增/覆盖」的时间（自动获取 / 手动 / 脚本 / 上传都会打点）
+  DING_PUSHED_AT_KEY: 'dingPushedDataAt'  // 最近一次「成功推送」时对应的数据变更时间（据此判断是否有新数据）
 };

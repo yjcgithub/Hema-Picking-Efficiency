@@ -1996,6 +1996,163 @@
       .catch(function (e) { notice('备用 Cookie 清除失败：' + esc((e && e.message) || e), 'err'); });
   });
 
+  /* ---------- 钉钉群推送设置 ---------- */
+  var dingMask_ = document.getElementById('dingMask');
+  var dingWebhookInput = document.getElementById('dingWebhook');
+  var dingSecretInput = document.getElementById('dingSecret');
+  var dingPublicBaseInput = document.getElementById('dingPublicBase');
+  var dingState = document.getElementById('dingState');
+  var dingAutoOn = document.getElementById('dingAutoOn');
+  var dingAutoFollow = document.getElementById('dingAutoFollow');
+  var dingAutoStateEl = document.getElementById('dingAutoState');
+  var dingAutoHint = document.getElementById('dingAutoHint');
+  var dingPageUrlInput = document.getElementById('dingPageUrl');
+  var dingLastAutoAt = null;   // 已见过的定时推送结果时间戳（「立即执行」据此判断是否出了新结果）
+
+  // 东八区 MM-DD HH:mm，用于显示定时推送时间
+  function dingClock(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso || '';
+    return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(5, 16).replace('T', ' ');
+  }
+
+  function dingPaint(j) {
+    dingState.className = 'ums-cookie-state' + (j && j.webhookSet ? ' ok' : '');
+    dingState.textContent = !j ? ''
+      : (j.webhookSet
+        ? ('Webhook 已保存：' + j.webhookMask + (j.secretSet ? ' · 已加签' : ' · 未加签'))
+        : '尚未配置 Webhook');
+    // 定时推送：最近一次结果 + 无头浏览器可用性
+    var st = (j && j.auto && j.auto.state) || {};
+    if (st.at) dingLastAutoAt = st.at;
+    dingAutoStateEl.className = 'ums-auto-state' + (st.ok === true ? ' ok' : (st.ok === false ? ' err' : ''));
+    dingAutoStateEl.textContent = !st.at ? ''
+      : (st.ok ? ('上次成功 ' + dingClock(st.at) + '（' + (st.count || 0) + ' 块）')
+               : ('上次失败 ' + dingClock(st.at) + '：' + (st.error || '')));
+    if (j && !j.captureOk && j.captureError) {
+      dingAutoHint.className = 'ums-cookie-state err';
+      dingAutoHint.textContent = j.captureError;
+    } else if (dingAutoHint.className.indexOf('err') >= 0) {
+      dingAutoHint.className = 'ums-cookie-state';
+      dingAutoHint.textContent = '';
+    }
+  }
+
+  function dingLoadCfg() {
+    return fetch(API + '/ding/config', { cache: 'no-store' }).then(readJson).then(function (j) {
+      // Webhook / 密钥只回掩码，明文输入框留空占位；公网地址可回填明文
+      if (!dingWebhookInput.value) dingWebhookInput.placeholder = (j && j.webhookSet)
+        ? ('已保存：' + j.webhookMask + '（留空 = 不修改）') : 'https://oapi.dingtalk.com/robot/send?access_token=…';
+      if (!dingSecretInput.value) dingSecretInput.placeholder = (j && j.secretSet)
+        ? ('已保存：' + j.secretMask + '（留空 = 不修改）') : 'SEC 开头；机器人安全设置选「加签」时填写';
+      if (j && j.publicBase && !dingPublicBaseInput.value) dingPublicBaseInput.value = j.publicBase;
+      var a = (j && j.auto) || {};
+      dingAutoOn.checked = !!a.enabled;
+      if (dingAutoFollow) {
+        dingAutoFollow.textContent = '跟随「自动获取」：每 ' + (a.intervalMin || 30) + ' 分钟' +
+          ((a.timeStart || a.timeEnd)
+            ? '，时段 ' + (a.timeStart || '不限') + ' ~ ' + (a.timeEnd || '不限')
+            : '（未设时段 = 全天）');
+      }
+      if (j && !dingPageUrlInput.value && j.pageUrl) dingPageUrlInput.value = j.pageUrl;
+      if (j) dingPageUrlInput.placeholder = '留空 = ' + (j.pageUrlEffective || '服务端按本机端口 / 子路径推断');
+      dingPaint(j);
+      return j;
+    }).catch(function (e) {
+      dingState.className = 'ums-cookie-state err';
+      dingState.textContent = '钉钉配置读取失败：' + ((e && e.message) || e);
+    });
+  }
+
+  function dingOpen() {
+    dingMask_.classList.remove('hidden');
+    dingLoadCfg();
+  }
+  function dingClose() { dingMask_.classList.add('hidden'); }
+
+  document.getElementById('dingBtn').addEventListener('click', dingOpen);
+  document.getElementById('dingClose').addEventListener('click', dingClose);
+  dingMask_.addEventListener('click', function (ev) { if (ev.target === dingMask_) dingClose(); });
+
+  document.getElementById('dingSave').addEventListener('click', function () {
+    var body = {};
+    // 输入框留空 = 不修改（避免每次保存都要重新粘贴 Webhook / 密钥）
+    if (dingWebhookInput.value.trim()) body.webhook = dingWebhookInput.value.trim();
+    if (dingSecretInput.value.trim()) body.secret = dingSecretInput.value.trim();
+    body.publicBase = dingPublicBaseInput.value.trim();   // 公网地址允许清空
+    body.pageUrl = dingPageUrlInput.value.trim();         // 看板地址允许清空
+    body.auto = { enabled: !!dingAutoOn.checked };   // 时段 / 间隔跟随「自动获取拣货单」，这里只存开关
+    fetch(API + '/ding/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(readJson).then(function (j) {
+      dingWebhookInput.value = '';
+      dingSecretInput.value = '';
+      dingPaint(j);
+      notice('钉钉配置已保存', 'ok');
+    }).catch(function (e) { notice('钉钉配置保存失败：' + esc((e && e.message) || e), 'err'); });
+  });
+
+  // 立即执行一次定时推送（服务端无头浏览器截图 + 发群）：截图要几秒，轮询状态等结果
+  document.getElementById('dingAutoRun').addEventListener('click', function () {
+    var prev = dingLastAutoAt;
+    notice('已开始在服务端截图并推送，请稍候…', 'ok');
+    dingAutoHint.className = 'ums-cookie-state';
+    dingAutoHint.textContent = '执行中…';
+    fetch(API + '/ding/auto/run', { method: 'POST' }).then(readJson).then(function () {
+      var tries = 0;
+      var timer = setInterval(function () {
+        tries++;
+        dingLoadCfg().then(function (j) {
+          var st = (j && j.auto && j.auto.state) || {};
+          if (st.at && st.at !== prev) {
+            clearInterval(timer);
+            if (st.ok) notice('定时推送完成：' + (st.count || 0) + ' 块已发到钉钉群', 'ok');
+            else notice('定时推送失败：' + esc(st.error || '未知原因'), 'err');
+          } else if (tries >= 30) {
+            clearInterval(timer);
+            notice('定时推送仍在执行或已超时，请稍后查看服务端日志', 'err');
+          }
+        });
+      }, 2000);
+    }).catch(function (e) {
+      dingAutoHint.textContent = '';
+      notice('触发失败：' + esc((e && e.message) || e), 'err');
+    });
+  });
+
+  document.getElementById('dingTest').addEventListener('click', function () {
+    // 测试推送：直接生成一张小图上传，验证 Webhook / 加签 / 公网地址是否可用
+    var canvas = document.createElement('canvas');
+    canvas.width = 480; canvas.height = 120;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#2563eb'; ctx.font = 'bold 28px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('钉钉推送测试 ' + new Date().toLocaleString('zh-CN'), 240, 60);
+    notice('正在发送测试消息到钉钉群…', 'ok');
+    canvas.toBlob(function (blob) {
+      blobToDataUrl(blob).then(function (dataUrl) {
+        return fetch(API + '/ding/push', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: dataUrl, title: '钉钉推送测试' })
+        }).then(readJson);
+      }).then(function () {
+        notice('测试消息已发到钉钉群，请查看', 'ok');
+      }).catch(function (e) {
+        notice('测试推送失败：' + esc((e && e.message) || e), 'err');
+      });
+    }, 'image/png');
+  });
+
+  // 使用说明：默认收起，点击标题展开 / 收起
+  var dingNoteToggle = document.getElementById('dingNoteToggle');
+  var dingNoteBody = document.getElementById('dingNoteBody');
+  dingNoteToggle.addEventListener('click', function () {
+    var nowHidden = dingNoteBody.classList.toggle('hidden');
+    dingNoteToggle.textContent = nowHidden ? '使用说明 ▸' : '使用说明 ▾';
+  });
+
   // 使用说明：默认收起，点击标题展开 / 收起
   var umsNoteToggle = document.getElementById('umsNoteToggle');
   var umsNoteBody = document.getElementById('umsNoteBody');
@@ -2219,6 +2376,8 @@
     if (logsMask && !logsMask.classList.contains('hidden')) { closeLogs(); return; }
     var zc = document.getElementById('zoneCfgMask');
     if (zc && !zc.classList.contains('hidden')) closeZoneCfg();
+    var dg = document.getElementById('dingMask');
+    if (dg && !dg.classList.contains('hidden')) { dingClose(); return; }
     if (umsMask && !umsMask.classList.contains('hidden')) closeUms();
   });
   dmAll.addEventListener('change', function () {
@@ -2581,7 +2740,7 @@
       var tools = document.createElement('div');
       tools.className = 'card-tools';
       tools.innerHTML = card.querySelector('#pivotBlocks')
-        ? menuWrap('导出为图片', 'png') + menuWrap('复制为图片', 'copy')
+        ? menuWrap('导出为图片', 'png') + menuWrap('复制为图片', 'copy') + menuWrap('上传到钉钉群', 'ding')
         : '<button type="button" class="mini" data-act="png">导出为图片</button>' +
           '<button type="button" class="mini" data-act="copy">复制为图片</button>';
       h3.appendChild(tools);
@@ -2640,9 +2799,12 @@
       restore();
       if (resizeCharts) HEMA.charts.resize();
     };
+    // 截图倍率：服务端「定时推送」的无头浏览器会预设 window.HEMA_DING_SCALE 来降采样提速；
+    // 页面正常使用（导出 / 复制 / 手动推送）不设置该值，走原来的 devicePixelRatio 逻辑
+    var dingScale = window.HEMA_DING_SCALE;
     return html2canvas(card, {
       backgroundColor: '#ffffff',
-      scale: window.devicePixelRatio > 1 ? 2 : 1.5,
+      scale: (typeof dingScale === 'number' && dingScale > 0) ? dingScale : (window.devicePixelRatio > 1 ? 2 : 1.5),
       ignoreElements: function (el) {
         return !!(el.classList && el.classList.contains('card-tools'));
       },
@@ -2724,6 +2886,115 @@
     });
   }
 
+  function blobToDataUrl(blob) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(fr.result); };
+      fr.onerror = function () { reject(new Error('读取图片数据失败')); };
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /* 生成钉钉推送载荷：按范围菜单选中的块逐一截图（默认「全部（三块）」），
+     每块附「效率 / 平均值 / 中位数」，再连同「统计时间段」一起构成 { period, blocks }。
+     口径与页面一致：效率 = 页头「整体」值（勾选按工时加权用 Σ行数 ÷ Σ时长，否则用人均），
+     平均值 / 中位数取服务端按「各人总计效率」给出的 stat。
+     手动推送与服务端「定时推送」（无头浏览器在页面内调用 HEMA.dingPayload）都走这里。 */
+  var DING_LABEL = { '前场合流': '前场', '后场合流': '后场' };   // 推送里的分块短名（其余用原名，如「一体化」）
+  function buildDingPayload(scopeKey) {
+    var pb = current && current.personByHour;
+    if (!pb) return Promise.reject(new Error('暂无透视数据'));
+    var sc = null;
+    for (var si = 0; si < PIVOT_SCOPES.length; si++) {
+      if (PIVOT_SCOPES[si].key === scopeKey) { sc = PIVOT_SCOPES[si]; break; }
+    }
+    var all = orderBlocks((pb.groups && pb.groups.length) ? pb.groups : fallbackGroups(pb));
+    // 范围菜单里带 match 的项只推这些块（「全部」match 为 null = 三块都推）
+    var groups = !sc || !sc.match ? all : all.filter(function (g) { return sc.match.indexOf(g.type) >= 0; });
+
+    // 选中块中若有折叠的：尺寸为 0、卡内折线图未绘制，先展开并重渲染，截图后还原折叠态
+    var wasCollapsed = [];
+    groups.forEach(function (g) {
+      if (collapsedSet().indexOf(g.type) >= 0) { wasCollapsed.push(g.type); toggleCollapsed(g.type); }
+    });
+    if (wasCollapsed.length) renderPivotBlocks(current);
+    var restore = function () {
+      if (!wasCollapsed.length) return;
+      wasCollapsed.forEach(function (t) { toggleCollapsed(t); });
+      if (current) renderPivotBlocks(current);
+    };
+
+    // 重渲染后 DOM 已重建：按顺序号把「块类型 → 元素」重新对上
+    var els = document.querySelectorAll('#pivotBlocks .pivot-block');
+    var elByType = {};
+    all.forEach(function (g, i) { if (els[i]) elByType[g.type] = els[i]; });
+
+    var jobs = [];
+    groups.forEach(function (g) {
+      if (!elByType[g.type]) return;
+      var gs = g.stat || {};
+      jobs.push({
+        name: DING_LABEL[g.type] || g.type,
+        el: elByType[g.type],
+        eff: (!weighted && gs.avg != null) ? gs.avg : g.total,
+        avg: gs.avg == null ? null : gs.avg,
+        median: gs.median == null ? null : gs.median
+      });
+    });
+    if (!jobs.length) {
+      restore();
+      return Promise.reject(new Error('暂无透视数据'));
+    }
+
+    var periodEl = document.getElementById('periodRange');
+    var period = periodEl ? (periodEl.textContent || '').trim() : '';
+
+    // 逐块截图（html2canvas 较重，串行执行），收集每块的图片与数值
+    var chain = Promise.resolve();
+    var blocks = [];
+    jobs.forEach(function (j, ji) {
+      chain = chain.then(function () {
+        var t0 = Date.now();
+        console.log('[ding-push] 截图 ' + (ji + 1) + '/' + jobs.length + '「' + j.name + '」…');
+        return captureCard(j.el).then(canvasToBlob).then(function (blob) {
+          if (!blob) throw new Error('生成图片失败（canvas 未产出图片数据）');
+          return blobToDataUrl(blob);
+        }).then(function (dataUrl) {
+          console.log('[ding-push] 完成 ' + (ji + 1) + '/' + jobs.length + '「' + j.name + '」 耗时 ' +
+            ((Date.now() - t0) / 1000).toFixed(1) + 's，' + Math.round(dataUrl.length / 1024) + 'KB');
+          blocks.push({ name: j.name, image: dataUrl, eff: j.eff, avg: j.avg, median: j.median });
+        });
+      });
+    });
+    return chain.then(function () {
+      restore();
+      return { period: period, blocks: blocks };
+    }, function (e) {
+      restore();
+      throw e;
+    });
+  }
+
+  // 供服务端无头浏览器（定时推送）在页面内调用：返回本页当前的三块推送载荷
+  HEMA.dingPayload = function () { return buildDingPayload(null); };
+
+  function pushDingPivot(scopeKey) {
+    notice('正在生成图片并上传到钉钉群…', 'ok');
+    return buildDingPayload(scopeKey).then(function (p) {
+      return fetch(API + '/ding/push', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: '效率透视表', period: p.period, blocks: p.blocks })
+      }).then(readJson).then(function () { return p.blocks.length; });
+    }).then(function (n) {
+      notice('已上传到钉钉群：效率透视表（' + n + ' 块）', 'ok');
+    }).catch(function (e) {
+      var msg = (e && e.message) || String(e);
+      notice('上传到钉钉群失败：' + esc(msg) +
+        (/未配置/.test(msg) ? '<br>请先点顶栏「钉钉推送」填写 Webhook 并保存' : ''), 'err');
+      throw e;
+    });
+  }
+
   // 把多个块临时收进一个容器，便于截成同一张图片；返回容器与还原函数
   function mergeNodes(nodes) {
     var wrap = document.createElement('div');
@@ -2742,6 +3013,7 @@
 
   // 按范围取节点（透视卡片可选 全部 / 单块 / 后场＋一体化合并）；折叠块临时展开、截完还原
   function runCapture(card, act, scopeKey) {
+    if (act === 'ding') { pushDingPivot(scopeKey); return; }   // 钉钉推送：按菜单范围逐块截图 + 统计
     var sc = null, i;
     for (i = 0; i < PIVOT_SCOPES.length; i++) {
       if (PIVOT_SCOPES[i].key === scopeKey) { sc = PIVOT_SCOPES[i]; break; }

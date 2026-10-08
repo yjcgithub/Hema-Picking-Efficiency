@@ -25,6 +25,9 @@ _cleanup_backup*/
 *.db-wal
 *.db-shm
 
+# 钉钉推送的截图（运行时生成，按内容哈希命名）
+server/data/ding/
+
 # 操作系统与编辑器
 .DS_Store
 Thumbs.db

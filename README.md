@@ -19,6 +19,7 @@
 - [配置](#配置)
 - [API 接口](#api-接口)
 - [数据采集（实时获取）](#数据采集实时获取)
+- [钉钉群推送](#钉钉群推送)
 - [上传文件格式](#上传文件格式)
 - [统计口径](#统计口径)
 - [部署](#部署)
@@ -100,6 +101,7 @@ npm test
 | 表格排序 | 所有表格表头均可点击切换升 / 降序（空值恒排在末尾） |
 | 卡片折叠 | 超时数统计、透视分块可折叠 / 展开 |
 | 内容导出 | 卡片支持「导出为图片 / 复制为图片」（html2canvas），透视卡片可按分类选择导出范围（**「超时数统计」卡片不提供导出**）；截图时会临时关闭克隆体的入场动画，并在宽表卡片被临时加宽后让卡内 ECharts 按新宽度重画，避免内容缺失 / 大片留白 |
+| 钉钉推送 | ① 手动：「效率透视表」卡片「上传到钉钉群」按**范围菜单**选分块发群；② **定时**：服务端无头浏览器（puppeteer）按设置的时间点自动截图发群，不用浏览器开着。消息按「统计时间段 + 各块（图片 + 效率 / 平均值 / 中位数）」组织（详见[钉钉群推送](#钉钉群推送)） |
 | 手机适配 | 纯 CSS 响应式（1100 / 900 / 720 / 640px 断点）：窄屏下宽表格改为横向滑动、弹窗铺满全屏、表单字段纵向铺满、图表降高、KPI 改两列、热力图收紧边距；顶栏与桌面一致（标题行随滚动移出、信息条吸顶常显）；**手机端信息条压成两行**（数据来源过长时省略、隐藏「访问方式」）；**手机用 IP 访问时自动跳转到域名**（IP 为 http 非安全上下文，移动端能力受限）；输入框字号 16px 以避免 iOS 聚焦缩放 |
 | 分区设置 | 维护「拣货分区 → 前后场分区（作业类型）」映射，支持「忽略（排除统计）」，保存后自动重算全部历史数据集 |
 | 数据管理 | 顶栏「数据管理」弹窗：切换查看、删除单条、批量删除、清空 |
@@ -111,17 +113,19 @@ npm test
 ```
 Hema-Picking-Efficiency/
 ├── server/                       # 后端（npm 工程根目录）
-│   ├── index.js                  # HTTP 入口：路由、CORS、路径归一化、UMS 取数与自动获取、静态托管与缓存头
+│   ├── index.js                  # HTTP 入口：路由、CORS、路径归一化、UMS 取数与自动获取、钉钉推送、静态托管与缓存头
 │   ├── build.js                  # 静态资源指纹构建：web/ → dist/（内容哈希 + 引用改写 + manifest）
 │   ├── compute.js                # 计算层：xlsx / UMS 解析 + 全部统计口径（唯一口径实现）
+│   ├── capture.js                # 定时推送用：无头浏览器（puppeteer）打开看板截图（可选依赖）
 │   ├── db.js                     # 存储层：SQLite（datasets / settings）
 │   ├── config.js                 # 配置层：口径参数、默认前后场映射、UMS 接口与防风控常量
 │   ├── package.json              # 依赖与脚本（start / build / test）
 │   ├── .env                      # 端口、子路径等环境变量（npm start 自动加载）
 │   ├── data/hema.db              # SQLite 库文件（运行时生成）
+│   ├── data/ding/                # 钉钉推送的截图（按内容哈希命名，运行时生成）
 │   └── test/static.test.js       # 静态资源缓存方案测试（8 个用例）
 ├── web/                          # 前端源码（开发时编辑这里）
-│   ├── index.html                # 页面结构（顶栏 + KPI + 10 张卡片 + 4 个弹窗 + 门禁遮罩）
+│   ├── index.html                # 页面结构（顶栏 + KPI + 10 张卡片 + 5 个弹窗 + 门禁遮罩）
 │   └── assets/
 │       ├── css/style.css         # 样式（含 1100 / 900 / 720 / 640px 手机响应式断点）
 │       └── js/
@@ -148,7 +152,7 @@ Hema-Picking-Efficiency/
 | 层 | 选型 |
 |----|------|
 | 运行环境 | Node.js **≥ 22.5.0**（依赖内置 `node:sqlite`，免原生编译） |
-| 后端 | Express 4 + `node:sqlite` + SheetJS `xlsx` |
+| 后端 | Express 4 + `node:sqlite` + SheetJS `xlsx`；定时推送用 `puppeteer`（无头浏览器截图，可选依赖） |
 | 前端 | 原生 JS + CSS（`HEMA` 全局命名空间 + IIFE），无框架、无打包；纯 CSS 响应式，兼顾手机 |
 | 图表 / 截图 | ECharts 5.5.1、html2canvas 1.4.1（均通过 CDN 引入） |
 | 构建 | `server/build.js`：`web/` → `dist/`，内容哈希命名 + HTML 引用改写 |
@@ -171,6 +175,9 @@ Hema-Picking-Efficiency/
 | `HEMA_STATIC` | `auto` | 静态资源托管方式，见下表 |
 | `STATIC_DIR` / `HEMA_WEB_DIR` | 空 | 指定前端目录绝对路径（优先级最高，用于前后端分离部署） |
 | `HEMA_UMS_URL` | 盒马 UMS 接口地址 | 覆盖实时取数接口地址（本地模拟 / 联调时指向假接口） |
+| `HEMA_CHROME_PATH` | 空 | 定时推送用的 Chromium 可执行文件路径（容器内自装 Chromium 时指定；留空用 puppeteer 自带浏览器） |
+| `HEMA_DING_DIR` | `server/data/ding` | 钉钉推送截图的落盘目录。可指向 nginx 站点目录（如 `/1Panel/1panel/www/sites/xl/index/ding`）由 nginx 直接静态托管 |
+| `HEMA_DING_URL_PREFIX` | `<BASE_PATH>/api/ding/img` | 图片 URL 的路径前缀（拼在「公网地址」之后）。交给 nginx 托管时设为 `/ding` |
 
 `HEMA_STATIC` 取值：
 
@@ -265,6 +272,16 @@ Hema-Picking-Efficiency/
 - `auto.nextAt` 为排期好的下次自动获取时间，页面据此在触发前 1 分钟显示倒计时
 - `progress` 仅在取数进行中非空，`totalPages = ceil(总条数 totalNum ÷ 每页条数 num)`，页面据此显示「第 x / N 页」
 
+### 钉钉推送
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/ding/config` | 读取钉钉配置：`{ webhookSet, webhookMask, secretSet, secretMask, publicBase, pageUrl, pageUrlEffective, auto: { enabled, intervalMin, timeStart, timeEnd, state }, captureOk, captureError }`（Webhook / 密钥只回**掩码**，不回明文；`captureOk` = 无头浏览器可用） |
+| POST | `/api/ding/config` | 保存配置：`{ webhook?, secret?, publicBase?, pageUrl?, auto?: { enabled, intervalMin, timeStart, timeEnd } }`（传空字符串清除；Webhook / 密钥留空视为不修改） |
+| POST | `/api/ding/push` | 推送截图到群。两种入参：**结构化**（效率透视表）`{ title?, period?, blocks: [{ name, image, eff, avg, median }] }` → 输出「统计时间段 + 每块（图 + 效率 / 平均值 / 中位数）」；**单图**（测试推送）`{ image, title? }`。图片按内容哈希落盘 `data/ding/`，拼公网 URL 后**加签**发 markdown；返回 `{ ok, urls[], bytes }` |
+| POST | `/api/ding/auto/run` | **定时推送**立即执行一次：服务端无头浏览器打开看板截图后发群，后台跑，返回 `202 { started }`；结果见 `/api/ding/config` 的 `auto.state`。已有任务 409、未配 Webhook / 未装 puppeteer 400 |
+| GET | `/api/ding/img/:file` | 已推送图片的**公开只读**访问（供钉钉客户端拉取）；文件名限定为「16 位十六进制 + `.png` / `.jpg`」 |
+
 ---
 
 ## 数据采集（实时获取）
@@ -348,6 +365,88 @@ Hema-Picking-Efficiency/
 5. **「自动同步」默认关闭**：需要定时同步时在面板里勾选它并设置间隔，之后保持该标签页开着即可；登录态过期时重新登录一次
 
 > 两个脚本顶部都有一段统一配置区 `US_CFG`，集中了接口路径、超时、重试、间隔、面板尺寸、DOM 选择器与存储键名，改配置只需改这一处。
+
+---
+
+## 钉钉群推送
+
+把「效率透视表」卡片的截图一键发到钉钉群。
+
+**为什么绕一道服务端**：钉钉**自定义群机器人**的 Webhook 只支持 `text` / `markdown` / `link` / 卡片消息，**不支持上传图片**。因此图片无法直接 POST 给机器人，改为：前端截图 → 由**本服务把图片落盘**（`server/data/ding/`，按内容哈希命名，同一张图不重复占空间）→ 由**公开只读路由** `GET /api/ding/img/<file>` 提供 → 用 markdown 语法 `![标题](图片URL)` 把图片**链接**发给群，钉钉客户端再去拉取显示。
+
+**配置**（顶栏「钉钉推送」按钮，配置存于 `settings` 表，键名见 `config.js`）：
+
+| 项 | 键名 | 说明 |
+|----|------|------|
+| Webhook | `dingWebhook` | 群机器人 Webhook 完整地址（含 `access_token`），必填 |
+| 加签密钥 | `dingSecret` | 机器人「安全设置」选**加签**时填 `SEC` 开头的密钥；`sign = Base64(HmacSHA256(timestamp + "\n" + secret))` 作为查询参数拼在 Webhook 上 |
+| 公网地址 | `dingPublicBase` | 图片对外可访问的地址（如 `https://xl.yjmc.xyz`，含反代子路径时也要带上）；留空则按本次请求的 `Host` / 协议自动推断 |
+
+> **关键前提**：钉钉客户端要从**公网**拉取图片，所以图片 URL 必须公网可达。内网 / 本机地址钉钉拉不到，群里图片会显示为空白（消息本身仍会发出）。
+
+**使用**：保存配置后（可点「测试推送」自检），点「效率透视表」卡片右上角的「上传到钉钉群 ▾」，在**范围菜单**里选要推送的分块（默认「全部（三块）」）。前端把选中的块**分别截图**，并取每块的「效率 / 平均值 / 中位数」，连同顶栏「统计时间段」一起发给服务端，由服务端拼成一条 markdown 消息：
+
+- **效率**：页头「整体」值，随顶栏「按工时加权」开关（勾选用 Σ行数 ÷ Σ时长，取消用各人效率算术平均）；
+- **平均值 / 中位数**：服务端按「各人总计效率」给出的均值 / 中位数，缺失显示 `-`；
+- 分块用短名：前场合流 → **前场**、后场合流 → **后场**，一体化仍为 **一体化**；
+- 所有文字行（分块标签、「统计时间段」取值、效率统计行）都用 markdown `####` 标题渲染，字号统一（钉钉 markdown 无独立字号，只能用标题级别放大；想更大改 `###`、想更小改 `#####`）。
+
+```text
+#### 统计时间段：
+
+#### 2026-10-08 07:05 – 22:40
+
+#### 前场:
+![前场](图片URL)
+#### 效率：142.3 平均值：138.2 中位数：136.5
+
+#### 后场:
+…
+
+#### 一体化:
+…
+```
+
+服务端日志记录 `[钉钉] 已推送「效率透视表」（N 块，共 xKB）到群` / `[钉钉] 推送失败：<errcode>`。
+
+### 定时推送（服务端无头浏览器截图）
+
+看板图只能在浏览器里出，服务端无法自己绘制，因此定时推送用 **puppeteer 无头浏览器**打开看板页、在页面内调用 `HEMA.dingPayload()` 取回三块图与统计，再走与手动推送**同一套 markdown 链路**发到群 —— 不用浏览器开着。
+
+**配置**（顶栏「钉钉推送」→「定时推送」）：
+
+| 项 | 键名 | 说明 |
+|----|------|------|
+| 启用 | `dingAuto.enabled` | 开关 |
+| 时段 / 间隔 | （跟随「自动获取拣货单」） | **不再单独配置**：直接沿用接口设置的 `umsAuto.intervalMin` / `timeStart` / `timeEnd`（服务端 30 秒轮询） |
+| 看板地址 | `dingPageUrl` | 无头浏览器打开的地址；留空 = 按本机 `PORT` / `BASE_PATH` 推断（`http://127.0.0.1:<端口><子路径>/`） |
+
+**只在有新数据时推**：任何入库发生**新增/覆盖**（自动获取 / 手动获取 / 脚本同步 / 上传 xlsx）都会写入 `dingDataChangedAt`；定时任务触发时若自上次成功推送后没有新数据，则跳过（并记录 `dingPushedDataAt` 作为下次比较基准）。
+
+**依赖**：需在 `server` 目录执行 `npm install`（`puppeteer` 会自动下载 Chromium）。容器内自装 Chromium 时用环境变量 **`HEMA_CHROME_PATH`** 指定可执行文件路径；未安装 puppeteer 时页面会提示，定时任务与「立即执行一次」均跳过。
+
+**立即执行一次**：弹窗里的按钮，触发一次「截图 + 发群」（后台跑，前端轮询状态显示结果，不受「有新数据」限制）。日志：`[钉钉] 定时推送开始 / 完成 / 失败`。
+
+> 定时推送要求**公网地址**已配置（图片 URL 要能被钉钉访问）；且看板当天需有数据，无数据会跳过并记日志。
+
+**图片落盘位置（交给 nginx 静态托管）**：默认截图落在 `server/data/ding/`，由本服务的只读路由 `/api/ding/img/<file>` 对外提供。若希望由 nginx 直接托管（减少一次反代），可把截图目录指到站点目录并改 URL 前缀：
+
+| 变量 | 值 | 说明 |
+|------|-----|------|
+| `HEMA_DING_DIR` | `/1Panel/1panel/www/sites/xl/index/ding` | 截图写到这里（需把站点目录挂进容器） |
+| `HEMA_DING_URL_PREFIX` | `/ding` | 图片 URL = 公网地址 + `/ding` + 文件名，如 `https://xl.yjmc.xyz/ding/<file>.png` |
+
+1Panel compose 示例（在前端服务 `node` 的 `environment:` / `volumes:` 中追加）：
+
+```yaml
+environment:
+  - HEMA_DING_DIR=/1Panel/1panel/www/sites/xl/index/ding
+  - HEMA_DING_URL_PREFIX=/ding
+volumes:
+  - /1Panel/1panel/www/sites/xl/index:/1Panel/1panel/www/sites/xl/index  # 让容器可写入站点目录
+```
+
+> 容器内路径与宿主机路径保持一致即可；改完需**重建容器**（`docker compose up -d`），并确认「公网地址」填 `https://xl.yjmc.xyz`。不配置这两个变量时行为不变（走本服务只读路由）。
 
 ---
 
@@ -488,6 +587,12 @@ npm run build        # 显式构建，打印 原始路径 -> 指纹路径 清单
 2. **宽表卡片被整体加宽**：列多的表格（透视表、人员明细等）靠横向滚动显示，导出前会临时把卡片加宽到能容纳全部列（否则右侧列被裁）。加宽后卡内的 ECharts（趋势图 / 透视小计折线）**会按新宽度重画**，避免图表只占左侧、右侧大片空白；截图后自动还原页面尺寸。
 
 若仍缺内容，请确认页面已加载最新前端（顶栏角标会提示「有新版本 · 点击刷新」）。
+
+**Q：钉钉消息发出去了，但群里的图片显示空白 / 不显示？**
+图片是以 markdown **链接**发给群的，由钉钉客户端再去**拉取**那个公网 URL。请确认「钉钉推送」里配置的**公网地址**填写正确且公网可访问（内网 / `localhost` 拉不到），含反向代理子路径时地址要带上该前缀。消息本身能发出、但图片空白，基本都是该 URL 不可达。
+
+**Q：钉钉推送报「未配置 Webhook」或「签名不匹配（errcode 310000）」？**
+前者是没有保存 Webhook，点顶栏「钉钉推送」填写并保存；后者是机器人「安全设置」选了**加签**但密钥没填或填错，把 `SEC` 开头的密钥补上（若用「自定义关键词」，则消息标题需包含该关键词）。
 
 **Q：Cookie 失效怎么恢复？**
 打开盒马工作台页面，点右下角插件面板里的「立即同步」手动同步一次，脚本会重新读取并保存 Cookie；也可在「实时获取」弹窗里重新粘贴。
