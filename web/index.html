@@ -414,7 +414,7 @@
           <span class="ums-auto-state" id="dingAutoState"></span>
         </div>
         <div class="ums-auto">
-          <label class="ums-radio" title="服务端按「自动获取拣货单」的时段与间隔，在有新数据时自动截图并发到群（需已安装 puppeteer）">
+          <label class="ums-radio" title="取数成功后自动截图并发到群，不用浏览器开着（需已安装 puppeteer）">
             <input type="checkbox" id="dingAutoOn">启用定时推送
           </label>
           <span class="ums-cookie-state" id="dingAutoFollow"></span>
@@ -436,7 +436,7 @@
           · 因此图片 URL 必须<b>公网可访问</b>：请填写部署的对外地址（如 <b>https://xl.yjmc.xyz</b>，含反代子路径时也要带上）；留空则按本次请求的 Host 自动推断。<br>
           · <b>加签密钥</b>：钉钉机器人「安全设置」勾选「加签」时，把 <b>SEC</b> 开头的密钥填到这里；选「自定义关键词」等方式可不填。<br>
           · 手动推送：点击「效率透视表」卡片右上角的 <b>上传到钉钉群</b>（范围菜单可选分块）。<br>
-          · <b>定时推送</b>：服务端用无头浏览器（puppeteer）自行打开看板截图后发群，不用浏览器开着；<b>时段与间隔跟随「自动获取拣货单」</b>（在接口设置里配），且<b>只在有新数据（新增/覆盖）时才推</b>。需在服务器安装依赖（<code>npm install</code>，会自动下载 Chromium），容器内自装 Chromium 时可用环境变量 <b>HEMA_CHROME_PATH</b> 指定路径。<br>
+          · <b>定时推送</b>：服务端用无头浏览器（puppeteer）自行打开看板截图后发群，不用浏览器开着；<b>「自动获取」有新增时，延迟 1 分钟自动推送，失败自动重试 2 次</b>（手动获取 / 脚本同步不触发；需手动推可用「立即执行一次」）。需在服务器安装依赖（<code>npm install</code>，会自动下载 Chromium），容器内自装 Chromium 时可用环境变量 <b>HEMA_CHROME_PATH</b> 指定路径。<br>
           · 图片保存在服务端 <b>data/ding</b> 目录，按内容哈希命名（同一张图不重复占用空间）。
         </div>
       </div>

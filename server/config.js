@@ -70,6 +70,7 @@ module.exports = {
   UMS_INTERVAL_JITTER: 0.15,              // 自动获取间隔抖动比例（±15%，避免固定整点打点）
   UMS_BACKOFF_MAX_MIN: 60,                // 连续失败后的最大退避间隔（分钟）
   UMS_FETCH_COOLDOWN_SEC: 60,             // 取数冷却：两次取数（手动 / 自动 / 脚本）之间的最小间隔秒数
+  UMS_MANUAL_LOCK_SEC: 60,                // 自动获取点「前后」多少秒内拒绝手动获取（错峰，避免同一时刻两次取数）
 
   // 超时判责：接口英文编码 -> 报表中文口径（与 xlsx 导出一致）
   UMS_DUTY_MAP: {
@@ -114,8 +115,8 @@ module.exports = {
      服务端无法自己绘制看板，定时任务用 puppeteer 打开看板页（页面内调 HEMA.dingPayload 截图），
      再走与手动推送相同的 markdown 链路发到群。需安装 puppeteer（见 server/capture.js）。 */
   DING_PAGE_URL_KEY: 'dingPageUrl',       // 无头浏览器打开的看板地址；留空=按 PORT / BASE_PATH 推断本机
-  DING_AUTO_KEY: 'dingAuto',              // { enabled }：时段与间隔跟随「自动获取拣货单」配置，只在有新数据时推
-  DING_AUTO_STATE_KEY: 'dingAutoState',   // 最近一次定时推送结果 { at, ok, error, reason, count }
-  DING_DATA_AT_KEY: 'dingDataChangedAt',  // 最近一次「数据发生新增/覆盖」的时间（自动获取 / 手动 / 脚本 / 上传都会打点）
-  DING_PUSHED_AT_KEY: 'dingPushedDataAt'  // 最近一次「成功推送」时对应的数据变更时间（据此判断是否有新数据）
+  DING_AUTO_KEY: 'dingAuto',              // { enabled }：取数成功后自动截图推送（不再按间隔定时）
+  DING_AUTO_STATE_KEY: 'dingAutoState',   // 最近一次自动推送结果 { at, ok, error, reason, count }
+  DING_PUSH_DELAY_MIN: 1,                 // 取数成功后延迟多少分钟才推送（等页面/数据稳定）
+  DING_PUSH_MAX_RETRY: 2                  // 推送失败自动重试次数
 };

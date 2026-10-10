@@ -77,7 +77,23 @@ async function capturePivot(url, opts) {
       log('时区设为 Asia/Shanghai 失败（按容器时区）:' + ((e && e.message) || e));
     });
     // 1 倍像素密度：DPR=1，避免 2x 画布放大（实际倍率另由 window.HEMA_DING_SCALE 指定）
-    await page.setViewport({ width: 1680, height: 1200, deviceScaleFactor: 1 });
+    // 宽高可通过环境变量 HEMA_VIEWPORT_WIDTH / HEMA_VIEWPORT_HEIGHT 覆盖（默认 1680×1200）
+    const vpW = Math.max(320, Number(process.env.HEMA_VIEWPORT_WIDTH) || 1680);
+    const vpH = Math.max(240, Number(process.env.HEMA_VIEWPORT_HEIGHT) || 1200);
+    await page.setViewport({ width: vpW, height: vpH, deviceScaleFactor: 1 });
+    log('视口 ' + vpW + '×' + vpH);
+    // 注入中文字体：容器内可能缺中文字体导致中文变方块/回退字体；
+    // 通过 CSS @import 加载 Noto Sans SC（Google Fonts CDN），在页面渲染前生效
+    await page.evaluateOnNewDocument(() => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap';
+      document.head.appendChild(link);
+      const style = document.createElement('style');
+      style.textContent = '*, *::before, *::after { font-family: "Noto Sans SC", "PingFang SC", ' +
+        '"Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Micro Hei", sans-serif !important; }';
+      document.head.appendChild(style);
+    });
     page.setDefaultTimeout(timeout);
     // 不用 networkidle：看板会周期性轮询接口，网络很难真正空闲；改用 domcontentloaded + 显式等待
     const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeout });
@@ -127,11 +143,80 @@ async function capturePivot(url, opts) {
       await page.waitForNetworkIdle({ idleTime: 500, timeout: 5000 }).catch(function () {});
     }
     log('透视表已渲染，开始截图…');
-    const payload = await page.evaluate('window.HEMA.dingPayload()');
-    if (!payload || !Array.isArray(payload.blocks) || !payload.blocks.length) {
+
+    // 用 puppeteer 原生截图（element.screenshot）代替页面内 html2canvas：
+    // html2canvas 是克隆 DOM 再重绘，在无头浏览器里无法正确捕获 ECharts canvas 像素，产出空白图。
+    // puppeteer 的 screenshot 直接抓取浏览器渲染像素（包括 canvas / WebGL），结果可靠。
+    const meta = await page.evaluate('(() => {\n' +
+      '  var els = document.querySelectorAll("#pivotBlocks .pivot-block");\n' +
+      '  var d = window.HEMA && window.HEMA._current;\n' +
+      '  var pb = d && d.personByHour;\n' +
+      '  var groups = (pb && pb.groups) || [];\n' +
+      '  var fallback = (!groups.length && pb) ? (function () {\n' +
+      '    // fallbackGroups：与 app.js buildDingPayload 一致\n' +
+      '    var map = {}, order = [];\n' +
+      '    (pb.persons || []).forEach(function (p) {\n' +
+      '      (p.rows || []).forEach(function (r) {\n' +
+      '        if (!map[r.jobType]) { map[r.jobType] = { type: r.jobType, rows: 0, hours: 0, persons: [] }; order.push(map[r.jobType]); }\n' +
+      '        var g = map[r.jobType]; g.rows += r.rows; g.hours += r.hours; g.persons.push(r);\n' +
+      '      });\n' +
+      '    });\n' +
+      '    order.forEach(function (g) { g.total = g.hours ? Math.round(g.rows / g.hours * 100) / 100 : null; });\n' +
+      '    return order;\n' +
+      '  })() : [];\n' +
+      '  var all = groups.length ? groups : fallback;\n' +
+      '  var byType = {};\n' +
+      '  all.forEach(function (g) { if (g && g.type && !byType[g.type]) byType[g.type] = g; });\n' +
+      '  var label = { "前场合流": "前场", "后场合流": "后场" };\n' +
+      '  var list = [];\n' +
+      // 页面按固定顺序（前场 / 后场 / 一体化）渲染分块，而 groups 按效率降序，两者顺序不一致。
+      // 若按下标对应，会出现「标签与图片错位」。故按 DOM 实际顺序取块，用各块标题的
+      // data-toggle（作业类型）反查 group，保证名称、数值与截图同属一块。
+      '  Array.prototype.forEach.call(els, function (el, i) {\n' +
+      '    var tEl = el.querySelector(".pivot-title");\n' +
+      '    var type = (tEl && tEl.getAttribute("data-toggle")) || "";\n' +
+      '    var g = byType[type];\n' +
+      '    if (!g) return;\n' +
+      '    var stat = g.stat || {};\n' +
+      '    list.push({\n' +
+      '      name: label[g.type] || g.type || ("分块" + (i + 1)),\n' +
+      '      idx: i,\n' +
+      '      eff: (stat.avg != null) ? stat.avg : (g.total != null ? g.total : null),\n' +
+      '      avg: stat.avg == null ? null : stat.avg,\n' +
+      '      median: stat.median == null ? null : stat.median\n' +
+      '    });\n' +
+      '  });\n' +
+      '  var period = (document.getElementById("periodRange") || {}).textContent || "";\n' +
+      '  return { period: period.trim(), blocks: list };\n' +
+      '})()');
+
+    if (!meta || !Array.isArray(meta.blocks) || !meta.blocks.length) {
       throw new Error('页面未返回可推送的透视数据' + diagText(diag));
     }
-    return payload;
+
+    // 逐块用 puppeteer 截取真实像素（含 ECharts canvas）
+    const outBlocks = [];
+    for (let i = 0; i < meta.blocks.length; i++) {
+      const bk = meta.blocks[i];
+      log('截图 ' + (i + 1) + '/' + meta.blocks.length + '「' + bk.name + '」…');
+      const el = await page.evaluateHandle(
+        'document.querySelectorAll("#pivotBlocks .pivot-block")[' + bk.idx + ']'
+      );
+      const buf = await el.asElement().screenshot({ type: 'png', omitBackground: false });
+      // puppeteer v24 默认返回 Uint8Array（TypedArray）而非 Buffer；
+      // TypedArray.prototype.toString 不支持 'base64' 参数，会退化为逗号分隔数字串 → PNG 损坏。
+      // 统一包成 Buffer 再转 base64。
+      const png = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+      const dataUrl = 'data:image/png;base64,' + png.toString('base64');
+      outBlocks.push({
+        name: bk.name, image: dataUrl,
+        eff: bk.eff, avg: bk.avg, median: bk.median
+      });
+      log('截图 ' + (i + 1) + '/' + meta.blocks.length + '「' + bk.name + '」完成，' +
+        Math.round(buf.length / 1024) + 'KB');
+    }
+
+    return { period: meta.period, blocks: outBlocks };
   } finally {
     await browser.close().catch(function () {});
   }

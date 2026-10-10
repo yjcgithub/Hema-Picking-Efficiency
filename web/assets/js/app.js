@@ -1079,6 +1079,7 @@
     sortTimelineRows(d);   // 图表与下方「人·日 班次明细」共用同一排序（就地排序，保持数组引用）
     renderTimeline(d);
     HEMA.charts.render(d);
+    HEMA._current = d;   // 供服务端无头截图读取分块统计（capture.js）
     if (timelineLayoutDirty) {   // 时间轴粒度切换使「人员工作时间图」显隐变化：重新测量图表尺寸
       timelineLayoutDirty = false;
       if (HEMA.charts.resize) HEMA.charts.resize();
@@ -1735,12 +1736,25 @@
     return umsCdUntil ? Math.max(0, Math.ceil((umsCdUntil - Date.now()) / 1000)) : 0;
   }
 
+  // 是否落在「自动获取点前后」的禁手动窗口内（与服务端 UMS_MANUAL_LOCK_SEC 一致）
+  function umsAutoLocked() {
+    var a = (umsCfg && umsCfg.auto) || {};
+    if (!a.enabled || !a.nextAt) return false;
+    var t = Date.parse(a.nextAt) || 0;
+    if (!t) return false;
+    return Math.abs(t - Date.now()) <= (umsCfg.manualLockSec || 60) * 1000;
+  }
+
   // 开始获取；s/e/inc 省略时取弹窗里的日期范围与「增量」勾选
   function umsRun(s, e, inc) {
     if (umsRunning) { notice('正在获取中，请稍候', 'err'); return; }
     var left = umsCdLeft();
     if (left > 0) {
       notice('冷却中：为避免触发接口风控，请 ' + left + ' 秒后再试（自动获取同样计入冷却）', 'err');
+      return;
+    }
+    if (umsAutoLocked()) {
+      notice('自动获取即将 / 刚刚执行，前后 ' + (umsCfg.manualLockSec || 60) + ' 秒内暂停手动获取', 'err');
       return;
     }
     if (!s) s = umsStartDate.value;
@@ -2049,10 +2063,8 @@
       var a = (j && j.auto) || {};
       dingAutoOn.checked = !!a.enabled;
       if (dingAutoFollow) {
-        dingAutoFollow.textContent = '跟随「自动获取」：每 ' + (a.intervalMin || 30) + ' 分钟' +
-          ((a.timeStart || a.timeEnd)
-            ? '，时段 ' + (a.timeStart || '不限') + ' ~ ' + (a.timeEnd || '不限')
-            : '（未设时段 = 全天）');
+        dingAutoFollow.textContent = '取数成功后 ' + (a.delayMin || 1) + ' 分钟自动推送' +
+          '；失败自动重试 ' + (a.maxRetry == null ? 2 : a.maxRetry) + ' 次';
       }
       if (j && !dingPageUrlInput.value && j.pageUrl) dingPageUrlInput.value = j.pageUrl;
       if (j) dingPageUrlInput.placeholder = '留空 = ' + (j.pageUrlEffective || '服务端按本机端口 / 子路径推断');
@@ -2808,12 +2820,19 @@
       ignoreElements: function (el) {
         return !!(el.classList && el.classList.contains('card-tools'));
       },
-      // html2canvas 把节点克隆到独立文档再渲染，克隆体会重放入场动画（表格行 row-in 的逐行延迟、
+      // html2canvas 把节点克隆到独立文档再渲染，克隆体重放入场动画（表格行 row-in 的逐行延迟、
       // 卡片 dash-in、KPI 数字跳动），截图时仍停在 opacity:0 / translateX 初始态 → 图片显示不全。
-      // 只在克隆文档内关闭动画与过渡，不影响页面本身的动效。
+      // 在克隆文档内关闭动画/过渡，并把所有元素的 opacity/transform/visibility 强制归位，不影响页面本身。
       onclone: function (doc) {
         var st = doc.createElement('style');
-        st.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;}';
+        st.textContent = [
+          '*,*::before,*::after{',
+          'animation:none!important;transition:none!important;',
+          'opacity:1!important;transform:none!important;visibility:visible!important;',
+          '}',
+          // ECharts canvas 里若含 foreignObject/svg 也可能受 transform 影响，确保 canvas 内可见
+          'canvas{opacity:1!important;}'
+        ].join('');
         (doc.head || doc.documentElement).appendChild(st);
       }
     }).then(function (canvas) {
