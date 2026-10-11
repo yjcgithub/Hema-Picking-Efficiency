@@ -1079,7 +1079,6 @@
     sortTimelineRows(d);   // 图表与下方「人·日 班次明细」共用同一排序（就地排序，保持数组引用）
     renderTimeline(d);
     HEMA.charts.render(d);
-    HEMA._current = d;   // 供服务端无头截图读取分块统计（capture.js）
     if (timelineLayoutDirty) {   // 时间轴粒度切换使「人员工作时间图」显隐变化：重新测量图表尺寸
       timelineLayoutDirty = false;
       if (HEMA.charts.resize) HEMA.charts.resize();
@@ -1828,6 +1827,9 @@
   // 已提示过的「后台自动获取失败」时间点：同一次失败只弹一次；首屏不打扰
   var umsAutoSeenAt = null;
 
+  // 已提示过的「Cookie 鉴权失效被删除」时间点：同一次只弹一次；首屏不打扰
+  var umsCookieAuthSeenAt = null;
+
   // 页面当前运行的前端构建版本（app.<hash>.js）与服务端最新版本不一致时提示刷新，
   // 避免「页面还是旧版本 JS」造成的显示与数据不符
   function umsBuildId() {
@@ -1883,6 +1885,15 @@
         umsAutoSeenAt = au.at;
         if (!firstAuto && au.ok === false) {
           notice('自动获取失败（' + umsClock(au.at) + '）：' + esc(au.error || '未知原因'), 'err');
+        }
+      }
+      // 服务端因鉴权失效（登录态过期）删除了 Cookie：弹一次提示，引导重新同步（首屏不打扰）
+      var ca = j.cookieAuth;
+      if (ca && ca.at && ca.at !== umsCookieAuthSeenAt) {
+        var firstCa = umsCookieAuthSeenAt === null;
+        umsCookieAuthSeenAt = ca.at;
+        if (!firstCa) {
+          notice('接口 ' + (ca.tag || '') + ' Cookie 已失效（登录态过期），已自动删除。' + UMS_COOKIE_HINT, 'err');
         }
       }
       // 首页角标：服务端记录比本地新（如后台自动获取刚跑过）时以服务端为准
@@ -2020,7 +2031,6 @@
   var dingAutoFollow = document.getElementById('dingAutoFollow');
   var dingAutoStateEl = document.getElementById('dingAutoState');
   var dingAutoHint = document.getElementById('dingAutoHint');
-  var dingPageUrlInput = document.getElementById('dingPageUrl');
   var dingLastAutoAt = null;   // 已见过的定时推送结果时间戳（「立即执行」据此判断是否出了新结果）
 
   // 东八区 MM-DD HH:mm，用于显示定时推送时间
@@ -2036,16 +2046,16 @@
       : (j.webhookSet
         ? ('Webhook 已保存：' + j.webhookMask + (j.secretSet ? ' · 已加签' : ' · 未加签'))
         : '尚未配置 Webhook');
-    // 定时推送：最近一次结果 + 无头浏览器可用性
+    // 定时推送：最近一次结果 + 自绘依赖（@resvg/resvg-js）可用性
     var st = (j && j.auto && j.auto.state) || {};
     if (st.at) dingLastAutoAt = st.at;
     dingAutoStateEl.className = 'ums-auto-state' + (st.ok === true ? ' ok' : (st.ok === false ? ' err' : ''));
     dingAutoStateEl.textContent = !st.at ? ''
       : (st.ok ? ('上次成功 ' + dingClock(st.at) + '（' + (st.count || 0) + ' 块）')
                : ('上次失败 ' + dingClock(st.at) + '：' + (st.error || '')));
-    if (j && !j.captureOk && j.captureError) {
+    if (j && !j.renderOk && j.renderError) {
       dingAutoHint.className = 'ums-cookie-state err';
-      dingAutoHint.textContent = j.captureError;
+      dingAutoHint.textContent = j.renderError;
     } else if (dingAutoHint.className.indexOf('err') >= 0) {
       dingAutoHint.className = 'ums-cookie-state';
       dingAutoHint.textContent = '';
@@ -2066,8 +2076,6 @@
         dingAutoFollow.textContent = '取数成功后 ' + (a.delayMin || 1) + ' 分钟自动推送' +
           '；失败自动重试 ' + (a.maxRetry == null ? 2 : a.maxRetry) + ' 次';
       }
-      if (j && !dingPageUrlInput.value && j.pageUrl) dingPageUrlInput.value = j.pageUrl;
-      if (j) dingPageUrlInput.placeholder = '留空 = ' + (j.pageUrlEffective || '服务端按本机端口 / 子路径推断');
       dingPaint(j);
       return j;
     }).catch(function (e) {
@@ -2092,7 +2100,6 @@
     if (dingWebhookInput.value.trim()) body.webhook = dingWebhookInput.value.trim();
     if (dingSecretInput.value.trim()) body.secret = dingSecretInput.value.trim();
     body.publicBase = dingPublicBaseInput.value.trim();   // 公网地址允许清空
-    body.pageUrl = dingPageUrlInput.value.trim();         // 看板地址允许清空
     body.auto = { enabled: !!dingAutoOn.checked };   // 时段 / 间隔跟随「自动获取拣货单」，这里只存开关
     fetch(API + '/ding/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2105,10 +2112,10 @@
     }).catch(function (e) { notice('钉钉配置保存失败：' + esc((e && e.message) || e), 'err'); });
   });
 
-  // 立即执行一次定时推送（服务端无头浏览器截图 + 发群）：截图要几秒，轮询状态等结果
+  // 立即执行一次定时推送（服务端自绘图片 + 发群）：生成图片要几秒，轮询状态等结果
   document.getElementById('dingAutoRun').addEventListener('click', function () {
     var prev = dingLastAutoAt;
-    notice('已开始在服务端截图并推送，请稍候…', 'ok');
+    notice('已开始在服务端生成图片并推送，请稍候…', 'ok');
     dingAutoHint.className = 'ums-cookie-state';
     dingAutoHint.textContent = '执行中…';
     fetch(API + '/ding/auto/run', { method: 'POST' }).then(readJson).then(function () {
@@ -2811,12 +2818,10 @@
       restore();
       if (resizeCharts) HEMA.charts.resize();
     };
-    // 截图倍率：服务端「定时推送」的无头浏览器会预设 window.HEMA_DING_SCALE 来降采样提速；
-    // 页面正常使用（导出 / 复制 / 手动推送）不设置该值，走原来的 devicePixelRatio 逻辑
-    var dingScale = window.HEMA_DING_SCALE;
+    // 截图倍率：按设备像素比放大，保证导出 / 复制 / 手动推送的图片清晰
     return html2canvas(card, {
       backgroundColor: '#ffffff',
-      scale: (typeof dingScale === 'number' && dingScale > 0) ? dingScale : (window.devicePixelRatio > 1 ? 2 : 1.5),
+      scale: window.devicePixelRatio > 1 ? 2 : 1.5,
       ignoreElements: function (el) {
         return !!(el.classList && el.classList.contains('card-tools'));
       },
@@ -2918,7 +2923,7 @@
      每块附「效率 / 平均值 / 中位数」，再连同「统计时间段」一起构成 { period, blocks }。
      口径与页面一致：效率 = 页头「整体」值（勾选按工时加权用 Σ行数 ÷ Σ时长，否则用人均），
      平均值 / 中位数取服务端按「各人总计效率」给出的 stat。
-     手动推送与服务端「定时推送」（无头浏览器在页面内调用 HEMA.dingPayload）都走这里。 */
+     仅「上传到钉钉群」（手动推送）走这里；服务端「定时推送」在服务端自绘，不经过本页。 */
   var DING_LABEL = { '前场合流': '前场', '后场合流': '后场' };   // 推送里的分块短名（其余用原名，如「一体化」）
   function buildDingPayload(scopeKey) {
     var pb = current && current.personByHour;
@@ -2993,9 +2998,6 @@
       throw e;
     });
   }
-
-  // 供服务端无头浏览器（定时推送）在页面内调用：返回本页当前的三块推送载荷
-  HEMA.dingPayload = function () { return buildDingPayload(null); };
 
   function pushDingPivot(scopeKey) {
     notice('正在生成图片并上传到钉钉群…', 'ok');

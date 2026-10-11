@@ -85,6 +85,9 @@ module.exports = {
   // 备用接口 Cookie：与主 Cookie 一起随机先后使用（分摊请求降低风控），失败（鉴权 / 风控）时互相回退
   UMS_COOKIE_BACKUP_KEY: 'umsCookieBackup',
 
+  // 最近一次「Cookie 鉴权失效被删除」的记录 { at, tag }，供页面提示重新同步
+  UMS_COOKIE_AUTH_KEY: 'umsCookieAuth',
+
   // 设置表里保存「最近一次实时获取结果」的键名（首页角标显示 状态 + 距上次获取的时长）
   UMS_LAST_KEY: 'umsLastFetch',
 
@@ -111,12 +114,11 @@ module.exports = {
   DING_SECRET_KEY: 'dingSecret',          // 安全设置「加签」的密钥（SEC 开头）
   DING_PUBLIC_BASE_KEY: 'dingPublicBase', // 公网访问地址（如 https://xl.yjmc.xyz）；留空=按本次请求 Host 推断
 
-  /* ---------- 定时推送（服务端无头浏览器截图后自动发到群） ----------
-     服务端无法自己绘制看板，定时任务用 puppeteer 打开看板页（页面内调 HEMA.dingPayload 截图），
-     再走与手动推送相同的 markdown 链路发到群。需安装 puppeteer（见 server/capture.js）。 */
-  DING_PAGE_URL_KEY: 'dingPageUrl',       // 无头浏览器打开的看板地址；留空=按 PORT / BASE_PATH 推断本机
-  DING_AUTO_KEY: 'dingAuto',              // { enabled }：取数成功后自动截图推送（不再按间隔定时）
+  /* ---------- 定时推送（服务端自绘图片后自动发到群） ----------
+     服务端用 SVG 自绘「人员 × 小时」效率透视表（server/render.js，@resvg/resvg-js，
+     纯 CPU、无需浏览器），再走与手动推送相同的 markdown 链路发到群。 */
+  DING_AUTO_KEY: 'dingAuto',              // { enabled }：取数成功后自动自绘并推送（不再按间隔定时）
   DING_AUTO_STATE_KEY: 'dingAutoState',   // 最近一次自动推送结果 { at, ok, error, reason, count }
-  DING_PUSH_DELAY_MIN: 1,                 // 取数成功后延迟多少分钟才推送（等页面/数据稳定）
+  DING_PUSH_DELAY_MIN: 1,                 // 取数成功后延迟多少分钟才推送（等数据稳定）
   DING_PUSH_MAX_RETRY: 2                  // 推送失败自动重试次数
 };

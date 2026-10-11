@@ -22,7 +22,7 @@ const CFG = require('./config');
 const compute = require('./compute');
 const db = require('./db');
 const build = require('./build');
-const dingCapture = require('./capture');
+const dingRender = require('./render');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -659,6 +659,7 @@ function umsEdgeHit(cfg, st) {
 // nextAt 为排期好的下次执行时间（按整N分点+1分钟的固定网格计算，不依赖执行耗时），
 // cfgInterval 为排期时使用的「设置里的间隔」，用来判断用户改过间隔后是否需要重新排期，
 // edge 记录当天已执行的「时段边界额外取数」（形如 '2026-09-30:end'），避免同一时刻重复触发
+// slot 记录最近执行的常规网格点（形如 '2026-09-30:1026'），避免同一分钟内被 5 秒轮询重复触发
 function umsAutoState() {
   const s = db.getSetting(CFG.UMS_AUTO_STATE_KEY) || {};
   return {
@@ -666,7 +667,7 @@ function umsAutoState() {
     error: s.error || '', records: s.records || 0, added: s.added || 0,
     failures: s.failures || 0, nextMin: s.nextMin || 0,
     nextAt: s.nextAt || null, cfgInterval: s.cfgInterval || 0,
-    edge: s.edge || ''
+    edge: s.edge || '', slot: s.slot || ''
   };
 }
 
@@ -727,6 +728,7 @@ function umsConfigPayload() {
     lastFetch: db.getSetting(CFG.UMS_LAST_KEY) || null,
     progress: umsProgressInfo(),
     cooldown: umsCooldownInfo(),
+    cookieAuth: db.getSetting(CFG.UMS_COOKIE_AUTH_KEY) || null,   // 最近一次鉴权失效被删的 Cookie { at, tag }，供页面提示
     manualLockSec: CFG.UMS_MANUAL_LOCK_SEC,   // 自动获取点前后多少秒内拒绝手动获取（前端据此提前提示）
     // 最近一次手动获取结果的轻量摘要（完整结果由 /api/ums/result 领取，避免轮询反复传大对象）
     manual: UMS_MANUAL ? { at: UMS_MANUAL.at, ok: UMS_MANUAL.ok, range: UMS_MANUAL.range } : null
@@ -756,6 +758,19 @@ function umsThrottleError(msg) {
   const e = new Error(msg);
   e.umsThrottle = true;
   return e;
+}
+
+/* 鉴权失效（登录态过期）时删除那份 Cookie：登录态已过期，留着只会反复撞接口。
+   只删「已保存」的主 / 备用（本次若用的是页面临时粘贴的 Cookie，不动已存值，也就返回 ''）。
+   同时记一条状态（UMS_COOKIE_AUTH_KEY）供页面弹提示；返回被删除的槽位名（'主' / '备用' / ''）。 */
+function umsDropAuthCookie(tag, cookie) {
+  const isBackup = tag === '备用';
+  const key = isBackup ? CFG.UMS_COOKIE_BACKUP_KEY : CFG.UMS_COOKIE_KEY;
+  const stored = String(db.getSetting(key) || '').trim();   // 直读库：来自环境变量的 Cookie 不删
+  if (!stored || stored !== cookie) return '';
+  db.setSetting(key, '');
+  db.setSetting(CFG.UMS_COOKIE_AUTH_KEY, { at: new Date().toISOString(), tag: tag });
+  return tag;
 }
 
 // 逐页拉取直到取满 totalNum；incremental 时遇到「整页单号都已入库」提前结束
@@ -894,8 +909,14 @@ async function umsRunFetch(startDate, endDate, incremental, candidates) {
     } catch (e) {
       lastErr = e;
       const retryable = e.umsAuth || e.umsThrottle;
-      if (!retryable || i === list.length - 1) throw e;   // 不可回退 / 已无更多候选：抛出
-      logWarn('[取数] ' + tag + ' Cookie ' + (e.umsAuth ? '鉴权失败' : '被风控') + '，改用下一份 Cookie 重试');
+      // 鉴权失效（登录态过期）：直接删除这份 Cookie，避免之后反复拿它去撞接口
+      const dropped = e.umsAuth ? umsDropAuthCookie(tag, it.cookie) : '';
+      if (!retryable || i === list.length - 1) {
+        if (dropped) logWarn('[取数] ' + dropped + ' Cookie 鉴权失效，已自动删除。' + UMS_COOKIE_HINT);
+        throw e;                                          // 不可回退 / 已无更多候选：抛出
+      }
+      logWarn('[取数] ' + tag + ' Cookie ' + (e.umsAuth ? '鉴权失败' : '被风控') +
+        (dropped ? '（已删除失效的 ' + dropped + ' Cookie）' : '') + '，改用下一份 Cookie 重试');
     }
   }
   throw lastErr;
@@ -1055,8 +1076,10 @@ router.get('/api/ums/result', (req, res) => {
 /* 按间隔计算下一个触发时刻（ms）：整N分点 + 1分钟，如间隔60分 → 07:01、08:01、…、22:01；
    间隔30分 → 07:01、07:31、08:01、08:31、…。不受上次执行时间/耗时影响，也不会漂移。
    若已过时段内最后一个网格点 → 明天第一跳；未设时段 → 全天按网格算（起始 00:01）。
-   返回 0 表示可立即执行（当前恰好落在网格点上）。 */
-function umsAutoNextAt(auto, st) {
+   返回 0 表示可立即执行（当前恰好落在网格点上）。
+   futureOnly=true 时忽略「当前所在网格点」，直接给下一个网格点（用于执行后回写 nextAt，
+   以免显示成「下次 = 刚才那一刻」）。 */
+function umsAutoNextAt(auto, st, futureOnly) {
   const iv = Math.max(1, Math.round(Number(auto.intervalMin) || 30));
   const now = new Date(Date.now() + 8 * 3600 * 1000);
   const sh = auto.timeStart || '00:00';
@@ -1071,7 +1094,7 @@ function umsAutoNextAt(auto, st) {
     // 在时段内逐个网格点找第一个 ≥ 当前分钟+1 的（+1 避免重复触发当前分钟）
     for (let m = startMin; m <= endMin; m += iv) {
       const target = m + 1;   // 整N分点 + 1分钟
-      if (target >= curMin) return target;
+      if (futureOnly ? target > curMin : target >= curMin) return target;
     }
     return 0;   // 时段内已无网格点（今天跑完）
   }
@@ -1086,6 +1109,26 @@ function umsAutoNextAt(auto, st) {
   return Date.now() + ((startMin + 1 + 24 * 60 - curMin) * 60 * 1000 - now.getUTCSeconds() * 1000);
 }
 
+/* 当前分钟是否正好落在常规网格点上（整N分点 + 1分钟）。是则返回该点的唯一标识
+   （东八区「日期:分钟数」），否则返回 ''。
+   轮询是每 5 秒一次、而网格点按「分钟」命中，整个 1 分钟内会反复命中同一网格点；
+   用它配合 umsAutoState.slot 去重，保证同一网格点只执行一次。 */
+function umsSlotKey(auto) {
+  const iv = Math.max(1, Math.round(Number(auto.intervalMin) || 30));
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const sh = auto.timeStart || '00:00';
+  const eh = auto.timeEnd   || '24:00';
+  const [sH, sM] = sh.split(':').map(Number);
+  const [eH, eM] = eh.split(':').map(Number);
+  const startMin = sH * 60 + sM;
+  const endMin   = eH * 60 + eM;
+  const curMin   = now.getUTCHours() * 60 + now.getUTCMinutes();
+  for (let m = startMin; m <= endMin; m += iv) {
+    if (m + 1 === curMin) return now.toISOString().slice(0, 10) + ':' + curMin;
+  }
+  return '';
+}
+
 async function umsAutoTick() {
   if (umsBusy) return;
   const auto = umsAutoCfg();
@@ -1094,9 +1137,13 @@ async function umsAutoTick() {
   if (!cookies.length) return;
   const st = umsAutoState();
   const edge = umsEdgeHit(auto, st);      // 时段「开始 / 结束」时刻：额外强制取数一次
+  const slot = umsSlotKey(auto);          // 当前是否正好落在常规网格点（非时段边界）
   if (!edge) {
     // 不在执行时段内：跳过（不更新 at，到点后自然会触发）
     if (!umsInTimeWindow(auto)) return;
+    // 轮询每 5 秒一次、网格点却按「分钟」命中：整个 1 分钟内会反复命中同一网格点，
+    // 故用 slot 去重，保证同一网格点只执行一次
+    if (slot && slot === (st.slot || '')) return;
     if (Date.now() < umsAutoNextAt(auto, st)) return;   // 未到排期时间
   }
   // 注意：这里不再看「取数冷却」，自动获取的排期只由 nextAt 决定，不受手动 / 脚本取数影响
@@ -1118,14 +1165,13 @@ async function umsAutoTick() {
   try {
     const out = await umsRunFetch(range.startDate, range.endDate, true, cookies);
     const at = new Date();
-    // 重新算下一个网格点（不依赖执行耗时，不受上次执行时间影响）
-    const nextAtMs = umsAutoNextAt(auto, st);
-    const nextAt = nextAtMs === 0 ? new Date() : new Date(nextAtMs);
+    // 回写下个网格点（futureOnly：排除当前所在网格点，避免显示成「下次 = 刚才」）
+    const nextAt = new Date(umsAutoNextAt(auto, st, true));
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
       at: at.toISOString(), ok: true, error: '',
       records: out.meta.recordCount, added: out.added || 0,
       failures: 0, nextMin: auto.intervalMin, cfgInterval: auto.intervalMin,
-      nextAt: nextAt.toISOString(), edge: edgeKey
+      nextAt: nextAt.toISOString(), edge: edgeKey, slot: slot || (st.slot || '')
     });
     logInfo('[自动获取] ' + day + badge + ' 完成：明细 ' + out.meta.recordCount + ' 条，新增 ' + (out.added || 0) +
       ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
@@ -1134,13 +1180,12 @@ async function umsAutoTick() {
   } catch (e) {
     const nf = fails + 1;
     // 失败同样回到下一个网格点（不再累积退避：固定网格本身足够分散请求）
-    const nextAtMs = umsAutoNextAt(auto, st);
-    const nextAt = nextAtMs === 0 ? new Date() : new Date(nextAtMs);
+    const nextAt = new Date(umsAutoNextAt(auto, st, true));
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
       at: new Date().toISOString(), ok: false,
       error: String(e.message || e).slice(0, 160), records: 0, added: 0,
       failures: nf, nextMin: auto.intervalMin, cfgInterval: auto.intervalMin,
-      nextAt: nextAt.toISOString(), edge: edgeKey
+      nextAt: nextAt.toISOString(), edge: edgeKey, slot: slot || (st.slot || '')
     });
     logWarn('[自动获取] ' + day + badge + ' 失败（连续 ' + nf + ' 次，' +
       '下次 ' + clockOf(nextAt) + '）：' + (e.message || e));
@@ -1149,7 +1194,9 @@ async function umsAutoTick() {
   }
 }
 
-setInterval(umsAutoTick, 5 * 1000);   // 5 秒一检查，保证「每 N 分钟」到点后尽快执行
+// 5 秒一检查，保证「每 N 分钟」到点后尽快执行。
+// unref：定时器不阻止进程退出（生产由 HTTP 服务保活；被 require 的测试进程能正常结束）
+setInterval(umsAutoTick, 5 * 1000).unref();
 
 // 读取接口配置：Cookie 状态（不回原文）、每页条数、自动获取设置与最近执行结果
 router.get('/api/ums/config', (req, res) => {
@@ -1271,26 +1318,18 @@ function dingConfigPayload() {
     webhookSet: !!wh, webhookMask: dingMask(wh),
     secretSet: !!sec, secretMask: dingMask(sec),
     publicBase: dingPublicBase(),
-    pageUrl: String(db.getSetting(CFG.DING_PAGE_URL_KEY) || '').trim(),   // 已保存的原始值（可空）
-    pageUrlEffective: dingPageUrl(),                                       // 实际会用的地址（留空时为推断值）
     auto: Object.assign(dingAutoCfg(), {
       state: dingAutoState(),
       delayMin: CFG.DING_PUSH_DELAY_MIN,     // 取数成功后延迟多少分钟推送
       maxRetry: CFG.DING_PUSH_MAX_RETRY      // 失败重试次数
     }),
-    // 定时推送依赖无头浏览器：未安装 puppeteer 时前端给出提示
-    captureOk: dingCapture.available(),
-    captureError: dingCapture.unavailableReason()
+    // 服务端自绘图片依赖 @resvg/resvg-js：未安装时前端给出提示
+    renderOk: dingRender.available(),
+    renderError: dingRender.unavailableReason()
   };
 }
 
-/* ---------- 定时推送：看板地址与触发（取数成功后延迟自动推送） ---------- */
-
-// 无头浏览器打开的看板地址；留空 = 按本机端口 / 子路径推断（服务端自访问）
-function dingPageUrl() {
-  const v = String(db.getSetting(CFG.DING_PAGE_URL_KEY) || '').trim();
-  return v || ('http://127.0.0.1:' + PORT + BASE_PATH + '/');
-}
+/* ---------- 定时推送：触发（取数成功后延迟自动推送） ---------- */
 
 // 定时推送设置：只有一个开关（触发时机 = 取数成功后延迟 DING_PUSH_DELAY_MIN 分钟）
 function dingAutoCfg() {
@@ -1317,7 +1356,7 @@ function afterFetchSuccess(out, label) {
 function scheduleDingPush(reason) {
   if (!dingAutoCfg().enabled) return;                       // 未开启定时推送
   if (!dingWebhook()) { logInfo('[钉钉] 推送跳过：未配置 Webhook（' + reason + '）'); return; }
-  if (!dingCapture.available()) { logWarn('[钉钉] 推送跳过：' + dingCapture.unavailableReason()); return; }
+  if (!dingRender.available()) { logWarn('[钉钉] 推送跳过：' + dingRender.unavailableReason()); return; }
   setDingPushTimer(function () { runDingPush(reason, 0); }, CFG.DING_PUSH_DELAY_MIN * 60 * 1000);
   logInfo('[钉钉] ' + reason + '，' + CFG.DING_PUSH_DELAY_MIN + ' 分钟后自动推送');
 }
@@ -1343,11 +1382,9 @@ function dingAutoState() {
   };
 }
 
-// 推送时图片要用的公网基址：优先设置里的固定域名，否则取看板地址的来源（仅供本机 / 内网自测）
+// 推送时图片要用的公网基址：设置里的固定域名（必填，否则钉钉客户端拉不到图片）
 function dingPushBase() {
-  const b = dingPublicBase();
-  if (b) return b;
-  try { return new URL(dingPageUrl()).origin; } catch (e) { return ''; }
+  return dingPublicBase();
 }
 
 /* 加签（机器人安全设置选「加签」时必填）：
@@ -1381,12 +1418,7 @@ router.post('/api/ding/config', express.json({ limit: '16kb' }), (req, res) => {
   if (typeof b.publicBase === 'string') {
     const v = b.publicBase.trim().replace(/\/+$/, '');
     db.setSetting(CFG.DING_PUBLIC_BASE_KEY, v);
-    logInfo('[钉钉] 公网地址 ' + (v || '（已清除，按请求 Host 推断）'));
-  }
-  if (typeof b.pageUrl === 'string') {
-    const v = b.pageUrl.trim();
-    db.setSetting(CFG.DING_PAGE_URL_KEY, v);
-    logInfo('[钉钉] 定时推送看板地址 ' + (v || '（已清除，用本机默认）'));
+    logInfo('[钉钉] 公网地址 ' + (v || '（已清除，自动推送将无法推送：钉钉拉不到图片）'));
   }
   if (b.auto && typeof b.auto === 'object') {
     db.setSetting(CFG.DING_AUTO_KEY, { enabled: !!b.auto.enabled });
@@ -1502,14 +1534,15 @@ router.post('/api/ding/push', express.json({ limit: '48mb' }), async (req, res) 
   }
 });
 
-/* ---------- 定时推送：服务端无头浏览器截图后自动发到群 ----------
-   看板图只能在浏览器里出，故用 puppeteer 打开看板（默认本机地址）、
-   在页面内调 HEMA.dingPayload() 取回三块图与统计，再走与手动推送相同的 markdown 链路。
+/* ---------- 定时推送：服务端自绘图片后自动发到群 ----------
+   看板图由服务端用 SVG 自绘（server/render.js，@resvg/resvg-js），不需要浏览器；
+   数据取数据库里最新的数据集 payload（含 personByHour / meta.period），
+   再走与手动推送相同的 markdown 链路。
    触发时机：取数成功后延迟 DING_PUSH_DELAY_MIN 分钟（见 scheduleDingPush），失败自动重试。 */
 
 let dingAutoRunning = false;
 
-// 执行一次「无头截图 + 推送」；reason 仅用于日志与状态展示。返回是否成功（供重试判断）
+// 执行一次「自绘图片 + 推送」；reason 仅用于日志与状态展示。返回是否成功（供重试判断）
 async function dingRunAuto(reason) {
   if (dingAutoRunning) { logWarn('[钉钉] 定时推送：上一次仍在进行，跳过本次（' + reason + '）'); return false; }
   const webhook = dingWebhook();
@@ -1517,13 +1550,12 @@ async function dingRunAuto(reason) {
   dingAutoRunning = true;
   const t0 = Date.now();
   try {
-    const pageUrl = dingPageUrl();
-    logInfo('[钉钉] 定时推送开始（' + reason + '）：无头浏览器打开看板 ' + pageUrl + ' 截图…');
-    const payload = await dingCapture.capturePivot(pageUrl, {
-      log: function (m) { logInfo('[钉钉] ' + m); }
-    });
+    const ds = db.latest();
+    if (!ds) throw new Error('暂无数据集，无法推送');
     const base = dingPushBase();
     if (!base) throw new Error('未配置公网地址，钉钉无法访问图片链接');
+    logInfo('[钉钉] 定时推送开始（' + reason + '）：服务端自绘透视表（数据集 #' + ds.id + '）…');
+    const payload = dingRender.renderPivot(ds);
     const out = dingBuildBlocksText(payload.blocks || [], payload.period, base);
     const r = await dingPostMarkdown(webhook, '效率透视表', out.text);
     if (!r.ok) throw new Error(r.error);
@@ -1549,7 +1581,7 @@ async function dingRunAuto(reason) {
 router.post('/api/ding/auto/run', (req, res) => {
   if (dingAutoRunning) return res.status(409).json({ error: '已有定时推送在执行中，请稍候' });
   if (!dingWebhook()) return res.status(400).json({ error: '未配置钉钉机器人 Webhook' });
-  if (!dingCapture.available()) return res.status(400).json({ error: dingCapture.unavailableReason() });
+  if (!dingRender.available()) return res.status(400).json({ error: dingRender.unavailableReason() });
   dingRunAuto('手动触发');
   res.status(202).json({ started: true });
 });
@@ -1619,6 +1651,7 @@ if (require.main === module) {
     logInfo('[钉钉] 图片输出目录 ' + DING_DIR + '（可写：' + (function () {
       try { fs.accessSync(DING_DIR, fs.constants.W_OK); return '是'; } catch (e) { return '否 - ' + (e.message || e); }
     })() + '），URL 前缀 ' + DING_URL_PREFIX + '，公网地址 ' + (dingPublicBase() || '（未配置，按请求 Host 推断）'));
+    logInfo('[钉钉] 自绘字体 ' + (dingRender.available() ? dingRender.fontInfo() : '（不可用：' + dingRender.unavailableReason() + '）'));
     logInfo('历史数据集数量：' + db.count());
     const auto = umsAutoCfg();
     logInfo('自动获取：' + (auto.enabled ? '已开启（每 ' + auto.intervalMin + ' 分钟，时段 ' +

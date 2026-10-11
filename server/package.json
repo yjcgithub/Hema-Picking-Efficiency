@@ -13,8 +13,8 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "express": "^4.21.2",
-    "puppeteer": "^24.15.0",
     "xlsx": "^0.18.5"
   }
 }

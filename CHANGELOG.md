@@ -2,16 +2,45 @@
 
 本文件记录本项目的功能变更。结构参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 2026-10-12
+
+### 变更
+
+- **自绘图片向网页样式靠齐**：`server/render.js` 的分块改为按 `style.css` 的「效率透视分块」样式绘制 —— 标题行（▼ 折叠箭头 + 分块色点 + 作业类型 + 规模小字 + 「平均 / 中位数」图例色点）、表格圆角外框（`border-radius:10px` + 裁剪）、表头浅灰底（`#f8fafc` / 字号 13 / `#475569`）、首列吸左分隔线、`小计` 行浅灰底加粗、**平均值 / 中位数最接近的行加浅蓝 `#93c5fd` / 浅紫 `#d8b4fe` 边框**并在「总计」列右上角浮出小标注（对应 `.stat-badge`）、折线图行改为 **平滑曲线 + 10% 面积填充 + 橙色虚线达标线（含「达标线 N」标注）+ 时间轴刻度**（对应 ECharts `smooth/areaStyle/markLine`）、表格下方补回口径说明 `.note`。配色改用页面 CSS 变量（`--txt/--muted/--line-mid` 等），并新增按文本宽度估算的画布宽度/折行，使表格像页面一样铺满卡片宽度。
+- 字体族改为按前端 `body` 的顺序给出备选列表（`Noto Sans SC, PingFang SC, Microsoft YaHei, Hiragino Sans GB, WenQuanYi Micro Hei, sans-serif`），提升容器内命中中文字体的概率。
+- **定时推送改用「服务端自绘图片」，移除无头浏览器**：原来用 `puppeteer` 打开看板截图，小服务器上启动慢（实测启动一次要 70+ 秒）、吃内存。现改为服务端直接拿最新数据集的 `personByHour` 数据拼 **SVG**、用 **`@resvg/resvg-js`** 光栅化成 PNG（纯 CPU，无需 Chromium）。
+- **移除 `puppeteer` 依赖与 `server/capture.js`**，并去掉「看板地址」设置项（`dingPageUrl`）、`/api/ding/config` 的 `pageUrl`/`pageUrlEffective`/`captureOk`/`captureError` 字段、前端 `HEMA.dingPayload`、`HEMA._current` 与 `HEMA_DING_SCALE`（无头截图专用）等连带逻辑；`/api/ding/config` 改为返回 `renderOk` / `renderError`。
+- **新增依赖 `@resvg/resvg-js`**（含预编译二进制，`npm install` 即用）。
+- 新增环境变量：`HEMA_SVG_FONT_FILE` / `HEMA_SVG_FONT_DIR`（自绘用字体文件 / 目录）、`HEMA_SVG_FONT`（默认字体名）、`HEMA_SVG_SCALE`（出图倍率，默认 2）。容器内缺中文字体时装系统字体包（如 `fonts-wqy-microhei`）即可。
+
+### 修复
+
+- 自动推送在「当天还没数据」时不再报「看板无数据」：改为判断最新数据集是否有透视数据，无数据集才跳过。
+- **自绘字体健壮性**：`HEMA_SVG_FONT_FILE` / `HEMA_SVG_FONT_DIR` 只传真实存在的路径（避免 resvg 因路径不存在报错）；字体路径按系统分隔符拆分（Linux 为 `:`，此前文档误写为 `;`）。新增启动日志 `[钉钉] 自绘字体 …`，打印默认字体名、来源以及**指定路径是否存在**（容器重启常把运行时装的字体清掉，便于自查）。README / `.env` 补充说明：容器重启会丢失 `apt` 装的字体，建议把字体放进挂载卷并用 `HEMA_SVG_FONT_FILE` 指向。
+- **自绘折线图的达标线消失**：y 量程此前只按数据收紧，当达标值（如后场 260）高于数据最大值时，橙色虚线落到量程外被裁掉。改为把达标线一并纳入量程，保证始终可见。
+
 ## 2026-10-11
 
 ### 新增
 
 - **推送消息关键值着色**：钉钉 markdown 里的关键值用 `<font color="#RRGGBB">…</font>` 着色（统计时间段=蓝、效率=绿、平均值=橙、中位数=紫），提升群消息可读性。
 
+### 变更
+
+- **Cookie 鉴权失效即删除并提示**：取数时若某份 Cookie 返回鉴权失效（登录态过期，HTTP 401/403 或接口非 JSON），直接**删除该份已保存的 Cookie**（主 / 备用对应槽位），不再留着反复撞接口；同时写一条状态（`UMS_COOKIE_AUTH_KEY`）经 `/api/ums/config` 的 `cookieAuth` 下发，页面弹一次提示引导重新同步。仅当本次失败的正是「已保存」的那份才删除；页面临时粘贴、未保存的 Cookie 不受影响。
+
 ### 修复
 
+- **自动获取在网格点分钟内被反复触发**：轮询每 5 秒一次、而网格点按「分钟」命中，原判断「落在网格点即执行」导致同一分钟内每 5 秒各触发一次（日志里 16:06 连续跑了 10 多次）。改为在 `umsAutoState` 记录已执行的网格点 `slot`（东八区「日期:分钟数」），同一网格点只执行一次；执行后回写 `nextAt` 时排除当前网格点（`futureOnly`），日志显示为真正的下次时刻（如 17:06）而非「刚才那一刻」。
 - **自动推送分块顺序 / 图文错位**：页面按固定顺序（前场 / 后场 / 一体化）渲染分块，而服务端 `personByHour.groups` 按效率降序，`capture.js` 原按下标逐块截图 → 出现「后场 / 一体化 / 前场」的错序，且标签与截图不是同一块。改为按 DOM 实际顺序取块，用各块标题 `data-toggle`（作业类型）反查对应数据，顺序与名称 / 数值 / 截图一致。
 - **推送图片显示为裂图（PNG 损坏）**：`puppeteer` v24 的 `screenshot()` 默认返回 `Uint8Array` 而非 `Buffer`，原代码 `buf.toString('base64')` 对 `Uint8Array` 会退化为逗号分隔的数字串，落盘后字节非法 → 浏览器显示裂图。改为先 `Buffer.from(buf)` 再转 base64。
+- **`npm test` 卡住不退出**：`umsAutoTick` 的 `setInterval` 未 `unref`，被 `require` 的测试进程（含 `static.test.js` 里 `execFileSync` 起的子进程）会一直挂着。改为 `.unref()`（生产由 HTTP 服务保活，不受影响）。
+- **无头截图注入字体时报错**：`evaluateOnNewDocument` 在 `document_start` 执行，此时 `document.head` 可能为 `null`，`document.head.appendChild(...)` 抛「Cannot read properties of null (reading 'appendChild')」。改为兜底 `document.head || document.documentElement`。
+- 诊断信息增强：页面 console 错误补上其资源 URL（`Failed to load resource … 404` 正文不带地址），便于定位是哪个静态资源 404。
+
+### 测试
+
+- 新增 `server/test/ums-cookie.test.js`：用**本机 mock 接口**（`HEMA_UMS_URL` 指向本地随机端口，不联网）+ 独立临时库，验证「Cookie 鉴权失效 → 删除已存的那份并记录 `cookieAuth`」「主 / 备用都失效 → 两份都删」「临时粘贴未保存的 Cookie 失效 → 不动已存 Cookie」三条路径。
 
 ## 2026-10-10
 

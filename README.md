@@ -101,7 +101,7 @@ npm test
 | 表格排序 | 所有表格表头均可点击切换升 / 降序（空值恒排在末尾） |
 | 卡片折叠 | 超时数统计、透视分块可折叠 / 展开 |
 | 内容导出 | 卡片支持「导出为图片 / 复制为图片」（html2canvas），透视卡片可按分类选择导出范围（**「超时数统计」卡片不提供导出**）；截图时会临时关闭克隆体的入场动画，并在宽表卡片被临时加宽后让卡内 ECharts 按新宽度重画，避免内容缺失 / 大片留白 |
-| 钉钉推送 | ① 手动：「效率透视表」卡片「上传到钉钉群」按**范围菜单**选分块发群；② **定时**：服务端无头浏览器（puppeteer）按设置的时间点自动截图发群，不用浏览器开着。消息按「统计时间段 + 各块（图片 + 效率 / 平均值 / 中位数）」组织（详见[钉钉群推送](#钉钉群推送)） |
+| 钉钉推送 | ① 手动：「效率透视表」卡片「上传到钉钉群」按**范围菜单**选分块发群；② **定时**：服务端**自绘图片**（SVG→PNG，无需浏览器）后自动发群，不用浏览器开着。消息按「统计时间段 + 各块（图片 + 效率 / 平均值 / 中位数）」组织（详见[钉钉群推送](#钉钉群推送)） |
 | 手机适配 | 纯 CSS 响应式（1100 / 900 / 720 / 640px 断点）：窄屏下宽表格改为横向滑动、弹窗铺满全屏、表单字段纵向铺满、图表降高、KPI 改两列、热力图收紧边距；顶栏与桌面一致（标题行随滚动移出、信息条吸顶常显）；**手机端信息条压成两行**（数据来源过长时省略、隐藏「访问方式」）；**手机用 IP 访问时自动跳转到域名**（IP 为 http 非安全上下文，移动端能力受限）；输入框字号 16px 以避免 iOS 聚焦缩放 |
 | 分区设置 | 维护「拣货分区 → 前后场分区（作业类型）」映射，支持「忽略（排除统计）」，保存后自动重算全部历史数据集 |
 | 数据管理 | 顶栏「数据管理」弹窗：切换查看、删除单条、批量删除、清空 |
@@ -116,7 +116,7 @@ Hema-Picking-Efficiency/
 │   ├── index.js                  # HTTP 入口：路由、CORS、路径归一化、UMS 取数与自动获取、钉钉推送、静态托管与缓存头
 │   ├── build.js                  # 静态资源指纹构建：web/ → dist/（内容哈希 + 引用改写 + manifest）
 │   ├── compute.js                # 计算层：xlsx / UMS 解析 + 全部统计口径（唯一口径实现）
-│   ├── capture.js                # 定时推送用：无头浏览器（puppeteer）打开看板截图（可选依赖）
+│   ├── render.js                 # 定时推送用：服务端自绘透视表 SVG → PNG（@resvg/resvg-js，无需浏览器）
 │   ├── db.js                     # 存储层：SQLite（datasets / settings）
 │   ├── config.js                 # 配置层：口径参数、默认前后场映射、UMS 接口与防风控常量
 │   ├── package.json              # 依赖与脚本（start / build / test）
@@ -152,7 +152,7 @@ Hema-Picking-Efficiency/
 | 层 | 选型 |
 |----|------|
 | 运行环境 | Node.js **≥ 22.5.0**（依赖内置 `node:sqlite`，免原生编译） |
-| 后端 | Express 4 + `node:sqlite` + SheetJS `xlsx`；定时推送用 `puppeteer`（无头浏览器截图，可选依赖） |
+| 后端 | Express 4 + `node:sqlite` + SheetJS `xlsx`；定时推送用 `@resvg/resvg-js` 自绘 PNG（纯 CPU，无需浏览器） |
 | 前端 | 原生 JS + CSS（`HEMA` 全局命名空间 + IIFE），无框架、无打包；纯 CSS 响应式，兼顾手机 |
 | 图表 / 截图 | ECharts 5.5.1、html2canvas 1.4.1（均通过 CDN 引入） |
 | 构建 | `server/build.js`：`web/` → `dist/`，内容哈希命名 + HTML 引用改写 |
@@ -175,8 +175,10 @@ Hema-Picking-Efficiency/
 | `HEMA_STATIC` | `auto` | 静态资源托管方式，见下表 |
 | `STATIC_DIR` / `HEMA_WEB_DIR` | 空 | 指定前端目录绝对路径（优先级最高，用于前后端分离部署） |
 | `HEMA_UMS_URL` | 盒马 UMS 接口地址 | 覆盖实时取数接口地址（本地模拟 / 联调时指向假接口） |
-| `HEMA_CHROME_PATH` | 空 | 定时推送用的 Chromium 可执行文件路径（容器内自装 Chromium 时指定；留空用 puppeteer 自带浏览器） |
-| `HEMA_DING_DIR` | `server/data/ding` | 钉钉推送截图的落盘目录。可指向 nginx 站点目录（如 `/1Panel/1panel/www/sites/xl/index/ding`）由 nginx 直接静态托管 |
+| `HEMA_SVG_FONT_FILE` / `HEMA_SVG_FONT_DIR` | 空 | 自绘图片用的字体文件 / 目录（多个用系统路径分隔符，Linux 为 `:`）。容器内缺中文字体时指定（或装系统字体包，如 `fonts-wqy-microhei`）；**容器重启会丢失运行时 apt 安装的字体**，建议把字体放进挂载卷并用这里指定 |
+| `HEMA_SVG_FONT` | `Noto Sans SC` | 自绘图片的默认字体名 |
+| `HEMA_SVG_SCALE` | `2` | 自绘图片的出图倍率（越大越清晰也越占内存） |
+| `HEMA_DING_DIR` | `server/data/ding` | 钉钉推送图片的落盘目录。可指向 nginx 站点目录（如 `/1Panel/1panel/www/sites/xl/index/ding`）由 nginx 直接静态托管 |
 | `HEMA_DING_URL_PREFIX` | `<BASE_PATH>/api/ding/img` | 图片 URL 的路径前缀（拼在「公网地址」之后）。交给 nginx 托管时设为 `/ding` |
 
 `HEMA_STATIC` 取值：
@@ -277,10 +279,10 @@ Hema-Picking-Efficiency/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/ding/config` | 读取钉钉配置：`{ webhookSet, webhookMask, secretSet, secretMask, publicBase, pageUrl, pageUrlEffective, auto: { enabled, intervalMin, timeStart, timeEnd, state }, captureOk, captureError }`（Webhook / 密钥只回**掩码**，不回明文；`captureOk` = 无头浏览器可用） |
-| POST | `/api/ding/config` | 保存配置：`{ webhook?, secret?, publicBase?, pageUrl?, auto?: { enabled, intervalMin, timeStart, timeEnd } }`（传空字符串清除；Webhook / 密钥留空视为不修改） |
-| POST | `/api/ding/push` | 推送截图到群。两种入参：**结构化**（效率透视表）`{ title?, period?, blocks: [{ name, image, eff, avg, median }] }` → 输出「统计时间段 + 每块（图 + 效率 / 平均值 / 中位数）」；**单图**（测试推送）`{ image, title? }`。图片按内容哈希落盘 `data/ding/`，拼公网 URL 后**加签**发 markdown；返回 `{ ok, urls[], bytes }` |
-| POST | `/api/ding/auto/run` | **定时推送**立即执行一次：服务端无头浏览器打开看板截图后发群，后台跑，返回 `202 { started }`；结果见 `/api/ding/config` 的 `auto.state`。已有任务 409、未配 Webhook / 未装 puppeteer 400 |
+| GET | `/api/ding/config` | 读取钉钉配置：`{ webhookSet, webhookMask, secretSet, secretMask, publicBase, auto: { enabled, state }, renderOk, renderError }`（Webhook / 密钥只回**掩码**，不回明文；`renderOk` = 自绘依赖 `@resvg/resvg-js` 可用） |
+| POST | `/api/ding/config` | 保存配置：`{ webhook?, secret?, publicBase?, auto?: { enabled } }`（传空字符串清除；Webhook / 密钥留空视为不修改） |
+| POST | `/api/ding/push` | 推送图片到群。两种入参：**结构化**（效率透视表）`{ title?, period?, blocks: [{ name, image, eff, avg, median }] }` → 输出「统计时间段 + 每块（图 + 效率 / 平均值 / 中位数）」；**单图**（测试推送）`{ image, title? }`。图片按内容哈希落盘 `data/ding/`，拼公网 URL 后**加签**发 markdown；返回 `{ ok, urls[], bytes }` |
+| POST | `/api/ding/auto/run` | **定时推送**立即执行一次：服务端自绘「人员 × 小时」表（SVG→PNG）后发群，后台跑，返回 `202 { started }`；结果见 `/api/ding/config` 的 `auto.state`。已有任务 409、未配 Webhook / 未装 `@resvg/resvg-js` 400 |
 | GET | `/api/ding/img/:file` | 已推送图片的**公开只读**访问（供钉钉客户端拉取）；文件名限定为「16 位十六进制 + `.png` / `.jpg`」 |
 
 ---
@@ -411,9 +413,9 @@ Hema-Picking-Efficiency/
 
 服务端日志记录 `[钉钉] 已推送「效率透视表」（N 块，共 xKB）到群` / `[钉钉] 推送失败：<errcode>`。
 
-### 定时推送（服务端无头浏览器截图）
+### 定时推送（服务端自绘图片）
 
-看板图只能在浏览器里出，服务端无法自己绘制，因此定时推送用 **puppeteer 无头浏览器**打开看板页、在页面内调用 `HEMA.dingPayload()` 取回三块图与统计，再走与手动推送**同一套 markdown 链路**发到群 —— 不用浏览器开着。
+服务端用 **SVG 自绘**「人员 × 小时」效率透视表（`server/render.js` + `@resvg/resvg-js`，纯 CPU、**不需要浏览器 / Chromium**），再走与手动推送**同一套 markdown 链路**发到群 —— 不用浏览器开着，也不吃无头浏览器的内存。
 
 **配置**（顶栏「钉钉推送」→「定时推送」）：
 
@@ -421,17 +423,18 @@ Hema-Picking-Efficiency/
 |----|------|------|
 | 启用 | `dingAuto.enabled` | 开关 |
 | 推送时机 | `DING_PUSH_DELAY_MIN` / `DING_PUSH_MAX_RETRY`（`server/config.js`） | **取数成功后延迟 1 分钟推送**；失败自动重试 2 次 |
-| 看板地址 | `dingPageUrl` | 无头浏览器打开的地址；留空 = 按本机 `PORT` / `BASE_PATH` 推断（`http://127.0.0.1:<端口><子路径>/`） |
 
 **触发规则**：**自动获取** 成功且有新增/覆盖时，排一次「延迟 1 分钟」的推送；期间若又触发，则以后一次排期为准（合并为一次）。无新增的取数不触发；**手动获取、脚本同步、上传 xlsx 均不触发**（手动推送用卡片右上角「上传到钉钉群」或「立即执行一次」）。
 
-**依赖**：需在 `server` 目录执行 `npm install`（`puppeteer` 会自动下载 Chromium）。容器内自装 Chromium 时用环境变量 **`HEMA_CHROME_PATH`** 指定可执行文件路径；未安装 puppeteer 时页面会提示，定时推送与「立即执行一次」均跳过。
+**依赖**：在 `server` 目录执行 `npm install` 装 `@resvg/resvg-js`（含预编译二进制，无需浏览器）。未安装时页面会提示，定时推送与「立即执行一次」均跳过。
 
-**失败重试**：推送（截图或发群）失败会每 1 分钟重试一次，最多 2 次；仍失败则放弃并记日志。
+**中文字体**：resvg 默认加载系统字体；容器内若没有中文字体会显示成方框，装一个系统字体包即可（如 `apt-get install -y fonts-wqy-microhei`），或用环境变量 **`HEMA_SVG_FONT_FILE`** / **`HEMA_SVG_FONT_DIR`** 指定字体文件 / 目录，**`HEMA_SVG_FONT`** 指定默认字体名，**`HEMA_SVG_SCALE`** 指定出图倍率（默认 2）。
 
-**立即执行一次**：弹窗里的按钮，触发一次「截图 + 发群」（后台跑，前端轮询状态显示结果，不受上述触发规则限制）。日志：`[钉钉] 定时推送开始 / 完成 / 失败`。
+**失败重试**：推送（出图或发群）失败会每 1 分钟重试一次，最多 2 次；仍失败则放弃并记日志。
 
-> 定时推送要求**公网地址**已配置（图片 URL 要能被钉钉访问）；且看板当天需有数据，无数据会跳过并记日志。
+**立即执行一次**：弹窗里的按钮，触发一次「自绘图片 + 发群」（后台跑，前端轮询状态显示结果，不受上述触发规则限制）。日志：`[钉钉] 定时推送开始 / 完成 / 失败`。
+
+> 定时推送要求**公网地址**已配置（图片 URL 要能被钉钉访问）；数据取数据库里**最新的数据集**，无数据集会跳过并记日志。
 
 **图片落盘位置（交给 nginx 静态托管）**：默认截图落在 `server/data/ding/`，由本服务的只读路由 `/api/ding/img/<file>` 对外提供。若希望由 nginx 直接托管（减少一次反代），可把截图目录指到站点目录并改 URL 前缀：
 
