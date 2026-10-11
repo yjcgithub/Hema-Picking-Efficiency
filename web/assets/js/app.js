@@ -2126,10 +2126,14 @@
           var st = (j && j.auto && j.auto.state) || {};
           if (st.at && st.at !== prev) {
             clearInterval(timer);
+            dingAutoHint.className = 'ums-cookie-state';
+            dingAutoHint.textContent = '';   // 结束「执行中…」
             if (st.ok) notice('定时推送完成：' + (st.count || 0) + ' 块已发到钉钉群', 'ok');
             else notice('定时推送失败：' + esc(st.error || '未知原因'), 'err');
           } else if (tries >= 30) {
             clearInterval(timer);
+            dingAutoHint.className = 'ums-cookie-state';
+            dingAutoHint.textContent = '';   // 超时也要复位「执行中…」
             notice('定时推送仍在执行或已超时，请稍后查看服务端日志', 'err');
           }
         });

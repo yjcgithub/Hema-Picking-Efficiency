@@ -231,9 +231,10 @@ function blockSvg(g, hours, unit, font) {
   const inner = [];
   const rectAt = (x, y, w, h, fill) => inner.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' +
     h + '" fill="' + fill + '"/>');
-  const textAt = (x, y, s, fs, fill, weight, anchor) => inner.push('<text x="' + x + '" y="' + y +
+  const textStr = (x, y, s, fs, fill, weight, anchor) => '<text x="' + x + '" y="' + y +
     '" font-size="' + fs + '" fill="' + fill + '"' + (weight ? ' font-weight="' + weight + '"' : '') +
-    (anchor ? ' text-anchor="' + anchor + '"' : '') + '>' + esc(s) + '</text>');
+    (anchor ? ' text-anchor="' + anchor + '"' : '') + '>' + esc(s) + '</text>';
+  const textAt = (x, y, s, fs, fill, weight, anchor) => inner.push(textStr(x, y, s, fs, fill, weight, anchor));
 
   // 表头
   rectAt(x0, tableY, tableW, headH, HEAD_BG);
@@ -248,7 +249,8 @@ function blockSvg(g, hours, unit, font) {
     const bg = heatColor(v, g.type, mn, mx);
     if (bg) inner.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + rowH + '" fill="' + bg + '"/>');
   };
-  const nearRects = [];
+  const nearRects = [];   // 平均值 / 中位数 所在行的彩色边框
+  const badges = [];      // 边框上的小标注（最后绘制，压在边框之上，对应 .stat-badge 的 z-index: 4）
   persons.forEach((p, ri) => {
     const y = bodyY + ri * rowH;
     const isAvg = p.person === stat.avgPerson && stat.avg != null;
@@ -269,10 +271,14 @@ function blockSvg(g, hours, unit, font) {
       const lc = isMed ? MEDIAN_TXT : AVG_TXT;
       nearRects.push('<rect x="' + (x0 + 1) + '" y="' + (y + 1) + '" width="' + (tableW - 2) + '" height="' +
         (rowH - 2) + '" fill="none" stroke="' + c + '" stroke-width="2"/>');
-      // 标注浮在所在行上边框上、右对齐（对应 .stat-badge）
-      const bw = textW(label, 8.5) + 4;
-      inner.push('<rect x="' + (x1 - 2 - bw) + '" y="' + (y - 7.5) + '" width="' + bw + '" height="13" rx="2" fill="#ffffff"/>');
-      textAt(x1 - 4, (y + 4).toFixed(1), label, 8.5, lc, 700, 'end');
+      // 标注浮在所在行上边框上、右对齐（对应 .stat-badge，白底压在彩色边框之上）
+      const bh = 13, bfs = 8.5;
+      const byC = y - 1;                                  // 标注中心比行上边框高 1px（对应 .stat-badge 的 top:-1px + translateY(-50%)）
+      const bw = textW(label, bfs) + 4;
+      badges.push('<rect x="' + (x1 - 2 - bw) + '" y="' + (byC - bh / 2) + '" width="' + bw + '" height="' + bh +
+        '" rx="2" fill="#ffffff"/>');
+      // 基线按白底矩形中心推算，保证文字在白底内垂直居中
+      badges.push(textStr(x1 - 4, (byC + bfs * 0.36).toFixed(1), label, bfs, lc, 700, 'end'));
     }
   });
 
@@ -328,8 +334,8 @@ function blockSvg(g, hours, unit, font) {
     });
   }
 
+  // 单元格内容（裁剪在圆角表格内）
   parts.push('<g clip-path="url(#' + clipId + ')">' + inner.join('') + '</g>');
-  parts.push(nearRects.join(''));
 
   // 表格分隔线：外表框（圆角）、表头下边线、各行下边线、首列右分隔线、折线行上边线
   parts.push('<rect x="' + x0 + '" y="' + tableY + '" width="' + tableW + '" height="' + tableH +
@@ -345,6 +351,10 @@ function blockSvg(g, hours, unit, font) {
     '" stroke="' + LINE_MID + '" stroke-width="1"/>');
   parts.push('<line x1="' + (x0 + colP) + '" y1="' + tableY + '" x2="' + (x0 + colP) + '" y2="' + chartY +
     '" stroke="' + LINE_MID + '" stroke-width="1"/>');
+
+  // 平均值 / 中位数所在行的彩色边框，再压上白底小标注（顺序即层级，标注在最上）
+  parts.push(nearRects.join(''));
+  if (badges.length) parts.push('<g clip-path="url(#' + clipId + ')">' + badges.join('') + '</g>');
 
   // ---- 口径说明（页面折叠时隐藏的那段 .note） ----
   noteLines.forEach((ln, i) => {
