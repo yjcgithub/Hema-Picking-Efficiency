@@ -710,6 +710,13 @@ footer a:hover::after { width: 100%; }
 }
 .logs-pre .lg { white-space: pre-wrap; word-break: break-all; }
 .logs-pre .lg.warn { color: #b91c1c; }
+/* 取数来源角标：手动（蓝）/ 自动（绿）/ 脚本（灰），区分共用日志行 */
+.logs-pre .lg-src {
+  display: inline-block; margin-right: 5px; padding: 0 4px; border-radius: 3px;
+  font-size: 11px; line-height: 1.5; vertical-align: 1px; color: #fff; background: #64748b;
+}
+.logs-pre .lg-src.manual { background: #2563eb; }
+.logs-pre .lg-src.auto { background: #059669; }
 #dmTable .dm-act .mini { margin: 0 3px; font-size: 12.5px; padding: 4px 10px; }
 .mini.danger { color: #b91c1c; border-color: #fecaca; }
 .mini.danger:hover { background: #fef2f2; border-color: #fca5a5; color: #b91c1c; }

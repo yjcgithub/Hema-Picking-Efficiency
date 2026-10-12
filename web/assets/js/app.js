@@ -1547,12 +1547,20 @@
     return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false });
   }
 
-  // 自动获取临近触发的倒计时秒数：只在服务端排期的下次执行前 60 秒（1 分钟）内返回，其余返回 0
+  // 自动获取临近触发的倒计时秒数：只在服务端排期的下次执行前 120 秒（2 分钟）内返回，其余返回 0
   function umsAutoCountdown() {
     var auto = umsCfg.auto || {};
     if (!auto.enabled || !auto.nextAt) return 0;
     var left = Math.ceil((Date.parse(auto.nextAt) - Date.now()) / 1000);
-    return left > 0 && left <= 60 ? left : 0;
+    return left > 0 && left <= 120 ? left : 0;
+  }
+
+  // 钉钉推送倒计时秒数：取数成功后服务端已排期一次推送（延迟触发），返回其剩余秒数；未排期返回 0
+  function umsDingPushCountdown() {
+    var at = (umsCfg && umsCfg.dingPushAt) || '';
+    if (!at) return 0;
+    var left = Math.ceil((Date.parse(at) - Date.now()) / 1000);
+    return left > 0 ? left : 0;
   }
 
   // 首页角标：获取中显示进度与已用时长；空闲显示「上次获取 X 前 · N 条」
@@ -1561,7 +1569,9 @@
     if (!umsChip) return;
     var autoOn = !!(umsCfg.auto && umsCfg.auto.enabled);
     var cdSec = umsAutoCountdown();
-    var autoText = ' · 自动获取：' + (autoOn ? '开' : '关') + (cdSec ? ' · ' + cdSec + ' 秒后获取' : '');
+    var pushSec = umsDingPushCountdown();
+    var autoText = ' · 自动获取：' + (autoOn ? '开' : '关') +
+      (cdSec ? ' · ' + cdSec + ' 秒后获取' : '') + (pushSec ? ' · ' + pushSec + ' 秒后推送' : '');
     var autoTip = '　自动获取：' + (autoOn ? '已开启' : '已关闭');
     if (umsStale) {                                  // 页面 JS 是旧版本：提示刷新，避免显示与数据不符
       umsChip.className = 'ums-chip warn';
@@ -2428,6 +2438,9 @@
   var logsLimit = document.getElementById('logsLimit');
   var logsTick = null;
 
+  // 取数来源角标：服务端给取数相关日志打的 src 字段（manual / auto / script）
+  var LOG_SRC = { manual: '手动', auto: '自动', script: '脚本' };
+
   function logsLoad() {
     var limit = logsLimit.value || '200';
     return fetch(API + '/logs?limit=' + encodeURIComponent(limit), { cache: 'no-store' })
@@ -2435,7 +2448,9 @@
         var lines = j.lines || [];
         logsPre.innerHTML = lines.length
           ? lines.map(function (l) {
-              return '<div class="lg' + (l.level === 'warn' ? ' warn' : '') + '">[' +
+              var tag = LOG_SRC[l.src]
+                ? '<span class="lg-src ' + l.src + '">' + LOG_SRC[l.src] + '</span>' : '';
+              return '<div class="lg' + (l.level === 'warn' ? ' warn' : '') + '">' + tag + '[' +
                 esc(l.at) + '] ' + esc(l.msg) + '</div>';
             }).join('')
           : '<div class="lg">暂无日志</div>';

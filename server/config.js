@@ -70,7 +70,7 @@ module.exports = {
   UMS_INTERVAL_JITTER: 0.15,              // 自动获取间隔抖动比例（±15%，避免固定整点打点）
   UMS_BACKOFF_MAX_MIN: 60,                // 连续失败后的最大退避间隔（分钟）
   UMS_FETCH_COOLDOWN_SEC: 60,             // 取数冷却：两次取数（手动 / 自动 / 脚本）之间的最小间隔秒数
-  UMS_MANUAL_LOCK_SEC: 60,                // 自动获取点「前后」多少秒内拒绝手动获取（错峰，避免同一时刻两次取数）
+  UMS_MANUAL_LOCK_SEC: 120,               // 自动获取点「前后」多少秒内拒绝手动获取（错峰，避免同一时刻两次取数）
 
   // 超时判责：接口英文编码 -> 报表中文口径（与 xlsx 导出一致）
   UMS_DUTY_MAP: {

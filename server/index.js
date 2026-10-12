@@ -41,18 +41,19 @@ const LOG_BUFFER = [];
 function logTime() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' ');
 }
-function pushLog(at, level, msg) {
-  LOG_BUFFER.push({ at: at, level: level, msg: String(msg) });
+function pushLog(at, level, msg, src) {
+  LOG_BUFFER.push({ at: at, level: level, msg: String(msg), src: src || '' });
   if (LOG_BUFFER.length > LOG_MAX) LOG_BUFFER.splice(0, LOG_BUFFER.length - LOG_MAX);
 }
-function logInfo(msg) {
+// src：取数来源（'manual' / 'auto' / 'script'），页面「日志」弹窗据此标彩色角标区分；其余日志留空
+function logInfo(msg, src) {
   const t = logTime();
-  pushLog(t, 'info', msg);
+  pushLog(t, 'info', msg, src);
   console.log('[' + t + '] ' + msg);
 }
-function logWarn(msg) {
+function logWarn(msg, src) {
   const t = logTime();
-  pushLog(t, 'warn', msg);
+  pushLog(t, 'warn', msg, src);
   console.warn('[' + t + '] ' + msg);
 }
 
@@ -488,6 +489,7 @@ function saveBuilt(built, opts) {
   const dates = built.dataset.meta.dates;
   const hit = db.findByDates(dates);
   const src = built.dataset.meta.sourceFile || '上传文件';
+  const trg = (opts && opts.src) || '';   // 取数来源（手动 / 自动 / 脚本），供页面日志角标区分
   if (opts && opts.merge) {
     // 增量：优先并入同时间维度的数据集；增量只取到部分日期时并入日期有交集的最新一条
     const target = hit || db.findByOverlap(dates);
@@ -498,12 +500,12 @@ function saveBuilt(built, opts) {
         replaceDates: opts.replaceDates
       });
       if (!m.added && !m.replaced) {
-        logInfo('[入库] ' + src + '：无新增/覆盖，跳过写入（数据集 #' + target.id + '）');
+        logInfo('[入库] ' + src + '：无新增/覆盖，跳过写入（数据集 #' + target.id + '）', trg);
         return Object.assign({ id: target.id, mode: 'merge', added: 0, replaced: 0 }, m.dataset);
       }
       db.overwrite(target.id, m.dataset, m.recs);
       logInfo('[入库] ' + src + '：增量并入数据集 #' + target.id +
-        '，新增 ' + m.added + ' 条、覆盖 ' + m.replaced + ' 条，有效明细 ' + m.dataset.meta.recordCount + ' 条');
+        '，新增 ' + m.added + ' 条、覆盖 ' + m.replaced + ' 条，有效明细 ' + m.dataset.meta.recordCount + ' 条', trg);
       return Object.assign({ id: target.id, mode: 'merge', added: m.added, replaced: m.replaced }, m.dataset);
     }
   }
@@ -514,7 +516,7 @@ function saveBuilt(built, opts) {
     : db.insert(built.dataset, built.recs);
   logInfo('[入库] ' + src + '：' + (hit ? '覆盖数据集 #' + id : '新建数据集 #' + id) +
     '，明细 ' + built.recs.length + ' 条' + (before ? '（替换旧明细 ' + before + ' 条）' : '') +
-    '，日期 ' + dates.join('、'));
+    '，日期 ' + dates.join('、'), trg);
   return Object.assign({
     id: id, mode: hit ? 'overwrite' : 'create',
     added: built.recs.length, replaced: before
@@ -655,8 +657,30 @@ function umsEdgeHit(cfg, st) {
   return hit(cfg.timeStart, 'start') || hit(cfg.timeEnd, 'end');
 }
 
+/* 下一次「时段边界强制取数」的时刻（ms）：今天尚未执行、且还没到点的边界里最早的一个；
+   未设时段 / 今天该边界已执行 / 已过点（补执行交给 umsEdgeHit 的窗口）时返回 0。
+   用途：把它并入页面「下次取数」倒计时，避免「边界取数在倒计时没走完时抢先执行」看不准。 */
+function umsEdgeNextMs(auto, st) {
+  if (!auto.timeStart && !auto.timeEnd) return 0;
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const day = now.toISOString().slice(0, 10);
+  const curSec = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
+  let best = 0;
+  const consider = function (hhmm, kind) {
+    if (!hhmm) return;
+    if (st.edge === day + ':' + kind) return;          // 今天已执行
+    const [h, m] = hhmm.split(':').map(Number);
+    const atSec = (h * 60 + m) * 60;
+    if (atSec < curSec) return;                        // 已过点
+    if (!best || atSec < best) best = atSec;
+  };
+  consider(auto.timeStart, 'start');
+  consider(auto.timeEnd, 'end');
+  return best ? Date.now() + (best - curSec) * 1000 : 0;
+}
+
 // 最近一次自动获取结果（供页面展示）；failures 为连续失败次数，
-// nextAt 为排期好的下次执行时间（按整N分点+1分钟的固定网格计算，不依赖执行耗时），
+// nextAt 为排期好的下次执行时间（整点网格点与「尚未执行的时段边界」中更早的一个，不依赖执行耗时），
 // cfgInterval 为排期时使用的「设置里的间隔」，用来判断用户改过间隔后是否需要重新排期，
 // edge 记录当天已执行的「时段边界额外取数」（形如 '2026-09-30:end'），避免同一时刻重复触发
 // slot 记录最近执行的常规网格点（形如 '2026-09-30:1026'），避免同一分钟内被 5 秒轮询重复触发
@@ -730,6 +754,7 @@ function umsConfigPayload() {
     cooldown: umsCooldownInfo(),
     cookieAuth: db.getSetting(CFG.UMS_COOKIE_AUTH_KEY) || null,   // 最近一次鉴权失效被删的 Cookie { at, tag }，供页面提示
     manualLockSec: CFG.UMS_MANUAL_LOCK_SEC,   // 自动获取点前后多少秒内拒绝手动获取（前端据此提前提示）
+    dingPushAt: dingPushAt ? new Date(dingPushAt).toISOString() : null,   // 已排期的下次钉钉推送时刻（顶栏倒计时用）
     // 最近一次手动获取结果的轻量摘要（完整结果由 /api/ums/result 领取，避免轮询反复传大对象）
     manual: UMS_MANUAL ? { at: UMS_MANUAL.at, ok: UMS_MANUAL.ok, range: UMS_MANUAL.range } : null
   };
@@ -855,7 +880,7 @@ function umsRemember(state) {
 /* 一次完整获取：翻页拉取 -> 解析 -> 入库（merge=incremental），手动与自动获取共用
    整段抓取完整（complete）时把抓取日期范围内的旧明细整条替换：
    手动上传的当天数据没有单号、无法按单号合并，覆盖掉才不会与新抓的同一单重复计数 */
-async function umsRunFetchOnce(startDate, endDate, incremental, cookie, tag) {
+async function umsRunFetchOnce(startDate, endDate, incremental, cookie, tag, src) {
   const size = umsNum();
   UMS_PROGRESS = {
     active: true, pages: 0, totalPages: 0, got: 0, total: 0,
@@ -879,7 +904,8 @@ async function umsRunFetchOnce(startDate, endDate, incremental, cookie, tag) {
   const built = compute.buildFromUms(r.info, { sourceFile: label }, currentMap(), currentIgnore());
   const out = saveBuilt(built, {
     merge: incremental,
-    replaceDates: r.complete ? built.dataset.meta.dates : null
+    replaceDates: r.complete ? built.dataset.meta.dates : null,
+    src: src
   });
   const last = umsRemember({
     label, mode: out.mode, added: out.added || 0, replaced: out.replaced || 0,
@@ -891,19 +917,19 @@ async function umsRunFetchOnce(startDate, endDate, incremental, cookie, tag) {
 /* 取数：把候选 Cookie（主 / 备用）随机排序后依次尝试 —— 每次随机先用主或备用，
    摊薄单份 Cookie 的请求频次；鉴权失效（登录态过期）或遇到风控（限流）时改用下一份重试；
    超时 / 网络错误 / 其它 HTTP 错误直接抛出（换 Cookie 也解决不了，重试只会徒增请求） */
-async function umsRunFetch(startDate, endDate, incremental, candidates) {
+async function umsRunFetch(startDate, endDate, incremental, candidates, src) {
   const list = umsShuffle((Array.isArray(candidates) ? candidates : [candidates])
     .map(function (c) { return (c && typeof c === 'object') ? c : { cookie: c, tag: '主' }; })
     .filter(function (c) { return !!(c && c.cookie); }));
   if (!list.length) throw new Error('未配置接口 Cookie，无法获取（请在弹窗中粘贴一次 Cookie 后重试）');
-  if (list.length > 1) logInfo('[取数] 本次随机先用 ' + list[0].tag + ' Cookie');
+  if (list.length > 1) logInfo('[取数] 本次随机先用 ' + list[0].tag + ' Cookie', src);
   let lastErr;
   for (let i = 0; i < list.length; i++) {
     const it = list[i];
     const tag = it.tag || (i === 0 ? '主' : '备用');
     try {
-      const out = await umsRunFetchOnce(startDate, endDate, incremental, it.cookie, tag);
-      if (i > 0) logInfo('[取数] ' + tag + ' Cookie 取数成功（已回退）');
+      const out = await umsRunFetchOnce(startDate, endDate, incremental, it.cookie, tag, src);
+      if (i > 0) logInfo('[取数] ' + tag + ' Cookie 取数成功（已回退）', src);
       out.cookieFallback = i > 0;          // 首个 Cookie 未成功、已改用后续 Cookie
       return out;
     } catch (e) {
@@ -912,11 +938,11 @@ async function umsRunFetch(startDate, endDate, incremental, candidates) {
       // 鉴权失效（登录态过期）：直接删除这份 Cookie，避免之后反复拿它去撞接口
       const dropped = e.umsAuth ? umsDropAuthCookie(tag, it.cookie) : '';
       if (!retryable || i === list.length - 1) {
-        if (dropped) logWarn('[取数] ' + dropped + ' Cookie 鉴权失效，已自动删除。' + UMS_COOKIE_HINT);
+        if (dropped) logWarn('[取数] ' + dropped + ' Cookie 鉴权失效，已自动删除。' + UMS_COOKIE_HINT, src);
         throw e;                                          // 不可回退 / 已无更多候选：抛出
       }
       logWarn('[取数] ' + tag + ' Cookie ' + (e.umsAuth ? '鉴权失败' : '被风控') +
-        (dropped ? '（已删除失效的 ' + dropped + ' Cookie）' : '') + '，改用下一份 Cookie 重试');
+        (dropped ? '（已删除失效的 ' + dropped + ' Cookie）' : '') + '，改用下一份 Cookie 重试', src);
     }
   }
   throw lastErr;
@@ -931,13 +957,13 @@ async function umsRunManualJob(startDate, endDate, incremental, cookies, range) 
   const t0 = Date.now();
   umsBusy = true;                                   // 同步置忙，防止启动返回后紧接着又来一次
   try {
-    const out = await umsRunFetch(startDate, endDate, incremental, cookies);
+    const out = await umsRunFetch(startDate, endDate, incremental, cookies, 'manual');
     logInfo('[取数] 手动获取完成：' + out.pages + '/' + out.totalPages + ' 页，明细 ' + out.meta.recordCount +
       ' 条，新增 ' + (out.added || 0) + ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
-      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's', 'manual');
     UMS_MANUAL = { at: new Date().toISOString(), ok: true, range: range, out: out };
   } catch (e) {
-    logWarn('[取数] 手动获取 ' + range + ' 失败（耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's）：' + (e.message || e));
+    logWarn('[取数] 手动获取 ' + range + ' 失败（耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's）：' + (e.message || e), 'manual');
     UMS_MANUAL = { at: new Date().toISOString(), ok: false, range: range, error: String(e.message || e) };
   } finally {
     umsBusy = false;
@@ -961,7 +987,7 @@ router.post('/api/ums/agent/data', express.json({ limit: '100mb' }), (req, res) 
     return res.status(400).json({ error: 'pages 应为逐页响应数组' });
   }
   if (umsBusy) {
-    logWarn('[取数] 脚本同步被拒绝：已有获取任务正在进行');
+    logWarn('[取数] 脚本同步被拒绝：已有获取任务正在进行', 'script');
     return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
   }
   umsBusy = true;
@@ -971,12 +997,13 @@ router.post('/api/ums/agent/data', express.json({ limit: '100mb' }), (req, res) 
     umsMarkTry();                                   // 脚本同步同样占用冷却窗口
     const complete = !!body.complete;
     logInfo('[取数] 脚本同步 ' + range + ' 开始：' + body.pages.length + ' 页，complete=' + complete +
-      '，reached=' + !!body.reached);
+      '，reached=' + !!body.reached, 'script');
     const label = '浏览器脚本 ' + range + (complete ? '' : '（增量）');
     const built = compute.buildFromUms(body.pages, { sourceFile: label }, currentMap(), currentIgnore());
     const out = saveBuilt(built, {
       merge: true,
-      replaceDates: complete ? built.dataset.meta.dates : null
+      replaceDates: complete ? built.dataset.meta.dates : null,
+      src: 'script'
     });
     const last = umsRemember({
       label, mode: out.mode, added: out.added || 0, replaced: out.replaced || 0,
@@ -989,13 +1016,13 @@ router.post('/api/ums/agent/data', express.json({ limit: '100mb' }), (req, res) 
     });
     res.json(Object.assign(out, { pages: body.pages.length, last: last }));
     logInfo('[取数] 脚本同步完成：新增 ' + (out.added || 0) + ' 条、覆盖 ' + (out.replaced || 0) +
-      ' 条，数据集 #' + out.id + '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+      ' 条，数据集 #' + out.id + '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's', 'script');
   } catch (e) {
     db.setSetting(CFG.UMS_AGENT_STATE_KEY, {
       at: new Date().toISOString(), ok: false, error: String(e.message || e).slice(0, 200),
       range: range, added: 0, replaced: 0, records: 0
     });
-    logWarn('[取数] 脚本同步 ' + range + ' 失败：' + (e.message || e));
+    logWarn('[取数] 脚本同步 ' + range + ' 失败：' + (e.message || e), 'script');
     res.status(400).json({ error: e.message || String(e) });
   } finally {
     umsBusy = false;
@@ -1025,21 +1052,21 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), (req, res) => {
   }
   const cookies = umsCookieCandidates(String(body.cookie || '').trim(), String(body.cookieBackup || '').trim());
   if (!cookies.length) {
-    logWarn('[取数] 未配置 Cookie，无法手动获取');
+    logWarn('[取数] 未配置 Cookie，无法手动获取', 'manual');
     return res.status(400).json({ error: '未配置接口 Cookie，无法获取（请在弹窗中粘贴一次 Cookie 后重试）' });
   }
   if (umsBusy) {
-    logWarn('[取数] 手动获取被拒绝：已有任务正在进行');
+    logWarn('[取数] 手动获取被拒绝：已有任务正在进行', 'manual');
     return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
   }
   // 与自动获取错峰：自动获取点（nextAt）前后 UMS_MANUAL_LOCK_SEC 秒内拒绝手动获取
   const autoCfg = umsAutoCfg();
   const autoSt = umsAutoState();
   if (autoCfg.enabled && autoSt.nextAt) {
-    const nextAt = umsAutoNextAt(autoCfg, autoSt);
+    const nextAt = umsNextAtWithEdge(autoCfg, autoSt);   // 含时段边界取数
     const sec = Math.round(CFG.UMS_MANUAL_LOCK_SEC);
     if (Math.abs(nextAt - Date.now()) <= CFG.UMS_MANUAL_LOCK_SEC * 1000) {
-      logWarn('[取数] 拒绝手动获取：自动获取点为 ' + clockOf(new Date(nextAt)) + '，前后 ' + sec + ' 秒内暂停');
+      logWarn('[取数] 拒绝手动获取：自动获取点为 ' + clockOf(new Date(nextAt)) + '，前后 ' + sec + ' 秒内暂停', 'manual');
       return res.status(429).json({
         error: '自动获取即将 / 刚刚执行（' + clockOf(new Date(nextAt)) + '），前后 ' + sec + ' 秒内暂停手动获取，请稍后再试',
         nextAutoAt: new Date(nextAt).toISOString()
@@ -1049,14 +1076,14 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), (req, res) => {
   // 冷却：距上次取数（含自动获取 / 脚本同步）不足冷却时长时拒绝，避免触发接口风控
   const cd = umsCooldownInfo();
   if (cd.waitSec > 0) {
-    logWarn('[取数] 冷却中，拒绝手动获取（剩 ' + cd.waitSec + ' 秒）');
+    logWarn('[取数] 冷却中，拒绝手动获取（剩 ' + cd.waitSec + ' 秒）', 'manual');
     return res.status(429).json({
       error: '冷却中：为避免触发接口风控，请 ' + cd.waitSec + ' 秒后再试（自动获取同样计入冷却）',
       waitSec: cd.waitSec
     });
   }
   const range = startDate + ' ~ ' + endDate;
-  logInfo('[取数] 手动获取 ' + range + (incremental ? '（增量）' : '（全量）') + ' 开始');
+  logInfo('[取数] 手动获取 ' + range + (incremental ? '（增量）' : '（全量）') + ' 开始', 'manual');
   UMS_MANUAL = null;                                // 清掉上一次结果，供本次完成后领取
   umsRunManualJob(startDate, endDate, incremental, cookies, range);   // 不 await：后台跑
   res.status(202).json({ started: true, range: range, progress: umsProgressInfo() });
@@ -1073,9 +1100,11 @@ router.get('/api/ums/result', (req, res) => {
    防风控：翻页随机停顿、取数冷却（手动/脚本之间）。
    排期固定写入 umsAutoState.nextAt —— 服务端据此判断是否到点，页面据此显示倒计时 */
 
-/* 按间隔计算下一个触发时刻（ms）：整N分点 + 1分钟，如间隔60分 → 07:01、08:01、…、22:01；
-   间隔30分 → 07:01、07:31、08:01、08:31、…。不受上次执行时间/耗时影响，也不会漂移。
-   若已过时段内最后一个网格点 → 明天第一跳；未设时段 → 全天按网格算（起始 00:01）。
+/* 按间隔计算下一个触发时刻（ms）：网格基准是「整点」（0 点起每 N 分钟一个点），
+   触发时刻 = 网格点 + 1 分钟，即恒为「整点 + 1 分」，与「时段开始」的分钟无关：
+   间隔60分 → 07:01、08:01、…、22:01；间隔30分 → 07:01、07:31、08:01、08:31、…。
+   不受上次执行时间/耗时影响，也不会漂移。时段（timeStart ~ timeEnd）只作范围过滤。
+   若已过时段内最后一个网格点 → 明天第一跳；未设时段 → 全天按网格算。
    返回 0 表示可立即执行（当前恰好落在网格点上）。
    futureOnly=true 时忽略「当前所在网格点」，直接给下一个网格点（用于执行后回写 nextAt，
    以免显示成「下次 = 刚才那一刻」）。 */
@@ -1090,40 +1119,47 @@ function umsAutoNextAt(auto, st, futureOnly) {
   const endMin   = eH * 60 + eM;
   const curMin   = now.getUTCHours() * 60 + now.getUTCMinutes();
 
-  function nextToday() {
-    // 在时段内逐个网格点找第一个 ≥ 当前分钟+1 的（+1 避免重复触发当前分钟）
-    for (let m = startMin; m <= endMin; m += iv) {
-      const target = m + 1;   // 整N分点 + 1分钟
-      if (futureOnly ? target > curMin : target >= curMin) return target;
+  // 从 0 点起逐个网格点，返回时段内第一个 ≥ lo 的触发分钟；无则 0
+  function firstAtOrAfter(lo) {
+    for (let m = 0; m < 24 * 60; m += iv) {
+      const target = m + 1;                 // 整N分点 + 1 分钟
+      if (target < startMin) continue;      // 早于时段开始
+      if (target > endMin) break;           // 晚于时段结束
+      if (target >= lo) return target;
     }
-    return 0;   // 时段内已无网格点（今天跑完）
+    return 0;
   }
 
-  const t = nextToday();
+  const t = firstAtOrAfter(futureOnly ? curMin + 1 : curMin);
   if (t > 0) {
     // 计算距今多少毫秒；t <= curMin 时 = 0（立即执行）
     const ms = Math.max(0, (t - curMin) * 60 * 1000 - now.getUTCSeconds() * 1000);
     return ms === 0 ? 0 : Date.now() + ms;
   }
-  // 今天已无网格点 → 明天时段第一跳
-  return Date.now() + ((startMin + 1 + 24 * 60 - curMin) * 60 * 1000 - now.getUTCSeconds() * 1000);
+  // 今天已无网格点 → 明天时段内第一个网格点
+  const first = firstAtOrAfter(startMin) || startMin;
+  return Date.now() + ((first + 24 * 60 - curMin) * 60 * 1000 - now.getUTCSeconds() * 1000);
 }
 
-/* 当前分钟是否正好落在常规网格点上（整N分点 + 1分钟）。是则返回该点的唯一标识
-   （东八区「日期:分钟数」），否则返回 ''。
+/* 页面「下次取数」显示 / 排期用的时刻（ms）：取「下一个常规网格点」与「尚未执行的时段边界」
+   中更早的一个 —— 边界取数也是一次真实执行，必须算进倒计时，倒计时归零才取数。
+   返回 0 表示可立即执行。 */
+function umsNextAtWithEdge(auto, st, futureOnly) {
+  const grid = umsAutoNextAt(auto, st, futureOnly);
+  if (!grid) return 0;                 // 网格点已到 → 立即执行
+  const edge = umsEdgeNextMs(auto, st);
+  return edge ? Math.min(grid, edge) : grid;
+}
+
+/* 当前分钟是否正好落在常规网格点上（整点起每 N 分钟一个点，再 +1 分钟，即 hh:(kN+1)）。
+   是则返回该点的唯一标识（东八区「日期:分钟数」），否则返回 ''。
    轮询是每 5 秒一次、而网格点按「分钟」命中，整个 1 分钟内会反复命中同一网格点；
    用它配合 umsAutoState.slot 去重，保证同一网格点只执行一次。 */
 function umsSlotKey(auto) {
   const iv = Math.max(1, Math.round(Number(auto.intervalMin) || 30));
   const now = new Date(Date.now() + 8 * 3600 * 1000);
-  const sh = auto.timeStart || '00:00';
-  const eh = auto.timeEnd   || '24:00';
-  const [sH, sM] = sh.split(':').map(Number);
-  const [eH, eM] = eh.split(':').map(Number);
-  const startMin = sH * 60 + sM;
-  const endMin   = eH * 60 + eM;
-  const curMin   = now.getUTCHours() * 60 + now.getUTCMinutes();
-  for (let m = startMin; m <= endMin; m += iv) {
+  const curMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+  for (let m = 0; m < 24 * 60; m += iv) {
     if (m + 1 === curMin) return now.toISOString().slice(0, 10) + ':' + curMin;
   }
   return '';
@@ -1158,15 +1194,15 @@ async function umsAutoTick() {
   const stored = db.getSetting(CFG.UMS_RANGE_KEY) || {};
   if (stored.startDate !== range.startDate || stored.endDate !== range.endDate) {
     db.setSetting(CFG.UMS_RANGE_KEY, { startDate: range.startDate, endDate: range.endDate });
-    logInfo('[取数条件] 单日区间顺延到当天 → ' + day);
+    logInfo('[取数条件] 单日区间顺延到当天 → ' + day, 'auto');
   }
   const t0 = Date.now();
   umsBusy = true;
   try {
-    const out = await umsRunFetch(range.startDate, range.endDate, true, cookies);
+    const out = await umsRunFetch(range.startDate, range.endDate, true, cookies, 'auto');
     const at = new Date();
-    // 回写下个网格点（futureOnly：排除当前所在网格点，避免显示成「下次 = 刚才」）
-    const nextAt = new Date(umsAutoNextAt(auto, st, true));
+    // 回写「下次取数」：网格点与时段边界里更早的一个（futureOnly 排除当前所在点）
+    const nextAt = new Date(umsNextAtWithEdge(auto, st, true));
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
       at: at.toISOString(), ok: true, error: '',
       records: out.meta.recordCount, added: out.added || 0,
@@ -1175,12 +1211,12 @@ async function umsAutoTick() {
     });
     logInfo('[自动获取] ' + day + badge + ' 完成：明细 ' + out.meta.recordCount + ' 条，新增 ' + (out.added || 0) +
       ' 条、覆盖 ' + (out.replaced || 0) + ' 条，数据集 #' + out.id +
-      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's，下次 ' + clockOf(nextAt));
+      '，耗时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's，下次 ' + clockOf(nextAt), 'auto');
     afterFetchSuccess(out, '自动获取');   // 取数成功：延迟自动推送（有新增/覆盖时）
   } catch (e) {
     const nf = fails + 1;
-    // 失败同样回到下一个网格点（不再累积退避：固定网格本身足够分散请求）
-    const nextAt = new Date(umsAutoNextAt(auto, st, true));
+    // 失败同样回到「网格点 / 时段边界」中更早的下一次点（不累积退避：固定网格本身足够分散请求）
+    const nextAt = new Date(umsNextAtWithEdge(auto, st, true));
     db.setSetting(CFG.UMS_AUTO_STATE_KEY, {
       at: new Date().toISOString(), ok: false,
       error: String(e.message || e).slice(0, 160), records: 0, added: 0,
@@ -1188,7 +1224,7 @@ async function umsAutoTick() {
       nextAt: nextAt.toISOString(), edge: edgeKey, slot: slot || (st.slot || '')
     });
     logWarn('[自动获取] ' + day + badge + ' 失败（连续 ' + nf + ' 次，' +
-      '下次 ' + clockOf(nextAt) + '）：' + (e.message || e));
+      '下次 ' + clockOf(nextAt) + '）：' + (e.message || e), 'auto');
   } finally {
     umsBusy = false;
   }
@@ -1340,10 +1376,12 @@ function dingAutoCfg() {
 /* 取数成功后调用：本次有新增/覆盖时，延迟 DING_PUSH_DELAY_MIN 分钟自动截图推送；
    多次取数只保留最后排期的那一次（后一次覆盖前一次）。失败自动重试 DING_PUSH_MAX_RETRY 次 */
 let dingPushTimer = null;
+let dingPushAt = null;     // 已排期的下次推送时刻（ms），供页面顶栏做「N 秒后推送」倒计时；未排期为 null
 
 function setDingPushTimer(fn, delayMs) {
   if (dingPushTimer) clearTimeout(dingPushTimer);
-  dingPushTimer = setTimeout(function () { dingPushTimer = null; fn(); }, delayMs);
+  dingPushAt = Date.now() + delayMs;
+  dingPushTimer = setTimeout(function () { dingPushTimer = null; dingPushAt = null; fn(); }, delayMs);
 }
 
 // 记录本次数据变更（新增/覆盖条数），无新增则忽略
