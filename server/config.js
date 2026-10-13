@@ -119,6 +119,7 @@ module.exports = {
      纯 CPU、无需浏览器），再走与手动推送相同的 markdown 链路发到群。 */
   DING_AUTO_KEY: 'dingAuto',              // { enabled }：取数成功后自动自绘并推送（不再按间隔定时）
   DING_AUTO_STATE_KEY: 'dingAutoState',   // 最近一次自动推送结果 { at, ok, error, reason, count }
+  DING_AT_ALL_KEY: 'dingAtAll',           // 推送正文是否在「统计时间段」前 @全体成员（未设置 = 开）
   DING_PUSH_DELAY_MIN: 1,                 // 取数成功后延迟多少分钟才推送（等数据稳定）
   DING_PUSH_MAX_RETRY: 2                  // 推送失败自动重试次数
 };

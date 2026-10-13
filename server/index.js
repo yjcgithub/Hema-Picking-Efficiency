@@ -1059,19 +1059,35 @@ router.post('/api/ums/fetch', express.json({ limit: '1mb' }), (req, res) => {
     logWarn('[取数] 手动获取被拒绝：已有任务正在进行', 'manual');
     return res.status(409).json({ error: '已有获取任务正在进行，请稍后再试' });
   }
-  // 与自动获取错峰：自动获取点（nextAt）前后 UMS_MANUAL_LOCK_SEC 秒内拒绝手动获取
+  /* 与自动获取错峰（UMS_MANUAL_LOCK_SEC）：
+     - 自动获取「开始前」lock 秒内：拒绝（避免手动把这次的自动获取挤掉）；
+     - 自动获取「成功」后 lock 秒内：拒绝（尾段从「成功时刻」起算，而不是计划开始时刻）。
+     返回 429，并在 error 里说明是前段还是后段。 */
   const autoCfg = umsAutoCfg();
   const autoSt = umsAutoState();
+  const lockSec = Math.round(CFG.UMS_MANUAL_LOCK_SEC);
+  let lockWhy = '', lockUntil = 0;
   if (autoCfg.enabled && autoSt.nextAt) {
     const nextAt = umsNextAtWithEdge(autoCfg, autoSt);   // 含时段边界取数
-    const sec = Math.round(CFG.UMS_MANUAL_LOCK_SEC);
-    if (Math.abs(nextAt - Date.now()) <= CFG.UMS_MANUAL_LOCK_SEC * 1000) {
-      logWarn('[取数] 拒绝手动获取：自动获取点为 ' + clockOf(new Date(nextAt)) + '，前后 ' + sec + ' 秒内暂停', 'manual');
-      return res.status(429).json({
-        error: '自动获取即将 / 刚刚执行（' + clockOf(new Date(nextAt)) + '），前后 ' + sec + ' 秒内暂停手动获取，请稍后再试',
-        nextAutoAt: new Date(nextAt).toISOString()
-      });
+    const ahead = nextAt - Date.now();
+    if (ahead > 0 && ahead <= lockSec * 1000) {
+      lockWhy = '自动获取点将至（' + clockOf(new Date(nextAt)) + '），开始前 ' + lockSec + ' 秒内暂停';
+      lockUntil = nextAt + lockSec * 1000;
     }
+  }
+  if (!lockWhy && autoSt.ok && autoSt.at) {
+    const since = Date.now() - Date.parse(autoSt.at);
+    if (since >= 0 && since <= lockSec * 1000) {
+      lockWhy = '自动获取刚成功（' + clockOf(new Date(autoSt.at)) + '），成功后 ' + lockSec + ' 秒内暂停';
+      lockUntil = Date.parse(autoSt.at) + lockSec * 1000;
+    }
+  }
+  if (lockWhy) {
+    logWarn('[取数] 拒绝手动获取：' + lockWhy, 'manual');
+    return res.status(429).json({
+      error: lockWhy + '手动获取，请稍后再试',
+      nextAutoAt: lockUntil ? new Date(lockUntil).toISOString() : (autoSt.nextAt || null)
+    });
   }
   // 冷却：距上次取数（含自动获取 / 脚本同步）不足冷却时长时拒绝，避免触发接口风控
   const cd = umsCooldownInfo();
@@ -1354,6 +1370,7 @@ function dingConfigPayload() {
     webhookSet: !!wh, webhookMask: dingMask(wh),
     secretSet: !!sec, secretMask: dingMask(sec),
     publicBase: dingPublicBase(),
+    atAll: dingAtAll(),                    // 推送正文是否 @全体成员（页面开关）
     auto: Object.assign(dingAutoCfg(), {
       state: dingAutoState(),
       delayMin: CFG.DING_PUSH_DELAY_MIN,     // 取数成功后延迟多少分钟推送
@@ -1371,6 +1388,12 @@ function dingConfigPayload() {
 function dingAutoCfg() {
   const a = db.getSetting(CFG.DING_AUTO_KEY) || {};
   return { enabled: !!a.enabled };
+}
+
+// 推送正文是否 @全体成员（页面开关；未设置时视为开，保持既有行为）
+function dingAtAll() {
+  const v = db.getSetting(CFG.DING_AT_ALL_KEY);
+  return v == null ? true : !!v;
 }
 
 /* 取数成功后调用：本次有新增/覆盖时，延迟 DING_PUSH_DELAY_MIN 分钟自动截图推送；
@@ -1464,20 +1487,40 @@ router.post('/api/ding/config', express.json({ limit: '16kb' }), (req, res) => {
     logInfo('[钉钉] 定时推送 ' + (a.enabled ? '开启' : '关闭') +
       '（取数成功后 ' + CFG.DING_PUSH_DELAY_MIN + ' 分钟自动推送，失败重试 ' + CFG.DING_PUSH_MAX_RETRY + ' 次）');
   }
+  if (typeof b.atAll === 'boolean') {
+    db.setSetting(CFG.DING_AT_ALL_KEY, !!b.atAll);
+    logInfo('[钉钉] 推送 @全体成员 ' + (b.atAll ? '开启' : '关闭'));
+  }
   res.json(dingConfigPayload());
 });
 
-/* 图片落盘：data URL → data/ding/<md5-16>.<ext>（同图不重复写）；返回 { file, bytes } */
-function dingSaveImage(dataUrl) {
+/* 图片文件名的时间戳：东八区 YYYYMMDD-HHmmss（精确到秒，避免同一分钟内两次推送撞名） */
+function dingFileStamp() {
+  const d = new Date(Date.now() + 8 * 3600 * 1000), p = n => (n < 10 ? '0' : '') + n;
+  return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + '-' +
+    p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds());
+}
+
+// 分块 → 文件名后缀：前场 A、后场 P、一体化不加
+function dingTypeSuffix(name) {
+  const n = String(name || '');
+  if (n === '前场' || n === '前场合流') return 'A';
+  if (n === '后场' || n === '后场合流') return 'P';
+  return '';
+}
+
+/* 图片落盘：data URL → <时间>[_<后缀>].<ext>；返回 { file, bytes, path } */
+function dingSaveImage(dataUrl, suffix) {
   const m = /^data:image\/(png|jpe?g);base64,(.+)$/i.exec(String(dataUrl || ''));
   if (!m) throw new Error('图片数据格式不合法（应为 data:image/png;base64,…）');
   const buf = Buffer.from(m[2], 'base64');
   if (!buf.length) throw new Error('图片数据为空');
   if (buf.length > 30 * 1024 * 1024) throw new Error('图片过大（超过 30MB）');
   const ext = m[1].toLowerCase() === 'png' ? 'png' : 'jpg';
-  const file = crypto.createHash('md5').update(buf).digest('hex').slice(0, 16) + '.' + ext;
+  const sfx = String(suffix || '').trim();
+  const file = dingFileStamp() + (sfx ? '_' + sfx : '') + '.' + ext;
   const fp = path.join(DING_DIR, file);
-  if (!fs.existsSync(fp)) fs.writeFileSync(fp, buf);
+  fs.writeFileSync(fp, buf);   // 时间命名：同名直接覆盖，保证始终是最新内容
   return { file: file, bytes: buf.length, path: fp };
 }
 
@@ -1492,16 +1535,19 @@ function dingColor(text, hex) {
   return '<font color="' + hex + '">' + text + '</font>';
 }
 const DING_COLOR = { period: '#1F6FEB', eff: '#0E9F6E', avg: '#D97706', median: '#7C3AED' };
+const DING_AT_ALL = '@全体成员';   // 正文里的 @ 文案（须配合 at.isAtAll 才会真正提醒全员）
 
-/* 组装 markdown：结构化（效率透视表：统计时间段 + 每块「图片 + 效率 / 平均值 / 中位数」） */
-function dingBuildBlocksText(blocks, period, base) {
+/* 组装 markdown：结构化（效率透视表：[@全体成员] + 统计时间段 + 每块「图片 + 效率 / 平均值 / 中位数」）
+   atAll 必须与 dingPostMarkdown 的 at.isAtAll 一致：正文写了 @ 就带上 isAtAll，否则不会真正提醒 */
+function dingBuildBlocksText(blocks, period, base, atAll) {
   const parts = [], urls = [];
   let bytes = 0;
   const p = String(period || '').trim();
+  if (atAll) parts.push(DING_AT_ALL);   // 放在「统计时间段」之前
   if (p) parts.push('#### 统计时间段：\n \n#### ' + dingColor(p, DING_COLOR.period));
   blocks.forEach(function (bk, i) {
     const name = String(bk.name || '').trim() || '分块';
-    const saved = dingSaveImage(bk.image);
+    const saved = dingSaveImage(bk.image, dingTypeSuffix(name));
     bytes += saved.bytes;
     const url = base + DING_URL_PREFIX + '/' + saved.file;
     urls.push(url);
@@ -1525,13 +1571,15 @@ function dingBuildSingleText(image, title, base) {
   return { text: '#### ' + title + '\n\n![' + title + '](' + url + ')', urls: [url], bytes: saved.bytes };
 }
 
-// 发送 markdown 到群（按需加签）；返回 { ok, error? }
-async function dingPostMarkdown(webhook, title, text) {
+// 发送 markdown 到群（按需加签）；atAll=true 时带上 at.isAtAll，@全体成员 才会真正提醒全员
+async function dingPostMarkdown(webhook, title, text, atAll) {
   const sendUrl = dingSignUrl(webhook, dingSecret());
+  const body = { msgtype: 'markdown', markdown: { title: title, text: text } };
+  if (atAll) body.at = { isAtAll: true };
   const r = await fetch(sendUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ msgtype: 'markdown', markdown: { title: title, text: text } })
+    body: JSON.stringify(body)
   });
   const j = await r.json().catch(function () { return null; });
   if (!j || j.errcode !== 0) {
@@ -1554,11 +1602,12 @@ router.post('/api/ding/push', express.json({ limit: '48mb' }), async (req, res) 
     // 公网地址：优先用设置里的固定域名，否则按本次请求的 Host / 协议推断
     const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
     const base = dingPublicBase() || (proto + '://' + req.headers.host);
-    const title = String(b.title || '效率透视表').slice(0, 60);
+    const title = String(b.title || '').slice(0, 60);
     const structured = Array.isArray(b.blocks) && b.blocks.length > 0;
-    const out = structured ? dingBuildBlocksText(b.blocks, b.period, base)
+    const atAll = structured && dingAtAll();   // 透视表推送才可能 @全体成员（测试推送不加）
+    const out = structured ? dingBuildBlocksText(b.blocks, b.period, base, atAll)
       : dingBuildSingleText(b.image, title, base);
-    const r = await dingPostMarkdown(webhook, title, out.text);
+    const r = await dingPostMarkdown(webhook, title, out.text, atAll);
     if (!r.ok) {
       logWarn('[钉钉] 推送失败：' + r.error);
       return res.status(502).json({ error: '钉钉推送失败：' + r.error });
@@ -1594,8 +1643,9 @@ async function dingRunAuto(reason) {
     if (!base) throw new Error('未配置公网地址，钉钉无法访问图片链接');
     logInfo('[钉钉] 定时推送开始（' + reason + '）：服务端自绘透视表（数据集 #' + ds.id + '）…');
     const payload = dingRender.renderPivot(ds);
-    const out = dingBuildBlocksText(payload.blocks || [], payload.period, base);
-    const r = await dingPostMarkdown(webhook, '效率透视表', out.text);
+    const atAll = dingAtAll();   // 页面开关：推送时是否 @全体成员
+    const out = dingBuildBlocksText(payload.blocks || [], payload.period, base, atAll);
+    const r = await dingPostMarkdown(webhook, '效率透视表', out.text, atAll);
     if (!r.ok) throw new Error(r.error);
     const n = (payload.blocks || []).length;
     logInfo('[钉钉] 定时推送完成（' + reason + '）：' + n + ' 块，共 ' + (out.bytes / 1024).toFixed(0) +
@@ -1624,10 +1674,10 @@ router.post('/api/ding/auto/run', (req, res) => {
   res.status(202).json({ started: true });
 });
 
-// 已推送图片的公开只读访问（供钉钉客户端拉取）；文件名限定为「16 位十六进制 + 扩展名」
+// 已推送图片的公开只读访问（供钉钉客户端拉取）；文件名限定为「时间戳[_后缀] + 扩展名」
 router.get('/api/ding/img/:file', (req, res) => {
   const file = path.basename(String(req.params.file || ''));
-  if (!/^[0-9a-f]{16}\.(png|jpg)$/.test(file)) return res.status(404).json({ error: 'not found' });
+  if (!/^\d{8}-\d{6}(_[A-Za-z0-9]+)?\.(png|jpg)$/.test(file)) return res.status(404).json({ error: 'not found' });
   const fp = path.join(DING_DIR, file);
   if (!fs.existsSync(fp)) return res.status(404).json({ error: 'not found' });
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');

@@ -1745,13 +1745,21 @@
     return umsCdUntil ? Math.max(0, Math.ceil((umsCdUntil - Date.now()) / 1000)) : 0;
   }
 
-  // 是否落在「自动获取点前后」的禁手动窗口内（与服务端 UMS_MANUAL_LOCK_SEC 一致）
+  /* 是否落在「自动获取」的禁手动窗口内（与服务端 UMS_MANUAL_LOCK_SEC 一致）：
+     开始前 lockMs 内（nextAt 将至），或 成功后 lockMs 内（尾段从成功时刻起算） */
   function umsAutoLocked() {
     var a = (umsCfg && umsCfg.auto) || {};
-    if (!a.enabled || !a.nextAt) return false;
-    var t = Date.parse(a.nextAt) || 0;
-    if (!t) return false;
-    return Math.abs(t - Date.now()) <= (umsCfg.manualLockSec || 60) * 1000;
+    var lockMs = (umsCfg.manualLockSec || 60) * 1000;
+    var now = Date.now();
+    if (a.enabled && a.nextAt) {
+      var t = Date.parse(a.nextAt) || 0;
+      if (t && t - now > 0 && t - now <= lockMs) return true;
+    }
+    if (a.ok && a.at) {
+      var d = now - (Date.parse(a.at) || 0);
+      if (d >= 0 && d <= lockMs) return true;
+    }
+    return false;
   }
 
   // 开始获取；s/e/inc 省略时取弹窗里的日期范围与「增量」勾选
@@ -1763,7 +1771,7 @@
       return;
     }
     if (umsAutoLocked()) {
-      notice('自动获取即将 / 刚刚执行，前后 ' + (umsCfg.manualLockSec || 60) + ' 秒内暂停手动获取', 'err');
+      notice('自动获取即将执行 / 刚成功，前后 ' + (umsCfg.manualLockSec || 60) + ' 秒内暂停手动获取', 'err');
       return;
     }
     if (!s) s = umsStartDate.value;
@@ -2038,6 +2046,7 @@
   var dingPublicBaseInput = document.getElementById('dingPublicBase');
   var dingState = document.getElementById('dingState');
   var dingAutoOn = document.getElementById('dingAutoOn');
+  var dingAtAllChk = document.getElementById('dingAtAll');
   var dingAutoFollow = document.getElementById('dingAutoFollow');
   var dingAutoStateEl = document.getElementById('dingAutoState');
   var dingAutoHint = document.getElementById('dingAutoHint');
@@ -2082,6 +2091,7 @@
       if (j && j.publicBase && !dingPublicBaseInput.value) dingPublicBaseInput.value = j.publicBase;
       var a = (j && j.auto) || {};
       dingAutoOn.checked = !!a.enabled;
+      dingAtAllChk.checked = (j && j.atAll) !== false;   // 未返回时按「开」处理（与服务端默认一致）
       if (dingAutoFollow) {
         dingAutoFollow.textContent = '取数成功后 ' + (a.delayMin || 1) + ' 分钟自动推送' +
           '；失败自动重试 ' + (a.maxRetry == null ? 2 : a.maxRetry) + ' 次';
@@ -2111,6 +2121,7 @@
     if (dingSecretInput.value.trim()) body.secret = dingSecretInput.value.trim();
     body.publicBase = dingPublicBaseInput.value.trim();   // 公网地址允许清空
     body.auto = { enabled: !!dingAutoOn.checked };   // 时段 / 间隔跟随「自动获取拣货单」，这里只存开关
+    body.atAll = !!dingAtAllChk.checked;             // 推送正文是否 @全体成员
     fetch(API + '/ding/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
