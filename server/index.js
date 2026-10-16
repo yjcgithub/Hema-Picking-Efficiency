@@ -971,8 +971,7 @@ async function umsRunManualJob(startDate, endDate, incremental, cookies, range) 
 }
 
 /* ---------- 油猴脚本同步（userscript/hema-pick-sync.user.js） ----------
-   UMS 登录态是 HttpOnly Cookie，脚本读不到，所以换思路：
-   脚本在 ums.hemaos.com 页面内用当前登录态「同源」请求接口（浏览器自动带 Cookie），
+   脚本在盒马页面内用当前登录态请求拣货单接口（浏览器 / 扩展自动带 Cookie，含 HttpOnly 与分区 Cookie），
    把逐页结果回传到 /api/ums/agent/data 入库 —— 后端不需要任何 Cookie */
 
 // 脚本回传数据入库：pages 为逐页响应数组；complete=整段抓取完整 -> 覆盖该日期范围的旧明细
@@ -1571,11 +1570,9 @@ function dingBuildSingleText(image, title, base) {
   return { text: '#### ' + title + '\n\n![' + title + '](' + url + ')', urls: [url], bytes: saved.bytes };
 }
 
-// 发送 markdown 到群（按需加签）；atAll=true 时带上 at.isAtAll，@全体成员 才会真正提醒全员
-async function dingPostMarkdown(webhook, title, text, atAll) {
+// 发一条 JSON 到机器人 Webhook（按需加签）；返回 { ok, error? }
+async function dingPostJson(webhook, body) {
   const sendUrl = dingSignUrl(webhook, dingSecret());
-  const body = { msgtype: 'markdown', markdown: { title: title, text: text } };
-  if (atAll) body.at = { isAtAll: true };
   const r = await fetch(sendUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1586,6 +1583,23 @@ async function dingPostMarkdown(webhook, title, text, atAll) {
     return { ok: false, error: (j && (j.errmsg || ('errcode ' + j.errcode))) || ('HTTP ' + r.status) };
   }
   return { ok: true };
+}
+
+// 发送 markdown 到群（带图的那条）
+function dingPostMarkdown(webhook, title, text) {
+  return dingPostJson(webhook, { msgtype: 'markdown', markdown: { title: title, text: text } });
+}
+
+/* @全体成员：钉钉自定义机器人的 markdown 不支持标准 at 元数据（markdown 里的 @ 只会渲染成纯文本、
+   不产生提醒），at.isAtAll 只有在 text 消息上才生效，故单独发一条短 text 来 @ 全员 */
+function dingPostAtAll(webhook, content) {
+  return dingPostJson(webhook, { msgtype: 'text', text: { content: content }, at: { isAtAll: true } });
+}
+
+// @全体成员 那条 text 的文案
+function dingAtAllText(period) {
+  const p = String(period || '').trim();
+  return DING_AT_ALL + ' 效率透视表已更新' + (p ? '：' + p : '');
 }
 
 /* 推送：接收前端截图（data:image/png;base64,...）→ 落盘 → 发 markdown 到群。两种入参：
@@ -1607,7 +1621,11 @@ router.post('/api/ding/push', express.json({ limit: '48mb' }), async (req, res) 
     const atAll = structured && dingAtAll();   // 透视表推送才可能 @全体成员（测试推送不加）
     const out = structured ? dingBuildBlocksText(b.blocks, b.period, base, atAll)
       : dingBuildSingleText(b.image, title, base);
-    const r = await dingPostMarkdown(webhook, title, out.text, atAll);
+    if (atAll) {   // markdown 不支持 @：@全体成员 单独用一条 text 发（失败不影响正文）
+      const at = await dingPostAtAll(webhook, dingAtAllText(b.period));
+      if (!at.ok) logWarn('[钉钉] @全体成员 发送失败（不影响正文推送）：' + at.error);
+    }
+    const r = await dingPostMarkdown(webhook, title, out.text);
     if (!r.ok) {
       logWarn('[钉钉] 推送失败：' + r.error);
       return res.status(502).json({ error: '钉钉推送失败：' + r.error });
@@ -1645,7 +1663,11 @@ async function dingRunAuto(reason) {
     const payload = dingRender.renderPivot(ds);
     const atAll = dingAtAll();   // 页面开关：推送时是否 @全体成员
     const out = dingBuildBlocksText(payload.blocks || [], payload.period, base, atAll);
-    const r = await dingPostMarkdown(webhook, '效率透视表', out.text, atAll);
+    if (atAll) {   // markdown 不支持 @：@全体成员 单独用一条 text 发（失败不影响正文）
+      const at = await dingPostAtAll(webhook, dingAtAllText(payload.period));
+      if (!at.ok) logWarn('[钉钉] @全体成员 发送失败（不影响正文推送）：' + at.error);
+    }
+    const r = await dingPostMarkdown(webhook, '效率透视表', out.text);
     if (!r.ok) throw new Error(r.error);
     const n = (payload.blocks || []).length;
     logInfo('[钉钉] 定时推送完成（' + reason + '）：' + n + ' 块，共 ' + (out.bytes / 1024).toFixed(0) +

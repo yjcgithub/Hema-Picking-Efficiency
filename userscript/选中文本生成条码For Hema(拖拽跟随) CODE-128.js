@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         选中文本生成条码For Hema(拖拽跟随) CODE-128
 // @namespace    http://tampermonkey.net/
-// @version      V4.7
+// @version      V4.8
 // @description  选中文字后拖动显示悬浮窗并跟随，拖拽到悬浮窗生成CODE-128条形码并跟随鼠标；同时内置「拣货效率同步」面板：在 UMS 页面取数回传到拣货效率统计后端
 // @author       YJC / hema-picking-efficiency
 // @match        https://portalpro.hemaos.com/*
@@ -1177,63 +1177,138 @@ var US_CFG = {
     elLogN.textContent = logBuf.length ? '(' + logBuf.length + ')' : '';
   }
 
-  /* ---------- Cookie 捕获（含 HttpOnly） ---------- */
-  // url：要读取哪个域的 Cookie（同步用的是「接口域」的登录态，未必等于页面域）
+  /* ---------- Cookie 捕获（含 HttpOnly / 分区） ---------- */
+  /* 实测：只用 GM_cookie 的 url 过滤拿不到「浏览器真正会发的全部 Cookie」
+     （真实接口请求 14 项，url 过滤只回 8 项）。原因有两处，这里都已处理：
+       1) 分区 Cookie（CHIPS）：盒马的 WDK_SECRET / WDK_UA / WDKSESSID / X-XSRF-TOKEN 等
+          Domain 虽是父域 .hemaos.com，但带 Partition Key Site = https://hemaos.com，
+          而 chrome.cookies（GM_cookie 的底座）不带 partitionKey 时只返回「未分区」的那部分
+          —— 故每路探测后面都补一遍带 partitionKey:{}（空对象 = 不限分区）的查询；
+       2) 其余按「真实接口地址 / 站点根 / 各级域名」多路探测后取并集，
+          自己按 RFC 6265 的 domain-match + path-match 过滤，只留会发给该接口的，
+          并按分区过滤（只保留「未分区」或「分区 = 当前顶层站点」的，浏览器也只发这些）。
+     注意探测地址要用真实接口路径：站点根的 path 是 '/'，会漏掉 Path 更窄的 Cookie。 */
+  function probeUrl() {
+    return apiOrigin() + umsPath();
+  }
+  function hostOf(url) { try { return String(new URL(url).hostname || '').toLowerCase(); } catch (e) { return ''; } }
+  function pathOf(url) { try { return new URL(url).pathname || '/'; } catch (e) { return '/'; } }
+  function topSite() {                      // 顶层站点（partitionKey.topLevelSite）：scheme + 有效域
+    var parts = String(location.hostname || '').toLowerCase().split('.');
+    var n = 2;
+    if (parts.length > 2 && /^(com|net|org|gov|edu|co)$/.test(parts[parts.length - 2]) &&
+      /^(cn|uk|jp|hk|tw|kr|sg|au|nz|br|in)$/.test(parts[parts.length - 1])) n = 3;
+    return location.protocol + '//' + parts.slice(-n).join('.');
+  }
+  function partMatch(c) {                   // 分区 Cookie 只在「顶层站点 = 该分区」时才会被浏览器发出
+    var pk = c && c.partitionKey;
+    if (!pk || !pk.topLevelSite) return true;
+    return String(pk.topLevelSite).toLowerCase().replace(/\/+$/, '') === topSite();
+  }
+  function domainMatch(cd, host) {          // cookie 域 = host 本身，或 host 的父域
+    var d = String(cd || '').replace(/^\./, '').toLowerCase();
+    return !!d && (host === d || host.slice(-(d.length + 1)) === '.' + d);
+  }
+  function pathMatch(cp, reqPath) {         // cookie 路径是请求路径前缀，且落在 '/' 边界上
+    var p = cp || '/';
+    if (p === reqPath) return true;
+    if (reqPath.indexOf(p) !== 0) return false;
+    return p.charAt(p.length - 1) === '/' || reqPath.charAt(p.length) === '/';
+  }
+  function cookieQueries(url) {             // 多路探测：url / 逐级 domain 过滤；再各补一遍带 partitionKey 的
+    var host = hostOf(url), qs = [{ url: url }, { url: apiOrigin() + '/' }];
+    var parts = host.split('.');
+    for (var i = 0; i < parts.length - 1; i++) qs.push({ domain: parts.slice(i).join('.') });
+    return qs.concat(qs.map(function (q) {
+      var p = { partitionKey: {} };
+      for (var k in q) p[k] = q[k];
+      return p;
+    }));
+  }
+  // url：要读取哪个地址的 Cookie；cb 收到 (list, probes)，list = [{ name, value, path, domain }]
   function readCookies(url, cb) {
-    var out = [], names = {};
-    // 1) 接口域与页面域相同：document.cookie 里还有非 HttpOnly 的那部分
-    if (url.indexOf(location.origin) === 0) {
-      try {
-        (document.cookie || '').split(/;\s*/).forEach(function (kv) {
-          if (!kv) return;
-          var i = kv.indexOf('=');
-          if (i > 0) { var n = kv.slice(0, i); names[n] = 1; out.push({ name: n, value: kv.slice(i + 1) }); }
-        });
-      } catch (e) { /* ignore */ }
-    }
-    // 2) HttpOnly（UMS 的登录态都在这）：Tampermonkey 的 GM_cookie
-    if (typeof GM_cookie !== 'undefined' && GM_cookie && GM_cookie.list) {
-      try {
-        GM_cookie.list({ url: url }, function (list, err) {
-          if (err) dbg('GM_cookie 读取失败：' + (err.message || err), 'warn');
-          (list || []).forEach(function (c) {
-            if (c && c.name && !names[c.name]) { names[c.name] = 1; out.push({ name: c.name, value: c.value }); }
+    var out = [], raw = [], probes = [], host = hostOf(url), reqPath = pathOf(url);
+    var add = function (name, value, path, domain) {
+      if (!name) return;
+      var p = path || '/';
+      for (var i = 0; i < out.length; i++) if (out[i].name === name && out[i].path === p) return;
+      out.push({ name: name, value: value, path: p, domain: domain || '' });
+    };
+    var finish = function () {
+      raw.forEach(function (c) {
+        if (!c || !c.name) return;
+        if (!partMatch(c) || !domainMatch(c.domain, host) || !pathMatch(c.path, reqPath)) return;
+        add(c.name, c.value, c.path, c.domain);
+      });
+      // 接口域与页面域相同时，再用 document.cookie 补非 HttpOnly 那部分（拿不到 Path/Domain，按 '/' 记）
+      if (url.indexOf(location.origin) === 0) {
+        try {
+          (document.cookie || '').split(/;\s*/).forEach(function (kv) {
+            if (!kv) return;
+            var i = kv.indexOf('=');
+            if (i > 0) add(kv.slice(0, i), kv.slice(i + 1), '/', host);
           });
-          cb(out);
+        } catch (e) { /* ignore */ }
+      }
+      cb(out, probes);
+    };
+    if (typeof GM_cookie === 'undefined' || !GM_cookie || !GM_cookie.list) {
+      dbg('当前脚本管理器不支持 GM_cookie，只能读到非 HttpOnly Cookie（登录态多半拿不到）', 'warn');
+      return finish();
+    }
+    var qs = cookieQueries(url), qi = 0;
+    var step = function () {
+      if (qi >= qs.length) return finish();
+      var q = qs[qi++];
+      try {
+        GM_cookie.list(q, function (list, err) {
+          if (err) dbg('GM_cookie ' + JSON.stringify(q) + ' 读取失败：' + (err.message || err), 'warn');
+          var flat = list || [];
+          probes.push(JSON.stringify(q) + '→' + flat.length);
+          flat.forEach(function (c) { if (c && c.name) raw.push(c); });
+          step();
         });
       } catch (e) {
-        dbg('GM_cookie 调用异常：' + ((e && e.message) || e), 'warn');
-        cb(out);
+        dbg('GM_cookie ' + JSON.stringify(q) + ' 调用异常：' + ((e && e.message) || e), 'warn');
+        step();
       }
-      return;
-    }
-    dbg('当前脚本管理器不支持 GM_cookie，只能读到非 HttpOnly Cookie（登录态多半拿不到）', 'warn');
-    cb(out);
+    };
+    step();
   }
+  // 拼 Cookie 请求头：同名按「path 最长 → 域名最具体」取一份（与浏览器发送顺序一致）
   function cookieStr(list) {
-    return list.map(function (c) { return c.name + '=' + c.value; }).join('; ');
+    var best = {};
+    list.forEach(function (c) {
+      var p = c.path || '/', d = c.domain || '', b = best[c.name];
+      if (!b || p.length > (b.path || '/').length ||
+        (p.length === (b.path || '/').length && d.length > (b.domain || '').length)) {
+        best[c.name] = { name: c.name, value: c.value, path: p, domain: d };
+      }
+    });
+    return Object.keys(best).map(function (k) { return best[k].name + '=' + best[k].value; }).join('; ');
   }
   // quiet：不写调试日志；push：读到后顺带存到后端
   function refreshCookie(quiet, push) {
-    var target = apiOrigin() + '/';
-    readCookies(target, function (list) {
+    var target = probeUrl();
+    readCookies(target, function (list, probes) {
       var s = cookieStr(list);
       elCkVal.value = s;
       elCkN.textContent = list.length ? '(' + list.length + ' 项 / ' + s.length + ' 字符)' : '(空)';
       if (!quiet) {
         dbg('捕获 Cookie（' + target + '）：' + list.length + ' 项' +
           (list.length ? '（' + list.map(function (c) { return c.name; }).join(', ') + '）' :
-            '　—— 该域没有 Cookie，同步可能未登录'),
+            '　—— 该地址读不到 Cookie，同步可能未登录') +
+          (probes && probes.length ? '　［探测：' + probes.join('，') + '］' : ''),
           list.length ? 'ok' : 'warn');
       }
       if (push && s) saveCookie(true);
-      // 接口域读不到时，顺手读一下页面域的，方便对比（脚本同步用的是接口域）
-      if (!list.length && target !== location.origin + '/') {
-        readCookies(location.origin + '/', function (l2) {
+      // 真实接口地址读不到时，退回站点根再读一次（个别脚本管理器对 url 过滤更严）
+      if (!list.length && target !== apiOrigin() + '/') {
+        readCookies(apiOrigin() + '/', function (l2) {
           if (!l2.length) return;
           elCkVal.value = cookieStr(l2);
-          elCkN.textContent = '(接口域为空，显示页面域 ' + l2.length + ' 项)';
-          if (!quiet) dbg('页面域 ' + location.origin + ' 有 ' + l2.length + ' 项 Cookie（仅备查）', 'warn');
+          elCkN.textContent = '(接口路径读不到，显示站点根 ' + l2.length + ' 项)';
+          if (!quiet) dbg('站点根 ' + apiOrigin() + '/ 有 ' + l2.length + ' 项 Cookie（仅备查）', 'warn');
         });
       }
     });
@@ -1262,7 +1337,7 @@ var US_CFG = {
     var cur = (elCkVal.value || '').trim();
     if (cur) return doSave(cur);
     // 输入框还是空的（还没刷新过）：先读一次再存
-    readCookies(apiOrigin() + '/', function (list) {
+    readCookies(probeUrl(), function (list) {
       var s = cookieStr(list);
       elCkVal.value = s;
       elCkN.textContent = s ? '(' + list.length + ' 项 / ' + s.length + ' 字符)' : '(空)';
@@ -1476,8 +1551,11 @@ var US_CFG = {
   renderLog();
   paint();
   showOpen(!!(last && last.ok));   // 之前成功同步过：直接显示跳转按钮
-  dbg('同步模块已加载：' + location.href);
+  dbg('同步模块已加载：' + location.href + '（脚本 v' +
+    (((typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?')
+      .replace(/^v/i, '')) + '）');
   dbg('页面域 ' + location.origin + ' → 接口域 ' + apiOrigin() + umsPath());
-  dbg('登录态是 HttpOnly Cookie，且未必在页面域上；同步靠请求接口域时自动带上它的 Cookie', '');
+  dbg('接口登录态是 HttpOnly Cookie、且未必在页面域上：① 同步请求由浏览器 / 扩展自动带上 Cookie；' +
+    '② 下方「捕获的 Cookie」按真实接口地址读取（含 HttpOnly），可复制或保存到服务端给「自动获取」用', '');
   refreshCookie(true);
 })();
