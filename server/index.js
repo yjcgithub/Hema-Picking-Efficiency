@@ -798,6 +798,57 @@ function umsDropAuthCookie(tag, cookie) {
   return tag;
 }
 
+/* ---------- PushPlus 微信提醒：接口 Cookie 失效时推一条 ---------- */
+let lastCookiePushAt = 0;                 // 上次提醒时间；同一失效状态在冷却窗口内不重复推
+
+function pushplusToken() {
+  // 环境变量一旦设置就优先（设为空串 = 显式关闭提醒，便于测试 / 临时停用）
+  const env = process.env.HEMA_PUSHPLUS_TOKEN;
+  return String(env === undefined ? (CFG.PUSHPLUS_TOKEN || '') : env).trim();
+}
+
+// 发一条文本消息；返回 { ok, error? }
+async function pushplusSend(title, content) {
+  const token = pushplusToken();
+  if (!token) return { ok: false, error: '未配置 PushPlus token' };
+  const r = await fetch(CFG.PUSHPLUS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: token, title: title, content: content, template: 'txt' })
+  });
+  const j = await r.json().catch(function () { return null; });
+  if (!j || j.code !== 200) {
+    return { ok: false, error: (j && (j.msg || ('code ' + j.code))) || ('HTTP ' + r.status) };
+  }
+  return { ok: true };
+}
+
+/* Cookie 鉴权失效提醒。主 / 备用两份同时失效、或自动获取每个排期点都撞同一个失效 Cookie 时
+   会有多次触发，故统一走 PUSHPLUS_COOLDOWN_MIN 冷却，避免反复刷屏。
+   不 await：通知失败 / 超时不应影响取数主流程 */
+function notifyCookieInvalid(tag, detail, src) {
+  if (!pushplusToken()) return;
+  const now = Date.now();
+  if (now - lastCookiePushAt < CFG.PUSHPLUS_COOLDOWN_MIN * 60000) return;
+  lastCookiePushAt = now;
+  const content = [
+    '拣货效率看板：接口 Cookie 已失效（登录态过期），服务端「自动获取」已停止取数。',
+    '',
+    '失效槽位：' + (tag || '接口 Cookie'),
+    '来源：' + (src === 'manual' ? '手动获取' : src === 'auto' ? '自动获取' : (src || '取数')),
+    '时间：' + clockOf(new Date()),
+    detail ? '错误：' + String(detail).slice(0, 300) : '',
+    '',
+    '处理：打开盒马工作台 → 右下角插件面板 →「立即同步」一次，脚本会自动重新读取并保存 Cookie。'
+  ].filter(Boolean).join('\n');
+  pushplusSend('【拣货效率】接口 Cookie 已失效', content).then(function (r) {
+    if (r.ok) logWarn('[推送] Cookie 失效提醒已发送（PushPlus）', src || 'auto');
+    else logWarn('[推送] Cookie 失效提醒发送失败：' + r.error, src || 'auto');
+  }, function (e) {
+    logWarn('[推送] Cookie 失效提醒发送失败：' + ((e && e.message) || e), src || 'auto');
+  });
+}
+
 // 逐页拉取直到取满 totalNum；incremental 时遇到「整页单号都已入库」提前结束
 // 返回 { info: { list, totalNum }, pages, totalPages, reached, complete }
 //   reached  ：增量模式下提前追平（本次只拿到新增部分）
@@ -937,6 +988,8 @@ async function umsRunFetch(startDate, endDate, incremental, candidates, src) {
       const retryable = e.umsAuth || e.umsThrottle;
       // 鉴权失效（登录态过期）：直接删除这份 Cookie，避免之后反复拿它去撞接口
       const dropped = e.umsAuth ? umsDropAuthCookie(tag, it.cookie) : '';
+      // 同时推一条微信提醒（有冷却窗口：主 / 备用同时失效只会收到一条）
+      if (e.umsAuth) notifyCookieInvalid(dropped || tag, e.message, src);
       if (!retryable || i === list.length - 1) {
         if (dropped) logWarn('[取数] ' + dropped + ' Cookie 鉴权失效，已自动删除。' + UMS_COOKIE_HINT, src);
         throw e;                                          // 不可回退 / 已无更多候选：抛出

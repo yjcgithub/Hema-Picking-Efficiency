@@ -121,5 +121,11 @@ module.exports = {
   DING_AUTO_STATE_KEY: 'dingAutoState',   // 最近一次自动推送结果 { at, ok, error, reason, count }
   DING_AT_ALL_KEY: 'dingAtAll',           // 推送正文是否在「统计时间段」前 @全体成员（未设置 = 开）
   DING_PUSH_DELAY_MIN: 1,                 // 取数成功后延迟多少分钟才推送（等数据稳定）
-  DING_PUSH_MAX_RETRY: 2                  // 推送失败自动重试次数
+  DING_PUSH_MAX_RETRY: 2,                 // 推送失败自动重试次数
+
+  /* ---------- PushPlus 微信提醒（接口 Cookie 失效时推一条） ----------
+     可用环境变量 HEMA_PUSHPLUS_TOKEN 覆盖；token 置空 = 关闭提醒 */
+  PUSHPLUS_TOKEN: '12b995cc86e2486b87fb641f9ed2e14b',
+  PUSHPLUS_URL: 'https://www.pushplus.plus/send',
+  PUSHPLUS_COOLDOWN_MIN: 30               // 同一失效状态的最短提醒间隔（分钟），避免反复刷屏
 };

@@ -19,6 +19,7 @@ const http = require('node:http');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hema-ums-'));
 process.env.HEMA_DB_PATH = path.join(TMP, 'test.db');
 process.env.HEMA_STATIC = 'off';
+process.env.HEMA_PUSHPLUS_TOKEN = '';   // 关闭 Cookie 失效的 PushPlus 提醒，测试不访问外网
 // 真实 UMS 地址在 before 里用本地 mock 的端口覆盖（require('../index') 之前设置）
 
 // ---- 本地假 UMS 接口：Cookie 里带 BAD → 401（模拟登录态过期）；否则 200 空列表 ----
