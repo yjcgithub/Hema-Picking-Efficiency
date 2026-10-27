@@ -37,17 +37,18 @@ db.exec(`
 `);
 
 // 旧库补列：recs 为解析后的原始明细（早期版本未保存），保存映射后重算依赖它；
-// ignored 为被「忽略分区」排除出统计的明细条数；other_store 为按门店编码过滤掉的其它门店明细条数
-[['recs', 'TEXT'], ['ignored', 'INTEGER'], ['other_store', 'INTEGER']].forEach(function (c) {
+// ignored 为被「忽略分区」排除出统计的明细条数；other_store 为按门店编码过滤掉的其它门店明细条数；
+// map 为该数据集入库时固化的映射快照（{ map, ignore }），保证之后切换映射不重算历史数据
+[['recs', 'TEXT'], ['ignored', 'INTEGER'], ['other_store', 'INTEGER'], ['map', 'TEXT']].forEach(function (c) {
   if (!db.prepare('PRAGMA table_info(datasets)').all().some(x => x.name === c[0])) {
     db.exec('ALTER TABLE datasets ADD COLUMN ' + c[0] + ' ' + c[1]);
   }
 });
 
-function insert(dataset, recs) {
+function insert(dataset, recs, snap) {
   const info = db.prepare(
-    `INSERT INTO datasets (source_file, dates, record_count, dropped, ignored, other_store, eff, payload, recs, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO datasets (source_file, dates, record_count, dropped, ignored, other_store, eff, payload, recs, map, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     dataset.meta.sourceFile,
     dataset.meta.dates.join(','),
@@ -58,6 +59,7 @@ function insert(dataset, recs) {
     dataset.totals.eff,
     JSON.stringify(dataset),
     recs && recs.length ? JSON.stringify(recs) : null,
+    snap ? JSON.stringify(snap) : null,
     new Date().toISOString()
   );
   knownCache = null;
@@ -107,10 +109,10 @@ function findByOverlap(dates) {
 }
 
 // 覆盖更新：用新上传的数据完全替换该拣货单的全部字段（保留原 id，历史引用与前端选中态不变）
-function overwrite(id, dataset, recs) {
+function overwrite(id, dataset, recs, snap) {
   db.prepare(
     `UPDATE datasets SET source_file = ?, dates = ?, record_count = ?, dropped = ?, ignored = ?,
-            other_store = ?, eff = ?, payload = ?, recs = ?, created_at = ? WHERE id = ?`
+            other_store = ?, eff = ?, payload = ?, recs = ?, map = ?, created_at = ? WHERE id = ?`
   ).run(
     dataset.meta.sourceFile,
     dataset.meta.dates.join(','),
@@ -121,11 +123,25 @@ function overwrite(id, dataset, recs) {
     dataset.totals.eff,
     JSON.stringify(dataset),
     recs && recs.length ? JSON.stringify(recs) : null,
+    snap ? JSON.stringify(snap) : null,
     new Date().toISOString(),
     id
   );
   knownCache = null;
   return id;
+}
+
+// 该数据集的映射快照 { map, ignore }；老数据没有则返回 null
+function snapshotOf(id) {
+  const row = db.prepare('SELECT map FROM datasets WHERE id = ?').get(id);
+  if (!row || !row.map) return null;
+  try { return JSON.parse(row.map); } catch (e) { return null; }
+}
+
+/* 迁移：给还没有映射快照的历史数据集固化一份（升级后第一次启动时调用）。
+   之后切换映射只影响新入库的数据，历史数据集保持它们当时的归类 */
+function freezeMaps(snap) {
+  return db.prepare('UPDATE datasets SET map = ? WHERE map IS NULL').run(JSON.stringify(snap)).changes;
 }
 
 // 列表（不含 payload，避免过大）
@@ -225,14 +241,6 @@ function saveRecs(id, recs) {
   knownCache = null;
 }
 
-function updatePayload(id, dataset) {
-  db.prepare(
-    `UPDATE datasets SET payload = ?, eff = ?, record_count = ?, dropped = ?, ignored = ?, other_store = ?, dates = ? WHERE id = ?`
-  ).run(JSON.stringify(dataset), dataset.totals.eff, dataset.meta.recordCount, dataset.meta.dropped,
-    dataset.meta.ignored || 0, dataset.meta.otherStore || 0, dataset.meta.dates.join(','), id);
-  knownCache = null;
-}
-
 /* ---------- 键值设置 ---------- */
 
 function getSetting(key) {
@@ -250,6 +258,6 @@ function setSetting(key, value) {
 
 module.exports = {
   insert, findByDates, findByOverlap, overwrite, list, get, latest, remove, count, knownPickNos,
-  rebuildTargets, withoutRecs, recsOf, saveRecs, updatePayload,
+  rebuildTargets, withoutRecs, recsOf, saveRecs, snapshotOf, freezeMaps,
   getSetting, setSetting
 };

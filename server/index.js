@@ -234,6 +234,24 @@ function currentIgnore() {
   return Array.isArray(v) ? v.map(z => String(z).trim()).filter(Boolean) : [];
 }
 
+// 「已从分区设置列表删除」的分区：只控制设置界面是否列出，不影响统计口径
+function currentHidden() {
+  const v = db.getSetting(CFG.HIDDEN_KEY);
+  return Array.isArray(v) ? v.map(z => String(z).trim()).filter(Boolean) : [];
+}
+
+/* 映射快照：数据集入库时把「当前映射 + 忽略分区」固化到该数据集上。
+   之后切换拣货模式 / 改映射只影响之后入库的新数据，历史数据集仍按它们当时的规则展示 */
+function currentSnap() {
+  return { map: currentMap(), ignore: currentIgnore() };
+}
+
+// 升级迁移：老数据集没有快照，先按当前设置固化一次（此后不再随设置变化）
+const frozenSnap = db.freezeMaps(currentSnap());
+if (frozenSnap) {
+  logInfo('[设置] 已为 ' + frozenSnap + ' 个历史数据集固化当前分区映射：之后切换映射只影响新数据，历史数据不重算');
+}
+
 // 汇总所有数据集里实际出现过的「拣货分区」（新数据集走原始明细，旧数据集用 payload 里的分区兜底）
 function dataZones() {
   const set = {};
@@ -248,12 +266,14 @@ function dataZones() {
   return set;
 }
 
-// 设置界面用清单：数据里出现过的分区 + 映射里已配置的分区 + 已忽略的分区（去重、排序）
+// 设置界面用清单：数据里出现过的分区 + 映射里已配置的分区 + 已忽略的分区（去掉已删除的，去重、排序）
 function zoneRows() {
   const map = currentMap();
   const ignore = currentIgnore();
   const ig = {};
   ignore.forEach(z => { ig[z] = 1; });
+  const hd = {};
+  currentHidden().forEach(z => { hd[z] = 1; });
 
   const inData = dataZones();
   const all = {};
@@ -261,7 +281,7 @@ function zoneRows() {
   Object.keys(map).forEach(z => { all[z] = 1; });
   ignore.forEach(z => { all[z] = 1; });
 
-  return Object.keys(all).sort().map(z => ({
+  return Object.keys(all).filter(z => !hd[z]).sort().map(z => ({
     zone: z,
     type: map[z] || '',      // 空 = 未映射（数据里会归入「未匹配分区」）
     ignored: !!ig[z],        // 已忽略的分区完全排除出统计
@@ -269,25 +289,9 @@ function zoneRows() {
   }));
 }
 
-// 用新映射与忽略列表重算全部历史数据集（缺少原始明细的跳过，需重新上传才能重算）
-function rebuildAll(map, ignore) {
-  const updated = [], failed = [];
-  db.rebuildTargets().forEach(t => {
-    if (!t.recs || !t.recs.length) return;
-    try {
-      db.updatePayload(t.id, compute.rebuild(t.recs,
-        { sourceFile: t.sourceFile, dropped: t.dropped, otherStore: t.otherStore }, map, ignore));
-      updated.push(t.id);
-    } catch (e) {
-      failed.push({ id: t.id, error: e.message || String(e) });
-    }
-  });
-  return { updated, skipped: db.withoutRecs().map(x => x.id), failed };
-}
-
 /* 单日出数：隔天不显示前天，缺省取数据集内最新日期，其他日期由前端下拉手动选择（?date=YYYY-MM-DD）。
    - 响应 meta.dates 仍是完整日期集合（下拉用），meta.date 为本次展示的日期
-   - 有原始明细的一律按最新口径重算：库里的 payload 是上传时算好的旧版，
+   - 有原始明细的一律按该数据集固化的映射快照重算：库里的 payload 是上传时算好的旧版，
      直接返回会缺后加的字段（统计时间段 / 超时统计 / 分区人均等）
    - 缺原始明细的老数据集、或重算失败：退回原 payload，只补 meta.date */
 function withDate(ds, date) {
@@ -299,10 +303,12 @@ function withDate(ds, date) {
   const recs = ds.id == null ? null : db.recsOf(ds.id);
   if (!recs || !recs.length) { ds.meta.date = anchor; return ds; }
   try {
+    // 用该数据集入库时固化的映射快照重算：之后切换映射不影响历史数据
+    const snap = (ds.id == null ? null : db.snapshotOf(ds.id)) || currentSnap();
     const out = compute.rebuild(recs,
       { sourceFile: ds.meta.sourceFile, dropped: ds.meta.dropped, otherStore: ds.meta.otherStore,
         dates, bucket: 'hour' },
-      currentMap(), currentIgnore(), days);
+      snap.map, snap.ignore, days);
     out.id = ds.id;
     out.meta.date = anchor;
     return out;
@@ -328,13 +334,18 @@ function rangeDataset(from, to, unit) {
     hit.forEach(d => { if (days.indexOf(d) < 0) days.push(d); });
     const recs = db.recsOf(row.id);
     if (!recs || !recs.length) return;
+    // 各数据集按自己入库时的映射快照归类（含忽略分区）：切换映射不影响历史数据
+    const snap = db.snapshotOf(row.id) || currentSnap();
+    const ig = {};
+    (snap.ignore || []).forEach(z => { const s = String(z == null ? '' : z).trim(); if (s) ig[s] = 1; });
     files++;
     recs.forEach(r => {
       if (r.date < from || r.date > to) return;
+      if (ig[r.zone]) return;
       const no = r.no != null ? String(r.no).trim() : '';
       const key = no ? no + '\u0001' + String(r.zone == null ? '' : r.zone) : '';
       if (key) { if (seen[key]) return; seen[key] = 1; }
-      merged.push(r);
+      merged.push(Object.assign({}, r, { jobType: compute.jobType(r.zone, r.orderType, snap.map) }));
     });
   });
   if (!days.length || !merged.length) return null;
@@ -345,7 +356,7 @@ function rangeDataset(from, to, unit) {
     dropped: 0, otherStore: 0,
     dates: allDates,
     bucket: unit === 'week' ? 'week' : 'date'
-  }, currentMap(), currentIgnore(), days);
+  }, null, null, days, true);   // jobType 已按各数据集快照算好（keepJobType）
   out.meta.date = days[days.length - 1];
   out.meta.range = { from: days[0], to: days[days.length - 1], dates: days };
   return out;
@@ -388,47 +399,67 @@ router.get('/api/settings', (req, res) => {
   res.json({
     map: currentMap(),
     ignore: currentIgnore(),
+    hidden: currentHidden(),
+    mode: db.getSetting(CFG.FRONT_BACK_MODE_KEY) || '',
     jobTypes: CFG.JOB_TYPES,
     unmatched: CFG.UNMATCHED_TYPE,
-    zones: zoneRows()
+    zones: zoneRows(),
+    // 两套拣货模式的映射预设（页面「分区设置」的切换按钮用）
+    presets: CFG.FRONT_BACK_MAP_PRESETS.map(p => ({ key: p.key, name: p.name, map: p.map }))
   });
 });
 
-// 保存映射与忽略分区（未提交/值为空的分区视为「不映射」-> 从映射中移除），并按新设置重算历史数据集
+// 保存映射、忽略分区与「已删除分区」（未提交/值为空的分区视为「不映射」-> 从映射中移除）
 router.post('/api/settings', express.json({ limit: '1mb' }), (req, res) => {
   try {
+    const arrayField = name => {
+      const v = req.body && req.body[name];
+      if (v != null && !Array.isArray(v)) {
+        return { error: name + ' 列表格式不合法（应为分区名数组）' };
+      }
+      const out = [];
+      (v || []).forEach(x => {
+        const zone = String(x == null ? '' : x).trim();
+        if (zone && out.indexOf(zone) < 0) out.push(zone);
+      });
+      return { list: out };
+    };
+
+    // 已删除的分区：只从设置列表里移除（历史数据仍在，统计口径不变）
+    const hiddenRes = arrayField('hidden');
+    if (hiddenRes.error) return res.status(400).json({ error: hiddenRes.error });
+    const hidden = hiddenRes.list;
+    // 忽略分区：命中即完全排除出统计（与其映射无关）
+    const ignoreRes = arrayField('ignore');
+    if (ignoreRes.error) return res.status(400).json({ error: ignoreRes.error });
+    const ignore = ignoreRes.list;
+
     const input = (req.body && req.body.map) || {};
     const map = {};
     for (const key of Object.keys(input)) {
       const zone = String(key).trim();
       const type = String(input[key] == null ? '' : input[key]).trim();
-      if (!zone || !type) continue;
+      if (!zone || !type || hidden.indexOf(zone) >= 0) continue;
       if (CFG.JOB_TYPES.indexOf(type) < 0) {
         return res.status(400).json({ error: '分区「' + zone + '」的作业类型不合法：' + type });
       }
       map[zone] = type;
     }
+    const keptIgnore = ignore.filter(z => hidden.indexOf(z) < 0);
 
-    // 忽略分区：命中即完全排除出统计（与其映射无关）
-    const ignore = [];
-    const inputIgnore = req.body && req.body.ignore;
-    if (inputIgnore != null && !Array.isArray(inputIgnore)) {
-      return res.status(400).json({ error: '忽略分区列表格式不合法（应为分区名数组）' });
+    const mode = String((req.body && req.body.mode) || '').trim();
+    if (mode && !CFG.FRONT_BACK_MAP_PRESETS.some(p => p.key === mode)) {
+      return res.status(400).json({ error: '未知的拣货模式：' + mode });
     }
-    (inputIgnore || []).forEach(z => {
-      const zone = String(z == null ? '' : z).trim();
-      if (zone && ignore.indexOf(zone) < 0) ignore.push(zone);
-    });
 
     db.setSetting(CFG.MAPPING_KEY, map);
-    db.setSetting(CFG.IGNORE_KEY, ignore);
-    const r = rebuildAll(map, ignore);
-    logInfo('[设置] 分区映射 ' + Object.keys(map).length + ' 项、忽略分区 ' + ignore.length +
-      ' 项已保存；重算 ' + r.updated.length + ' 个数据集' +
-      (r.skipped.length ? '，跳过 ' + r.skipped.length + ' 个（缺原始明细）' : '') +
-      (r.failed.length ? '，失败 ' + r.failed.length + ' 个' : ''));
-    if (r.failed.length) logWarn('[设置] 重算失败：' + JSON.stringify(r.failed).slice(0, 300));
-    res.json({ ok: true, map, ignore, updated: r.updated, skipped: r.skipped, failed: r.failed });
+    db.setSetting(CFG.IGNORE_KEY, keptIgnore);
+    db.setSetting(CFG.HIDDEN_KEY, hidden);
+    db.setSetting(CFG.FRONT_BACK_MODE_KEY, mode);
+    // 不做历史重算：每个数据集入库时已固化映射快照，改设置只对之后入库的新数据生效
+    logInfo('[设置] 分区映射 ' + Object.keys(map).length + ' 项、忽略分区 ' + keptIgnore.length +
+      ' 项、删除分区 ' + hidden.length + ' 项已保存；历史数据集保持原映射，新设置从之后入库的数据生效');
+    res.json({ ok: true, map, ignore: keptIgnore, hidden, mode });
   } catch (e) {
     logWarn('[设置] 保存失败：' + (e.message || e));
     res.status(400).json({ error: e.message || String(e) });
@@ -490,20 +521,21 @@ function saveBuilt(built, opts) {
   const hit = db.findByDates(dates);
   const src = built.dataset.meta.sourceFile || '上传文件';
   const trg = (opts && opts.src) || '';   // 取数来源（手动 / 自动 / 脚本），供页面日志角标区分
+  const snap = currentSnap();             // 入库时固化的映射快照：之后切换映射不影响这份数据
   if (opts && opts.merge) {
     // 增量：优先并入同时间维度的数据集；增量只取到部分日期时并入日期有交集的最新一条
     const target = hit || db.findByOverlap(dates);
     const oldRecs = target ? db.recsOf(target.id) : null;
     if (target && oldRecs && oldRecs.length) {
       const prev = db.get(target.id);
-      const m = compute.mergeInto(oldRecs, built, (prev && prev.meta) || {}, currentIgnore(), {
+      const m = compute.mergeInto(oldRecs, built, (prev && prev.meta) || {}, snap.ignore, {
         replaceDates: opts.replaceDates
       });
       if (!m.added && !m.replaced) {
         logInfo('[入库] ' + src + '：无新增/覆盖，跳过写入（数据集 #' + target.id + '）', trg);
         return Object.assign({ id: target.id, mode: 'merge', added: 0, replaced: 0 }, m.dataset);
       }
-      db.overwrite(target.id, m.dataset, m.recs);
+      db.overwrite(target.id, m.dataset, m.recs, snap);
       logInfo('[入库] ' + src + '：增量并入数据集 #' + target.id +
         '，新增 ' + m.added + ' 条、覆盖 ' + m.replaced + ' 条，有效明细 ' + m.dataset.meta.recordCount + ' 条', trg);
       return Object.assign({ id: target.id, mode: 'merge', added: m.added, replaced: m.replaced }, m.dataset);
@@ -512,8 +544,8 @@ function saveBuilt(built, opts) {
   // 未命中同维度：新建数据集（或整体替换同维度的数据集）
   const before = hit ? (db.recsOf(hit.id) || []).length : 0;
   const id = hit
-    ? db.overwrite(hit.id, built.dataset, built.recs)
-    : db.insert(built.dataset, built.recs);
+    ? db.overwrite(hit.id, built.dataset, built.recs, snap)
+    : db.insert(built.dataset, built.recs, snap);
   logInfo('[入库] ' + src + '：' + (hit ? '覆盖数据集 #' + id : '新建数据集 #' + id) +
     '，明细 ' + built.recs.length + ' 条' + (before ? '（替换旧明细 ' + before + ' 条）' : '') +
     '，日期 ' + dates.join('、'), trg);

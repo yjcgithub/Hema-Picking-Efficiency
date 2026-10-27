@@ -263,7 +263,7 @@
 
 <!-- 分区设置弹窗：配置「拣货分区 → 前后场分区（作业类型）」映射，保存后由服务端重算历史数据集 -->
 <div class="mask hidden" id="zoneCfgMask">
-  <div class="modal narrow">
+  <div class="modal zone-modal">
     <div class="modal-head">
       <h3>分区设置（拣货分区 → 前后场分区）</h3>
       <button type="button" class="modal-x" id="zoneCfgClose" title="关闭（Esc）">×</button>
@@ -271,8 +271,9 @@
     <div class="modal-bar">
       <span class="modal-sum" id="zoneCfgSum">加载中…</span>
       <span class="grow"></span>
+      <button type="button" class="btn" id="zoneCfgPreset" title="一键套用另一套拣货模式的分区映射（套用后需点「保存」）">切换模式…</button>
       <button type="button" class="btn" id="zoneCfgRefresh">刷新</button>
-      <button type="button" class="btn primary" id="zoneCfgSave">保存并重算</button>
+      <button type="button" class="btn primary" id="zoneCfgSave">保存</button>
     </div>
     <div class="modal-body">
       <div class="zone-cfg-head">数据中出现的拣货分区</div>
@@ -286,8 +287,11 @@
         其余按此处的「拣货分区 → 前后场分区」取值；选「不映射」的分区归入「未匹配分区」。<br>
         选「忽略（排除统计）」的分区，其明细完全排除出统计（不计入任何指标与图表），
         仅在上传结果与数据管理中单独记为「已忽略」，与「丢弃」（缺人/缺时间）区分。<br>
-        保存后会立即用新设置重算全部历史数据集（依赖上传时保存的原始明细，早期数据集可能需重新上传）；
-        若所有分区都被忽略，上传与重算会因无数据可统计而失败。
+        每行可「改名」或「删除」：改名即修改列表里的分区名（需与数据中的名称一致才会命中映射）；
+        删除只把该分区从设置列表移除，<b>历史数据与统计口径都不变</b>，之后在下方重新新增同名分区即可恢复。<br>
+        保存后只对<b>之后新入库</b>的数据生效：每个数据集入库时会固化当时的映射与忽略分区，
+        之后切换模式 / 改映射都<b>不会重算历史数据集</b>，历史报表保持原样。<br>
+        若所有分区都被忽略，新数据会因无数据可统计而入库失败。
       </div>
     </div>
   </div>

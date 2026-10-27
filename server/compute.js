@@ -56,11 +56,19 @@ function weekStartOf(ds) {
 }
 
 // 作业类型：拣货单类型为「一体化」时优先；否则按映射表取前后场分区，未命中归入「未匹配分区」
+// 映射键可写完整分区名（含编码，如「AH 水产*A」）或去掉编码的分区名（如「水产*A」）：
+// 先精确匹配；未命中再按「去掉开头分区编码」比对一次，这样换拣货模式后编码变了、名称没变也能命中
+function zoneName(z) {
+  const s = String(z == null ? '' : z).trim();
+  const i = s.indexOf(' ');
+  return i > 0 ? s.slice(i + 1) : s;
+}
 function jobType(part, orderType, map) {
   if (String(orderType == null ? '' : orderType).trim() === CFG.INTEGRATED_ORDER_TYPE) return '一体化';
   const m = map || CFG.DEFAULT_FRONT_BACK_MAP;
-  const p = m[String(part == null ? '' : part).trim()];
-  return p || CFG.UNMATCHED_TYPE;
+  const p = String(part == null ? '' : part).trim();
+  const t = m[p] || m[zoneName(p)];
+  return t || CFG.UNMATCHED_TYPE;
 }
 
 function zoneCode(z) {
@@ -802,9 +810,12 @@ function buildFromBuffer(buf, sourceFile, map, ignore) {
 /* 用新映射与忽略列表重算作业类型并重建数据集（改「分区设置」后调用）
    days：日视图传单日字符串、周 / 月视图传日期数组、省略 = 整份数据；
    meta.bucket = 'date' 按日期出数（周视图）、'week' 按自然周出数（月视图）、否则按小时（单日）；
-   时间维度（meta.dates）仍保留原数据集的完整日期集合，供日期下拉使用 */
-function rebuild(recs, meta, map, ignore, days) {
-  const mapped = recs.map(r => Object.assign({}, r, { jobType: jobType(r.zone, r.orderType, map) }));
+   时间维度（meta.dates）仍保留原数据集的完整日期集合，供日期下拉使用；
+   keepJobType = true 时沿用每条明细上已有的 jobType（跨数据集汇总时，各数据集按各自的映射快照预先算好） */
+function rebuild(recs, meta, map, ignore, days, keepJobType) {
+  const mapped = recs.map(r => Object.assign({}, r, {
+    jobType: keepJobType ? (r.jobType || CFG.UNMATCHED_TYPE) : jobType(r.zone, r.orderType, map)
+  }));
   const set = days == null ? null : (Array.isArray(days) ? days : [days]);
   const scope = set ? mapped.filter(r => set.indexOf(r.date) >= 0) : mapped;
   if (!scope.length) throw new Error('数据集内没有所选日期范围的明细');

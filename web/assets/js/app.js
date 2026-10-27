@@ -2498,8 +2498,13 @@
   var zcSum = document.getElementById('zoneCfgSum');
   var zcNew = document.getElementById('zoneCfgNew');
   var zcSave = document.getElementById('zoneCfgSave');
+  var zcPresetBtn = document.getElementById('zoneCfgPreset');
   var zcTypes = [];        // 可选作业类型（「不映射」由前端补空值选项）
   var zcRows = [];         // [{ zone, type, ignored, inData }]；type 为空串 = 不映射
+  var zcPresets = [];      // [{ key, name, map }]：两套拣货模式的分区映射预设（接口下发）
+  var zcHidden = [];       // 已从列表删除的分区（只影响列表是否显示，历史数据仍在）
+  var zcEditing = -1;      // 正在改名的那一行下标（-1 = 无）
+  var zcMode = '';         // 当前拣货模式（预设 key）：改名 / 删除分区不会改变它
 
   function zcOptions(r) {
     var opts = ['<option value=""' + (!r.ignored && !r.type ? ' selected' : '') + '>不映射</option>'];
@@ -2516,24 +2521,140 @@
     zcSum.textContent = '共 ' + zcRows.length + ' 个分区，已映射 ' + mapped + ' 个，已忽略 ' + ignored + ' 个';
   }
 
+  /* ---------- 模式切换：两套拣货模式的分区映射预设（合流按单 / 拆零_根据批次组包） ---------- */
+  // 分区名去掉开头的分区编码（与后端 compute.zoneName 同口径）：
+  // 预设里可能只写名称（如「水产*A」），数据里是完整名（如「AH 水产*A」），按名称对上即可
+  function zcName(z) {
+    var s = String(z == null ? '' : z).trim(), i = s.indexOf(' ');
+    return i > 0 ? s.slice(i + 1) : s;
+  }
+  // 归一化为「名称 → 作业类型」
+  function zcNormOfMap(m) {
+    var o = {};
+    Object.keys(m).forEach(function (k) { o[zcName(k)] = m[k]; });
+    return o;
+  }
+  function zcRowsNorm() {
+    var o = {};
+    zcRows.forEach(function (r) { if (!r.ignored && r.type) o[zcName(r.zone)] = r.type; });
+    return o;
+  }
+  function zcSameMap(a, b) {
+    var ka = Object.keys(a).sort(), kb = Object.keys(b).sort();
+    if (ka.length !== kb.length) return false;
+    for (var i = 0; i < ka.length; i++) if (ka[i] !== kb[i] || a[ka[i]] !== b[kb[i]]) return false;
+    return true;
+  }
+  // 当前模式：优先用保存过的模式 key；老数据没有记录时再按映射内容推断一次
+  function zcActivePreset() {
+    var hit = null;
+    zcPresets.forEach(function (p) { if (!hit && p.key === zcMode) hit = p; });
+    if (hit) return hit;
+    var cur = zcRowsNorm();
+    zcPresets.forEach(function (p) {
+      if (!hit && zcSameMap(cur, zcNormOfMap(p.map))) hit = p;
+    });
+    return hit;
+  }
+  // { 当前预设, 要切到的那套 }；当前不在任何预设上时默认切到第一套
+  function zcSwitchTarget() {
+    var cur = zcActivePreset();
+    var target = cur ? zcPresets.filter(function (p) { return p.key !== cur.key; })[0] : zcPresets[0];
+    return { cur: cur, target: target };
+  }
+  function zcPaintPresetBtn() {
+    if (!zcPresetBtn) return;
+    if (!zcPresets.length) { zcPresetBtn.style.display = 'none'; return; }
+    zcPresetBtn.style.display = '';
+    var t = zcSwitchTarget();
+    zcPresetBtn.textContent = '切换为「' + (t.target ? t.target.name : '默认') + '」';
+    zcPresetBtn.title = '当前：' + (t.cur ? t.cur.name : '自定义映射') +
+      '　→　一键套用「' + (t.target ? t.target.name : '默认') + '」（套用后需点「保存」）';
+  }
+  // 套用预设：先清空现有映射（保留「忽略」标记），再按完整名 / 名称两级匹配列表里的分区；列表里没有的补一行
+  function zcApplyPreset(p) {
+    zcMode = p.key;
+    zcRows.forEach(function (r) { if (!r.ignored) r.type = ''; });
+    Object.keys(p.map).forEach(function (k) {
+      var type = p.map[k], hit = null;
+      zcRows.forEach(function (r) { if (!hit && r.zone === k) hit = r; });
+      zcRows.forEach(function (r) { if (!hit && zcName(r.zone) === zcName(k)) hit = r; });
+      if (hit) { hit.type = type; hit.ignored = false; }
+      else zcRows.push({ zone: k, type: type, ignored: false, inData: false });
+    });
+    renderZoneCfg();
+    notice('已套用「' + esc(p.name) + '」分区映射，点「保存」生效（仅影响之后入库的数据）', 'ok');
+  }
+
   function renderZoneCfg() {
     zcList.innerHTML = zcRows.length
       ? zcRows.map(function (r, i) {
-        return '<div class="zone-row">' +
-          '<span class="zone-name" title="' + esc(r.zone) + '">' + esc(r.zone) +
-          (r.inData ? '<span class="zone-tag">数据中</span>' : '') +
-          (r.ignored ? '<span class="zone-tag off">已忽略</span>' : '') + '</span>' +
+        var name = i === zcEditing
+          ? '<input class="zone-edit" data-i="' + i + '" value="' + esc(r.zone) + '">'
+          : '<span class="zone-name" title="' + esc(r.zone) + '">' + esc(r.zone) +
+            (r.inData ? '<span class="zone-tag">数据中</span>' : '') +
+            (r.ignored ? '<span class="zone-tag off">已忽略</span>' : '') + '</span>';
+        return '<div class="zone-row">' + name +
+          '<div class="zone-ops">' +
+          '<button type="button" class="zone-op" data-act="rename" data-i="' + i + '">改名</button>' +
+          '<button type="button" class="zone-op del" data-act="del" data-i="' + i + '">删除</button>' +
           '<select class="zone-sel" data-i="' + i + '">' + zcOptions(r) + '</select>' +
+          '</div>' +
           '</div>';
       }).join('')
       : '<div class="zone-empty">暂无可配置的分区，可在下方手动新增。</div>';
     zcSyncSum();
+    zcPaintPresetBtn();
+  }
+
+  // 结束改名：写回分区名（重名则拒绝），并解除同名分区的「已删除」状态
+  function zcFinishEdit() {
+    var inp = zcList.querySelector('.zone-edit');
+    if (!inp) return;
+    var i = Number(inp.getAttribute('data-i'));
+    var v = (inp.value || '').trim();
+    zcEditing = -1;
+    var r = zcRows[i];
+    if (!r) { renderZoneCfg(); return; }
+    if (v && v !== r.zone) {
+      var dup = zcRows.some(function (x, j) { return j !== i && x.zone === v; });
+      if (dup) { notice('分区「' + esc(v) + '」已在列表中', 'err'); renderZoneCfg(); return; }
+      var hi = zcHidden.indexOf(v);
+      if (hi >= 0) zcHidden.splice(hi, 1);
+      r.zone = v;
+      r.inData = false;   // 改名后不再对应数据里的原名，「数据中」标记失去意义
+    }
+    renderZoneCfg();
+  }
+
+  // 行内操作：改名 / 删除
+  function zcRowAction(ev) {
+    var b = ev.target;
+    if (!b || !b.classList || !b.classList.contains('zone-op')) return;
+    var i = Number(b.getAttribute('data-i'));
+    var r = zcRows[i];
+    if (!r) return;
+    if (b.getAttribute('data-act') === 'del') {
+      zcRows.splice(i, 1);
+      if (zcHidden.indexOf(r.zone) < 0) zcHidden.push(r.zone);
+      zcEditing = -1;
+      renderZoneCfg();
+      return;
+    }
+    zcEditing = i;
+    renderZoneCfg();
+    var inp = zcList.querySelector('.zone-edit');
+    if (inp) { inp.focus(); inp.select(); }
   }
 
   function loadZoneCfg() {
     zcSum.textContent = '加载中…';
     return fetch(API + '/settings').then(readJson).then(function (j) {
       zcTypes = j.jobTypes || [];
+      zcPresets = j.presets || [];
+      zcHidden = (j.hidden || []).slice();
+      zcMode = j.mode || '';
+      zcEditing = -1;
       zcRows = (j.zones || []).map(function (z) {
         return { zone: z.zone, type: z.type || '', ignored: !!z.ignored, inData: !!z.inData };
       });
@@ -2555,12 +2676,26 @@
     renderZoneCfg();
   });
 
+  // 行内「改名 / 删除」
+  zcList.addEventListener('click', zcRowAction);
+  zcList.addEventListener('keydown', function (ev) {
+    if (!ev.target.classList || !ev.target.classList.contains('zone-edit')) return;
+    if (ev.key === 'Enter') { ev.preventDefault(); zcFinishEdit(); }
+    else if (ev.key === 'Escape') { zcEditing = -1; renderZoneCfg(); }
+  });
+  zcList.addEventListener('focusout', function (ev) {
+    if (ev.target.classList && ev.target.classList.contains('zone-edit')) zcFinishEdit();
+  });
+
   function zcAdd() {
     var name = (zcNew.value || '').trim();
     if (!name) { notice('请输入拣货分区名称', 'err'); zcNew.focus(); return; }
     var hit = false;
     zcRows.forEach(function (r) { if (r.zone === name) hit = true; });
     if (hit) { notice('分区「' + esc(name) + '」已在列表中', 'ok'); zcNew.select(); return; }
+    // 之前删除过同名分区：重新新增视为恢复
+    var hi = zcHidden.indexOf(name);
+    if (hi >= 0) zcHidden.splice(hi, 1);
     zcRows.push({ zone: name, type: '', ignored: false, inData: false });
     zcNew.value = '';
     renderZoneCfg();
@@ -2576,23 +2711,13 @@
     fetch(API + '/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ map: map, ignore: ignore })
+      body: JSON.stringify({ map: map, ignore: ignore, hidden: zcHidden, mode: zcMode })
     }).then(readJson).then(function (j) {
       zcSave.disabled = false;
-      var upd = (j.updated || []).length, skip = j.skipped || [], fail = (j.failed || []).length;
-      var msg = '已保存 ' + Object.keys(j.map || {}).length + ' 个分区的映射、' + (j.ignore || []).length +
-        ' 个忽略分区，并按新设置重算历史数据集：成功 ' + upd + ' 条';
-      if (skip.length) msg += '，跳过 ' + skip.length + ' 条（数据集 #' + skip.join('、') +
-        ' 上传时未保存原始明细，需重新上传该文件才能重算）';
-      if (fail) msg += '，失败 ' + fail + ' 条';
-      notice(msg, fail ? 'err' : 'ok');
+      notice('已保存 ' + Object.keys(j.map || {}).length + ' 个分区的映射、' + (j.ignore || []).length +
+        ' 个忽略分区、' + (j.hidden || []).length +
+        ' 个已删除分区。历史数据集保持原映射不变，新设置从之后入库的数据生效', 'ok');
       renderZoneCfg();
-      // 重算只影响服务端数据：当前正查看的数据集需重新拉取才反映新映射
-      var curId = current && current.id != null ? String(current.id) : null;
-      loadDataMgr(curId);
-      if (curId != null) {
-        refetch(curId).catch(function () { });
-      }
     }).catch(function (e) {
       zcSave.disabled = false;
       notice('保存失败：' + esc(e.message || e), 'err');
@@ -2606,6 +2731,11 @@
   document.getElementById('zoneCfgClose').addEventListener('click', closeZoneCfg);
   document.getElementById('zoneCfgRefresh').addEventListener('click', loadZoneCfg);
   document.getElementById('zoneCfgAdd').addEventListener('click', zcAdd);
+  if (zcPresetBtn) zcPresetBtn.addEventListener('click', function () {
+    if (!zcPresets.length) return;
+    var t = zcSwitchTarget();
+    if (t.target) zcApplyPreset(t.target);
+  });
   zcNew.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') zcAdd(); });
   zcSave.addEventListener('click', saveZoneCfg);
   zcMask.addEventListener('click', function (ev) { if (ev.target === zcMask) closeZoneCfg(); });

@@ -14,7 +14,7 @@
 - **口径唯一**：所有统计口径只在服务端 `compute.js` 实现，前端不做任何计算，仅渲染服务端返回的结果，避免前后端各写一套导致口径漂移。
 - **多来源同一口径**：xlsx 上传、服务端带 Cookie 取数、油猴脚本回传三条路径最终都汇入 `buildFromMatrix`，门店筛选 / 丢弃计数 / 时间维度完全一致。
 - **零构建前端**：前端为纯静态 HTML/CSS/JS（原生 JS），无打包步骤；发布时仅由 `build.js` 做内容哈希指纹。
-- **原始明细留库**：入库时同时保存原始明细 `recs`，使「分区设置」变更后能重算全部历史数据集，无需重新上传。
+- **原始明细留库**：入库时同时保存原始明细 `recs` 与当时的映射快照 `map`，出数按快照重算，切换拣货模式不影响历史报表。
 - **推送不依赖浏览器**：定时推送的透视表图片由服务端自绘 SVG → PNG（`render.js` + `@resvg/resvg-js`），无需无头浏览器常开，小服务器也能跑。
 
 ---
@@ -198,7 +198,7 @@ if (!edge) {                                        # 边界取数不吃时段�
 
 > 排期**不含抖动、也不做指数退避**：触发时刻只由「整点网格 + 每 `intervalMin` 一分钟」决定，不受上次执行耗时影响、永不漂移；服务端判断与前端倒计时用的是同一个 `nextAt`。
 
-**其它编排函数**：`currentMap()` / `currentIgnore()`（设置优先、回退默认值）、`dataZones()` / `zoneRows()`（分区清单）、`rebuildAll()`（设置变更后重算）、`withDate()`（出数范围，见 [7.3](#73-按日重算-withdate)）、`saveBuilt()`（上传与取数共用的入库决策，见 [7.1](#71-时间维度覆盖--新增)）。
+**其它编排函数**：`currentMap()` / `currentIgnore()`（设置优先、回退默认值）、`currentSnap()`（入库时固化的 `{ map, ignore }` 快照）、`db.freezeMaps()`（升级时为老数据集补快照）、`dataZones()` / `zoneRows()`（分区清单）、`withDate()`（出数范围，见 [7.3](#73-按日重算-withdate)）、`saveBuilt()`（上传与取数共用的入库决策，见 [7.1](#71-时间维度覆盖--新增)）。
 
 **日志**：`logInfo(msg, src)` / `logWarn(msg, src)` 统一输出 `[YYYY-MM-DD HH:mm:ss] 内容`（东八区时间，`clockOf()` 用于标注「下次执行时间」）。日志只打在**关键动作**上，不打请求级日志（前端每 5 秒轮询一次配置，全量请求日志会淹没有用信息）：
 
@@ -234,7 +234,7 @@ if (!edge) {                                        # 边界取数不吃时段�
 | `buildFromUms(payload, meta, map, ignore)` | 实时接口解析：`umsItems()` 摊平多页并按 `id/code` 去重 → `umsRow()` 拼成与 xlsx 一致的表头矩阵 → 复用 `buildFromMatrix` |
 | `mergeInto(oldRecs, built, prevMeta, ignore, opts)` | 增量合并（见 [7.2](#72-增量合并-mergeinto)） |
 | `validateStartTime(matrix, col)` | 时间列校验：整列无可解析值 → 报错；非空单元格解析失败 → 报错并带行号；空单元格按「丢弃」 |
-| `rebuild(recs, meta, map, ignore, date)` | 用新映射/忽略列表重算；`date` 非空时仅重算该日明细，但保留原完整日期集合 |
+| `rebuild(recs, meta, map, ignore, date, keepJobType)` | 用映射/忽略列表重算；`date` 非空时仅重算该日明细，但保留原完整日期集合；`keepJobType` 为真时沿用明细上已算好的 `jobType`（跨数据集汇总用） |
 
 **`recs` 单条明细结构**（存储与增量合并的最小单元）
 
@@ -292,13 +292,14 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 
 ### 5.3 存储层 — [server/db.js](./server/db.js)
 
-职责：SQLite 读写。库文件 `server/data/hema.db`，可用 `HEMA_DB_PATH` 覆盖（测试用临时库）。启动时建表并为旧库补列 `recs` / `ignored` / `other_store`。
+职责：SQLite 读写。库文件 `server/data/hema.db`，可用 `HEMA_DB_PATH` 覆盖（测试用临时库）。启动时建表并为旧库补列 `recs` / `ignored` / `other_store` / `map`。
 
 导出函数分组：
 
 - **数据集 CRUD**：`insert`、`overwrite`、`list`（不含 `payload`）、`get`、`latest`、`remove`、`count`
 - **时间维度匹配**：`findByDates(dates)`（`timeKey` 规范化后比较，同维度多条取最新）、`findByOverlap(dates)`（增量只取到部分日期时并入日期有交集的最新一条）
-- **重算支持**：`rebuildTargets()`（`recs` + meta 字段，并固化旧格式 `sub → orderType` 迁移）、`withoutRecs()`、`recsOf(id)`、`saveRecs`、`updatePayload`
+- **映射快照**：`snapshotOf(id)`（该数据集入库时固化的 `{ map, ignore }`）、`freezeMaps(snap)`（升级迁移：为没有快照的老数据集补一份）
+- **重算支持**：`rebuildTargets()`（`recs` + meta 字段，并固化旧格式 `sub → orderType` 迁移）、`withoutRecs()`、`recsOf(id)`、`saveRecs`
 - **增量追平**：`knownPickNos()`（返回已入库拣货单号 `Set`，只统计 `rec.ums && rec.no`；模块内 `knownCache` 缓存，任意写操作置空，避免翻页时反复解析全部明细）
 - **键值设置**：`getSetting` / `setSetting`（JSON 序列化，`ON CONFLICT` upsert）
 
@@ -306,14 +307,14 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 
 | 分组 | 常量 |
 |------|------|
-| 口径 | `UNIT`、`JOB_TYPES`、`UNMATCHED_TYPE`、`DEFAULT_FRONT_BACK_MAP`（8 项）、`INTEGRATED_ORDER_TYPE`、`TIME_COLUMN`、`QTY_COLUMN` / `QTY_FIELD` |
+| 口径 | `UNIT`、`JOB_TYPES`、`UNMATCHED_TYPE`、`DEFAULT_FRONT_BACK_MAP`（合流按单）、`FRONT_BACK_MAP_PRESETS`（合流按单 / 拆零_根据批次组包 两套，供「分区设置」一键切换）、`INTEGRATED_ORDER_TYPE`、`TIME_COLUMN`、`QTY_COLUMN` / `QTY_FIELD` |
 | 超时 | `TIMEOUT_COLUMN`、`TIMEOUT_YES`、`TIMEOUT_DUTY_COLUMN`、`TIMEOUT_NO_DUTY`、`UMS_DUTY_MAP`（接口英文编码 → 中文判责） |
 | 上传 | `STORE_CODE`、`REQUIRED_COLUMNS` |
 | 设置键名 | `MAPPING_KEY`、`IGNORE_KEY` |
 | UMS 接口 | `UMS_URL`、`UMS_PAGE_SIZE`、`UMS_NUM_CHOICES`、`UMS_EXTRA_QUERY`、`UMS_TIMEOUT_MS`、`UMS_MAX_PAGES` |
 | 自动获取 | `UMS_AUTO_MIN_INTERVAL`、`UMS_AUTO_MAX_INTERVAL`、`UMS_EDGE_WINDOW_MIN`、`UMS_MANUAL_LOCK_SEC`（120）、`UMS_AUTO_KEY`、`UMS_AUTO_STATE_KEY`、`UMS_AGENT_STATE_KEY` |
 | 防风控 | `UMS_PAGE_GAP_MIN_MS` / `UMS_PAGE_GAP_MAX_MS`（300 / 900）、`UMS_FETCH_COOLDOWN_SEC`（60）；`UMS_INTERVAL_JITTER`（0.15）/ `UMS_BACKOFF_MAX_MIN`（60）为**历史遗留，当前未使用**（排期已改为固定网格、不再抖动 / 退避） |
-| 设置表键名 | `UMS_COOKIE_KEY`、`UMS_COOKIE_BACKUP_KEY`（备用 Cookie）、`UMS_COOKIE_AUTH_KEY`（最近一次鉴权失效被删记录）、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY`、`UMS_RANGE_KEY` |
+| 设置表键名 | `MAPPING_KEY` / `IGNORE_KEY` / `HIDDEN_KEY`（分区映射 / 忽略 / 已删除）、`FRONT_BACK_MODE_KEY`（当前拣货模式预设）、`UMS_COOKIE_KEY`、`UMS_COOKIE_BACKUP_KEY`（备用 Cookie）、`UMS_COOKIE_AUTH_KEY`（最近一次鉴权失效被删记录）、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY`、`UMS_RANGE_KEY` |
 | 钉钉推送 | `DING_WEBHOOK_KEY`、`DING_SECRET_KEY`（加签）、`DING_PUBLIC_BASE_KEY`（图片公网地址）、`DING_AUTO_KEY`、`DING_AUTO_STATE_KEY`、`DING_AT_ALL_KEY`（@全体成员，未设=开）、`DING_PUSH_DELAY_MIN`（1）、`DING_PUSH_MAX_RETRY`（2） |
 
 映射的实际取值存于设置表，此处仅为**首次运行**的默认值。
@@ -356,7 +357,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | **钉钉推送** | `dingOpen` / `dingLoadCfg` / `dingPaint` / `dingSave` / `dingTest` / `dingAutoRun` | 钉钉设置弹窗：Webhook / 加签 / 公网地址、定时推送开关与 @全体成员开关、测试推送、「立即执行一次」并轮询结果 |
 | 日志查看 | `logsLoad` / `openLogs` / `closeLogs` | 服务端环形缓冲日志弹窗：来源角标、`warn` 标红、自动刷新 |
 | 数据管理 | `renderDmTable` / `loadDataMgr` / `deleteDatasets` / `clearDatasets` / `switchDataset` / `askConfirm` | 弹窗内查看/切换/删除/清空 + 页内二次确认 |
-| 分区设置 | `renderZoneCfg` / `loadZoneCfg` / `zcAdd` / `saveZoneCfg` | 维护映射与忽略分区，保存并重算 |
+| 分区设置 | `renderZoneCfg` / `loadZoneCfg` / `zcAdd` / `saveZoneCfg` / `zcApplyPreset` / `zcSwitchTarget` / `zcRowAction` / `zcFinishEdit` | 维护映射与忽略分区、一键切换拣货模式预设、行内改名 / 删除；保存只影响之后入库的新数据 |
 | 门禁 | `todayStr` / `syncGate` / `playGateOut` / `playDashIn` | 「今日暂无数据」遮罩与入场动画 |
 | 卡片工具 | `injectCardTools` / `captureCard` / `exportPng` / `copyPng` / `runCapture` | html2canvas 导出/复制图片（透视卡可按分类选范围） |
 | 启动 | 底部末尾 | 拉数据集 → 判定含今天的数据集 → `refetch` 或 `clearView` + 遮罩 |
@@ -459,19 +460,21 @@ setInterval(umsAutoTick, 5s)
   └─ syncGate(d)            → 依 meta.dates 是否含今天决定遮罩显隐
 ```
 
-### 6.5 设置变更（重算）
+### 6.5 设置变更（只影响新数据，不重算历史）
 
 ```
-分区设置弹窗 → saveZoneCfg()
+分区设置弹窗 → 切换模式（zcApplyPreset）/ 手工改下拉 → saveZoneCfg()
   → POST /api/settings { map, ignore }
      → 校验（作业类型必须在 JOB_TYPES 内，ignore 必须为数组）
      → db.setSetting(MAPPING_KEY / IGNORE_KEY, ...)
-     → rebuildAll(map, ignore)
-         → 逐条 db.rebuildTargets() → compute.rebuild(recs, meta, map, ignore)
-         → db.updatePayload(id, dataset)
-     → 响应 { ok, updated[], skipped[], failed[] }
-  → 前端刷新当前数据集
+     → 不重算任何历史数据集
+     → 响应 { ok, map, ignore }
+  → 前端提示「历史数据集保持原映射，新设置从之后入库的数据生效」
 ```
+
+**映射快照**：每个数据集入库时（`saveBuilt` → `db.insert/overwrite`）把当时的 `{ map, ignore }` 写进 `datasets.map`。
+之后出数一律按该数据集的快照重算（`withDate` 用单份快照；`rangeDataset` 跨数据集汇总时逐条按各自快照算好 `jobType`，再 `rebuild(..., keepJobType)`），
+因此切换拣货模式不会改动任何历史报表。升级迁移由 `db.freezeMaps()` 完成：为没有快照的老数据集按当时的设置补一份。
 
 ---
 
@@ -502,7 +505,7 @@ setInterval(umsAutoTick, 5s)
 展示范围默认只取数据集内**最新一天**（隔天不显示前天），其余日期由顶栏日期下拉手动选择：
 
 - `meta.dates` 始终是**完整**日期集合（下拉用），`meta.date` 为本次实际展示日期；
-- 有原始明细的数据集一律按**最新口径重算后再返回**（库里 `payload` 是上传时算好的旧版，直接返回会缺后加字段）；
+- 有原始明细的数据集一律按**该数据集固化的映射快照重算后再返回**（库里 `payload` 是上传时算好的旧版，直接返回会缺后加字段；快照保证切换映射不改动历史）；
 - 缺原始明细的旧数据集或重算失败时，退回原 `payload`，仅补 `meta.date`。
 
 ### 7.4 门禁遮罩（今日暂无数据）
@@ -655,7 +658,8 @@ setInterval(umsAutoTick, 5s)
 | `other_store` | INTEGER | 其它门店条数（旧库后补列） |
 | `eff` | REAL | 综合效率（列表展示用） |
 | `payload` | TEXT NOT NULL | 整份计算结果的 JSON |
-| `recs` | TEXT | 原始明细 JSON，用于改设置后重算与增量合并（旧库后补列） |
+| `recs` | TEXT | 原始明细 JSON，用于按快照出数与增量合并（旧库后补列） |
+| `map` | TEXT | 入库时固化的映射快照 `{ map, ignore }`：之后切换映射不重算该数据集（旧库后补列） |
 | `created_at` | TEXT NOT NULL | ISO 时间；索引 `idx_datasets_created(created_at DESC)` |
 
 ### settings（键值设置）
@@ -672,6 +676,8 @@ setInterval(umsAutoTick, 5s)
 |----|------|
 | `frontBackMap` | 拣货分区 → 前后场分区（作业类型） |
 | `ignoreZones` | 忽略分区列表 |
+| `hiddenZones` | 已从「分区设置」列表删除的分区（只影响列表显示，历史数据与统计口径不变） |
+| `frontBackMode` | 当前拣货模式预设 key（`merge` 合流按单 / `split` 拆零_根据批次组包）；切换按钮据此判断目标，改名 / 删除分区不影响它 |
 | `umsCookie` / `umsCookieBackup` | 实时接口主 Cookie / 备用 Cookie（页面或脚本同步写入，鉴权失效时自动删除对应槽位） |
 | `umsCookieAuth` | 最近一次「Cookie 鉴权失效被删除」的记录 `{ at, tag }`，供页面提示重新同步 |
 | `umsNum` | 每页条数（50 / 100 / 200） |
