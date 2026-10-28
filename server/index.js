@@ -240,6 +240,12 @@ function currentHidden() {
   return Array.isArray(v) ? v.map(z => String(z).trim()).filter(Boolean) : [];
 }
 
+// 达标线（行/h）：设置优先，未保存过用默认值；空对象 = 不设达标线
+function currentTargets() {
+  const v = db.getSetting(CFG.TARGETS_KEY);
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : CFG.DEFAULT_TARGETS;
+}
+
 /* 映射快照：数据集入库时把「当前映射 + 忽略分区」固化到该数据集上。
    之后切换拣货模式 / 改映射只影响之后入库的新数据，历史数据集仍按它们当时的规则展示 */
 function currentSnap() {
@@ -296,6 +302,7 @@ function zoneRows() {
    - 缺原始明细的老数据集、或重算失败：退回原 payload，只补 meta.date */
 function withDate(ds, date) {
   if (!ds) return ds;
+  if (ds.meta) ds.meta.targets = currentTargets();   // 达标线随数据集下发，页面直接使用
   const dates = (ds.meta && ds.meta.dates) || [];
   const anchor = dates.indexOf(date) >= 0 ? date : (dates[dates.length - 1] || '');
   const days = anchor ? [anchor] : [];
@@ -311,6 +318,7 @@ function withDate(ds, date) {
       snap.map, snap.ignore, days);
     out.id = ds.id;
     out.meta.date = anchor;
+    out.meta.targets = currentTargets();
     return out;
   } catch (e) { ds.meta.date = anchor; return ds; }
 }
@@ -359,6 +367,7 @@ function rangeDataset(from, to, unit) {
   }, null, null, days, true);   // jobType 已按各数据集快照算好（keepJobType）
   out.meta.date = days[days.length - 1];
   out.meta.range = { from: days[0], to: days[days.length - 1], dates: days };
+  out.meta.targets = currentTargets();
   return out;
 }
 
@@ -401,6 +410,7 @@ router.get('/api/settings', (req, res) => {
     ignore: currentIgnore(),
     hidden: currentHidden(),
     mode: db.getSetting(CFG.FRONT_BACK_MODE_KEY) || '',
+    targets: currentTargets(),
     jobTypes: CFG.JOB_TYPES,
     unmatched: CFG.UNMATCHED_TYPE,
     zones: zoneRows(),
@@ -409,59 +419,117 @@ router.get('/api/settings', (req, res) => {
   });
 });
 
-// 保存映射、忽略分区与「已删除分区」（未提交/值为空的分区视为「不映射」-> 从映射中移除）
+/* 解析「分区设置」请求体 → { map, ignore, hidden, mode, targets }；不合法时抛错（路由统一回 400） */
+function parseSettingsBody(body) {
+  const arrayField = name => {
+    const v = body && body[name];
+    if (v != null && !Array.isArray(v)) throw new Error(name + ' 列表格式不合法（应为分区名数组）');
+    const out = [];
+    (v || []).forEach(x => {
+      const zone = String(x == null ? '' : x).trim();
+      if (zone && out.indexOf(zone) < 0) out.push(zone);
+    });
+    return out;
+  };
+
+  // 已删除的分区：只从设置列表里移除（历史数据仍在，统计口径不变）
+  const hidden = arrayField('hidden');
+  // 忽略分区：命中即完全排除出统计（与其映射无关）
+  const ignore = arrayField('ignore').filter(z => hidden.indexOf(z) < 0);
+
+  const input = (body && body.map) || {};
+  const map = {};
+  for (const key of Object.keys(input)) {
+    const zone = String(key).trim();
+    const type = String(input[key] == null ? '' : input[key]).trim();
+    if (!zone || !type || hidden.indexOf(zone) >= 0) continue;
+    if (CFG.JOB_TYPES.indexOf(type) < 0) throw new Error('分区「' + zone + '」的作业类型不合法：' + type);
+    map[zone] = type;
+  }
+
+  const mode = String((body && body.mode) || '').trim();
+  if (mode && !CFG.FRONT_BACK_MAP_PRESETS.some(p => p.key === mode)) {
+    throw new Error('未知的拣货模式：' + mode);
+  }
+
+  // 达标线（行/h）：只接受 JOB_TYPES 里的作业类型，值须为正数；不提交 = 保持原值
+  let targets = currentTargets();
+  const inputTargets = body && body.targets;
+  if (inputTargets != null) {
+    if (typeof inputTargets !== 'object' || Array.isArray(inputTargets)) {
+      throw new Error('达标线格式不合法（应为 {作业类型: 数值}）');
+    }
+    targets = {};
+    for (const k of Object.keys(inputTargets)) {
+      const name = String(k).trim();
+      if (CFG.JOB_TYPES.indexOf(name) < 0) throw new Error('达标线的作业类型不合法：' + name);
+      if (inputTargets[k] == null || inputTargets[k] === '') continue;
+      const v = Number(inputTargets[k]);
+      if (!isFinite(v) || v <= 0) {
+        throw new Error('分区「' + name + '」的达标线不合法：' + inputTargets[k]);
+      }
+      targets[name] = v;
+    }
+  }
+  return { map, ignore, hidden, mode, targets };
+}
+
+function saveSettings(s) {
+  db.setSetting(CFG.MAPPING_KEY, s.map);
+  db.setSetting(CFG.IGNORE_KEY, s.ignore);
+  db.setSetting(CFG.HIDDEN_KEY, s.hidden);
+  db.setSetting(CFG.FRONT_BACK_MODE_KEY, s.mode);
+  db.setSetting(CFG.TARGETS_KEY, s.targets);
+}
+
+/* 用当前设置重算全部历史数据集（点「重算历史」时执行）：
+   同时把每份数据集的映射快照改成当前设置，之后出数才不会被旧快照覆盖 */
+function rebuildAll(map, ignore) {
+  const snap = { map, ignore };
+  const updated = [], failed = [];
+  db.rebuildTargets().forEach(t => {
+    if (!t.recs || !t.recs.length) return;
+    try {
+      const ds = compute.rebuild(t.recs,
+        { sourceFile: t.sourceFile, dropped: t.dropped, otherStore: t.otherStore }, map, ignore);
+      db.updatePayload(t.id, ds, snap);
+      updated.push(t.id);
+    } catch (e) {
+      failed.push({ id: t.id, error: e.message || String(e) });
+    }
+  });
+  return { updated, skipped: db.withoutRecs().map(x => x.id), failed };
+}
+
+// 保存映射、忽略分区、「已删除分区」、模式与达标线（只影响之后入库的新数据）
 router.post('/api/settings', express.json({ limit: '1mb' }), (req, res) => {
   try {
-    const arrayField = name => {
-      const v = req.body && req.body[name];
-      if (v != null && !Array.isArray(v)) {
-        return { error: name + ' 列表格式不合法（应为分区名数组）' };
-      }
-      const out = [];
-      (v || []).forEach(x => {
-        const zone = String(x == null ? '' : x).trim();
-        if (zone && out.indexOf(zone) < 0) out.push(zone);
-      });
-      return { list: out };
-    };
-
-    // 已删除的分区：只从设置列表里移除（历史数据仍在，统计口径不变）
-    const hiddenRes = arrayField('hidden');
-    if (hiddenRes.error) return res.status(400).json({ error: hiddenRes.error });
-    const hidden = hiddenRes.list;
-    // 忽略分区：命中即完全排除出统计（与其映射无关）
-    const ignoreRes = arrayField('ignore');
-    if (ignoreRes.error) return res.status(400).json({ error: ignoreRes.error });
-    const ignore = ignoreRes.list;
-
-    const input = (req.body && req.body.map) || {};
-    const map = {};
-    for (const key of Object.keys(input)) {
-      const zone = String(key).trim();
-      const type = String(input[key] == null ? '' : input[key]).trim();
-      if (!zone || !type || hidden.indexOf(zone) >= 0) continue;
-      if (CFG.JOB_TYPES.indexOf(type) < 0) {
-        return res.status(400).json({ error: '分区「' + zone + '」的作业类型不合法：' + type });
-      }
-      map[zone] = type;
-    }
-    const keptIgnore = ignore.filter(z => hidden.indexOf(z) < 0);
-
-    const mode = String((req.body && req.body.mode) || '').trim();
-    if (mode && !CFG.FRONT_BACK_MAP_PRESETS.some(p => p.key === mode)) {
-      return res.status(400).json({ error: '未知的拣货模式：' + mode });
-    }
-
-    db.setSetting(CFG.MAPPING_KEY, map);
-    db.setSetting(CFG.IGNORE_KEY, keptIgnore);
-    db.setSetting(CFG.HIDDEN_KEY, hidden);
-    db.setSetting(CFG.FRONT_BACK_MODE_KEY, mode);
-    // 不做历史重算：每个数据集入库时已固化映射快照，改设置只对之后入库的新数据生效
-    logInfo('[设置] 分区映射 ' + Object.keys(map).length + ' 项、忽略分区 ' + keptIgnore.length +
-      ' 项、删除分区 ' + hidden.length + ' 项已保存；历史数据集保持原映射，新设置从之后入库的数据生效');
-    res.json({ ok: true, map, ignore: keptIgnore, hidden, mode });
+    const s = parseSettingsBody(req.body);
+    saveSettings(s);
+    logInfo('[设置] 分区映射 ' + Object.keys(s.map).length + ' 项、忽略分区 ' + s.ignore.length +
+      ' 项、删除分区 ' + s.hidden.length + ' 项、达标线 ' +
+      (Object.keys(s.targets).length ? JSON.stringify(s.targets) : '（无）') +
+      ' 已保存；历史数据集保持原映射，新设置从之后入库的数据生效');
+    res.json(Object.assign({ ok: true }, s));
   } catch (e) {
     logWarn('[设置] 保存失败：' + (e.message || e));
+    res.status(400).json({ error: e.message || String(e) });
+  }
+});
+
+// 保存并按当前设置重算全部历史数据集（不可撤销；缺少原始明细的老数据集会被跳过）
+router.post('/api/settings/rebuild', express.json({ limit: '1mb' }), (req, res) => {
+  try {
+    const s = parseSettingsBody(req.body);
+    saveSettings(s);
+    const r = rebuildAll(s.map, s.ignore);
+    logInfo('[设置] 已按当前设置重算历史数据集：成功 ' + r.updated.length + ' 个' +
+      (r.skipped.length ? '，跳过 ' + r.skipped.length + ' 个（缺原始明细）' : '') +
+      (r.failed.length ? '，失败 ' + r.failed.length + ' 个' : ''));
+    if (r.failed.length) logWarn('[设置] 重算失败：' + JSON.stringify(r.failed).slice(0, 300));
+    res.json(Object.assign({ ok: true }, s, r));
+  } catch (e) {
+    logWarn('[设置] 重算失败：' + (e.message || e));
     res.status(400).json({ error: e.message || String(e) });
   }
 });
@@ -1745,6 +1813,7 @@ async function dingRunAuto(reason) {
     const base = dingPushBase();
     if (!base) throw new Error('未配置公网地址，钉钉无法访问图片链接');
     logInfo('[钉钉] 定时推送开始（' + reason + '）：服务端自绘透视表（数据集 #' + ds.id + '）…');
+    dingRender.setTargets(currentTargets());   // 达标线用设置里的值（推送图与页面一致）
     const payload = dingRender.renderPivot(ds);
     const atAll = dingAtAll();   // 页面开关：推送时是否 @全体成员
     const out = dingBuildBlocksText(payload.blocks || [], payload.period, base, atAll);

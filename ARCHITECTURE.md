@@ -299,7 +299,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 - **数据集 CRUD**：`insert`、`overwrite`、`list`（不含 `payload`）、`get`、`latest`、`remove`、`count`
 - **时间维度匹配**：`findByDates(dates)`（`timeKey` 规范化后比较，同维度多条取最新）、`findByOverlap(dates)`（增量只取到部分日期时并入日期有交集的最新一条）
 - **映射快照**：`snapshotOf(id)`（该数据集入库时固化的 `{ map, ignore }`）、`freezeMaps(snap)`（升级迁移：为没有快照的老数据集补一份）
-- **重算支持**：`rebuildTargets()`（`recs` + meta 字段，并固化旧格式 `sub → orderType` 迁移）、`withoutRecs()`、`recsOf(id)`、`saveRecs`
+- **重算支持**：`rebuildTargets()`（`recs` + meta 字段，并固化旧格式 `sub → orderType` 迁移）、`withoutRecs()`、`recsOf(id)`、`saveRecs`、`updatePayload(id, dataset, snap)`（重算结果回写 payload 并刷新映射快照）
 - **增量追平**：`knownPickNos()`（返回已入库拣货单号 `Set`，只统计 `rec.ums && rec.no`；模块内 `knownCache` 缓存，任意写操作置空，避免翻页时反复解析全部明细）
 - **键值设置**：`getSetting` / `setSetting`（JSON 序列化，`ON CONFLICT` upsert）
 
@@ -314,7 +314,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | UMS 接口 | `UMS_URL`、`UMS_PAGE_SIZE`、`UMS_NUM_CHOICES`、`UMS_EXTRA_QUERY`、`UMS_TIMEOUT_MS`、`UMS_MAX_PAGES` |
 | 自动获取 | `UMS_AUTO_MIN_INTERVAL`、`UMS_AUTO_MAX_INTERVAL`、`UMS_EDGE_WINDOW_MIN`、`UMS_MANUAL_LOCK_SEC`（120）、`UMS_AUTO_KEY`、`UMS_AUTO_STATE_KEY`、`UMS_AGENT_STATE_KEY` |
 | 防风控 | `UMS_PAGE_GAP_MIN_MS` / `UMS_PAGE_GAP_MAX_MS`（300 / 900）、`UMS_FETCH_COOLDOWN_SEC`（60）；`UMS_INTERVAL_JITTER`（0.15）/ `UMS_BACKOFF_MAX_MIN`（60）为**历史遗留，当前未使用**（排期已改为固定网格、不再抖动 / 退避） |
-| 设置表键名 | `MAPPING_KEY` / `IGNORE_KEY` / `HIDDEN_KEY`（分区映射 / 忽略 / 已删除）、`FRONT_BACK_MODE_KEY`（当前拣货模式预设）、`UMS_COOKIE_KEY`、`UMS_COOKIE_BACKUP_KEY`（备用 Cookie）、`UMS_COOKIE_AUTH_KEY`（最近一次鉴权失效被删记录）、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY`、`UMS_RANGE_KEY` |
+| 设置表键名 | `MAPPING_KEY` / `IGNORE_KEY` / `HIDDEN_KEY`（分区映射 / 忽略 / 已删除）、`FRONT_BACK_MODE_KEY`（当前拣货模式预设）、`TARGETS_KEY`（达标线，默认见 `DEFAULT_TARGETS`）、`UMS_COOKIE_KEY`、`UMS_COOKIE_BACKUP_KEY`（备用 Cookie）、`UMS_COOKIE_AUTH_KEY`（最近一次鉴权失效被删记录）、`UMS_LAST_KEY`、`UMS_LAST_TRY_KEY`、`UMS_NUM_KEY`、`UMS_RANGE_KEY` |
 | 钉钉推送 | `DING_WEBHOOK_KEY`、`DING_SECRET_KEY`（加签）、`DING_PUBLIC_BASE_KEY`（图片公网地址）、`DING_AUTO_KEY`、`DING_AUTO_STATE_KEY`、`DING_AT_ALL_KEY`（@全体成员，未设=开）、`DING_PUSH_DELAY_MIN`（1）、`DING_PUSH_MAX_RETRY`（2） |
 
 映射的实际取值存于设置表，此处仅为**首次运行**的默认值。
@@ -357,7 +357,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 | **钉钉推送** | `dingOpen` / `dingLoadCfg` / `dingPaint` / `dingSave` / `dingTest` / `dingAutoRun` | 钉钉设置弹窗：Webhook / 加签 / 公网地址、定时推送开关与 @全体成员开关、测试推送、「立即执行一次」并轮询结果 |
 | 日志查看 | `logsLoad` / `openLogs` / `closeLogs` | 服务端环形缓冲日志弹窗：来源角标、`warn` 标红、自动刷新 |
 | 数据管理 | `renderDmTable` / `loadDataMgr` / `deleteDatasets` / `clearDatasets` / `switchDataset` / `askConfirm` | 弹窗内查看/切换/删除/清空 + 页内二次确认 |
-| 分区设置 | `renderZoneCfg` / `loadZoneCfg` / `zcAdd` / `saveZoneCfg` / `zcApplyPreset` / `zcSwitchTarget` / `zcRowAction` / `zcFinishEdit` | 维护映射与忽略分区、一键切换拣货模式预设、行内改名 / 删除；保存只影响之后入库的新数据 |
+| 分区设置 | `renderZoneCfg` / `loadZoneCfg` / `zcAdd` / `saveZoneCfg` / `rebuildHistory` / `zcApplyPreset` / `zcSwitchTarget` / `zcRowAction` / `zcFinishEdit` | 维护映射与忽略分区、一键切换拣货模式预设、行内改名 / 删除、后场合流达标线；保存只影响新数据，「重算历史」才重算旧数据集 |
 | 门禁 | `todayStr` / `syncGate` / `playGateOut` / `playDashIn` | 「今日暂无数据」遮罩与入场动画 |
 | 卡片工具 | `injectCardTools` / `captureCard` / `exportPng` / `copyPng` / `runCapture` | html2canvas 导出/复制图片（透视卡可按分类选范围） |
 | 启动 | 底部末尾 | 拉数据集 → 判定含今天的数据集 → `refetch` 或 `clearView` + 遮罩 |
@@ -369,7 +369,7 @@ timeout        { total, hours, duties[], types[], byPerson[], hourly[], series[]
 职责：把数据集 `payload` 里的 `personByHour`（人员 × 小时透视）**自绘成 PNG**，供钉钉推送。**不依赖浏览器**（原方案用 puppeteer 截图：小服务器上启动慢、吃内存，已整体替换）。
 
 - 入口 `renderPivot(dataset, opts)`：按 `PIVOT_ORDER`（前场 / 后场 / 一体化）逐块拼 SVG → `@resvg/resvg-js` 光栅化为 PNG；返回 `{ period, blocks: [{ name, image(dataURL), eff, avg, median, bytes }] }`。
-- 视觉与前端对齐：分块标识色、热力色阶 `HEAT_STOPS`、达标线 `TARGETS`（后场 260 行/h）、圆角表格 + `clipPath` 裁剪、平滑折线（Catmull-Rom → 三次贝塞尔）+ 面积 + 达标虚线、平均值 / 中位数所在行的浅蓝 / 浅紫边框与白底角标（角标最后绘制、压在边框之上，对应页面 `.stat-badge` 的 `z-index`）、底部口径说明。
+- 视觉与前端对齐：分块标识色、热力色阶 `HEAT_STOPS`、达标线 `TARGETS`（后场，默认 260 行/h，可由「分区设置」覆盖 —— 出图前 `setTargets(currentTargets())`）、圆角表格 + `clipPath` 裁剪、平滑折线（Catmull-Rom → 三次贝塞尔）+ 面积 + 达标虚线、平均值 / 中位数所在行的浅蓝 / 浅紫边框与白底角标（角标最后绘制、压在边框之上，对应页面 `.stat-badge` 的 `z-index`）、底部口径说明。
 - `blockSvg()` 只用字符串拼 SVG；Node 侧量不到文本宽度，`textW()` 按「全角 1em / 数字 0.56em / 其它 0.6em」估宽，`wrapText()` 逐字折行；折线 `smoothPath()` 用 Catmull-Rom 转贝塞尔，逼近 ECharts `smooth: true`。
 - 字体：默认加载系统字体；容器缺中文字体时用 `HEMA_SVG_FONT_FILE` / `HEMA_SVG_FONT_DIR` / `HEMA_SVG_FONT` 兜底（见 [10](#10-环境变量与部署)）。`fontInfo()` 在启动日志里打印字体来源与「指定路径是否存在」，便于排查容器重建后字体丢失。
 - 依赖不可用时 `available()` 为 `false`、`unavailableReason()` 给出可读原因，钉钉推送会跳过并提示（配置接口下发 `renderOk` / `renderError`）。
@@ -460,16 +460,24 @@ setInterval(umsAutoTick, 5s)
   └─ syncGate(d)            → 依 meta.dates 是否含今天决定遮罩显隐
 ```
 
-### 6.5 设置变更（只影响新数据，不重算历史）
+### 6.5 设置变更（保存只影响新数据；重算历史需显式操作）
 
 ```
-分区设置弹窗 → 切换模式（zcApplyPreset）/ 手工改下拉 → saveZoneCfg()
-  → POST /api/settings { map, ignore }
-     → 校验（作业类型必须在 JOB_TYPES 内，ignore 必须为数组）
-     → db.setSetting(MAPPING_KEY / IGNORE_KEY, ...)
+分区设置弹窗 → 切换模式（zcApplyPreset）/ 手工改下拉 → 保存（saveZoneCfg）
+  → POST /api/settings { map, ignore, hidden, mode, targets }
+     → 校验（作业类型 / 模式 key / 达标线数值，非法回 400）
+     → db.setSetting(MAPPING_KEY / IGNORE_KEY / HIDDEN_KEY / FRONT_BACK_MODE_KEY / TARGETS_KEY)
      → 不重算任何历史数据集
-     → 响应 { ok, map, ignore }
+     → 响应 { ok, map, ignore, hidden, mode, targets }
   → 前端提示「历史数据集保持原映射，新设置从之后入库的数据生效」
+
+重算历史（rebuildHistory，弹窗工具栏「重算历史」）
+  → 二次确认 → POST /api/settings/rebuild（请求体同上）
+     → 保存设置 → rebuildAll(map, ignore)
+         → 逐条 db.rebuildTargets() → compute.rebuild(recs, meta, map, ignore)
+         → db.updatePayload(id, dataset, { map, ignore })   // 同时改写该数据集的映射快照
+     → 响应 { ok, updated[], skipped[], failed[] }
+  → 前端提示成功 / 跳过（缺原始明细需重新上传）/ 失败数量，并刷新当前数据集
 ```
 
 **映射快照**：每个数据集入库时（`saveBuilt` → `db.insert/overwrite`）把当时的 `{ map, ignore }` 写进 `datasets.map`。
@@ -614,8 +622,9 @@ setInterval(umsAutoTick, 5s)
 | GET | `/api/range?from&to&bucket` | 周 / 月视图：汇总区间内所有数据集的明细后重算；`bucket=week` 按自然周分桶（月视图），否则按日期分桶（周视图） |
 | GET | `/api/day?date=YYYY-MM-DD` | 单日视图：跨数据集按日期定位并返回该日结果 |
 | DELETE | `/api/datasets/:id` | 删除数据集，返回 `{ removed }` |
-| GET | `/api/settings` | 读取 `map` / `ignore` / `jobTypes` / `unmatched` / `zones` |
-| POST | `/api/settings` | 保存映射与忽略列表并重算全部历史数据集，返回 `{ ok, map, ignore, updated, skipped, failed }` |
+| GET | `/api/settings` | 读取 `map` / `ignore` / `hidden` / `mode` / `targets` / `jobTypes` / `unmatched` / `zones` / `presets` |
+| POST | `/api/settings` | 保存映射、忽略、已删除分区、模式与达标线（**只影响之后入库的新数据**），返回 `{ ok, map, ignore, hidden, mode, targets }` |
+| POST | `/api/settings/rebuild` | 保存当前设置并按它重算全部历史数据集（同时更新各数据集的映射快照），返回 `{ ok, …, updated[], skipped[], failed[] }` |
 
 **实时获取（UMS）**
 
@@ -678,6 +687,7 @@ setInterval(umsAutoTick, 5s)
 | `ignoreZones` | 忽略分区列表 |
 | `hiddenZones` | 已从「分区设置」列表删除的分区（只影响列表显示，历史数据与统计口径不变） |
 | `frontBackMode` | 当前拣货模式预设 key（`merge` 合流按单 / `split` 拆零_根据批次组包）；切换按钮据此判断目标，改名 / 删除分区不影响它 |
+| `jobTypeTargets` | 达标线 `{ 作业类型: 行/h }`（页面「分区设置」可改；未设置用 `DEFAULT_TARGETS`，空对象 = 不设达标线） |
 | `umsCookie` / `umsCookieBackup` | 实时接口主 Cookie / 备用 Cookie（页面或脚本同步写入，鉴权失效时自动删除对应槽位） |
 | `umsCookieAuth` | 最近一次「Cookie 鉴权失效被删除」的记录 `{ at, tag }`，供页面提示重新同步 |
 | `umsNum` | 每页条数（50 / 100 / 200） |

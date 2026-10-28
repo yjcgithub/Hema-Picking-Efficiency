@@ -45,6 +45,10 @@ module.exports = {
   // （不靠映射内容比对 —— 手工改名 / 删除分区后内容就不再等于预设，模式不应因此失效）
   FRONT_BACK_MODE_KEY: 'frontBackMode',
 
+  // 达标线（行/h）：页面「分区设置」可改；未保存过则用 DEFAULT_TARGETS
+  TARGETS_KEY: 'jobTypeTargets',
+  DEFAULT_TARGETS: { '后场合流': 260 },
+
   // 设置表中保存映射用的键名
   MAPPING_KEY: 'frontBackMap',
 

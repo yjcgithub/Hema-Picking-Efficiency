@@ -222,15 +222,15 @@
       <table id="dmTable"></table>
     </div>
   </div>
+</div>
 
-  <!-- 删除二次确认（页内弹层，不依赖浏览器原生 confirm） -->
-  <div class="confirm hidden" id="dmConfirm">
-    <div class="confirm-box">
-      <p class="confirm-text" id="dmConfirmText"></p>
-      <div class="confirm-act">
-        <button type="button" class="btn" id="dmConfirmCancel">取消</button>
-        <button type="button" class="btn danger" id="dmConfirmOk">确认删除</button>
-      </div>
+<!-- 二次确认（页内弹层，不依赖浏览器原生 confirm）：放在各弹窗之外，任何弹窗里都能弹出 -->
+<div class="confirm hidden" id="dmConfirm">
+  <div class="confirm-box">
+    <p class="confirm-text" id="dmConfirmText"></p>
+    <div class="confirm-act">
+      <button type="button" class="btn" id="dmConfirmCancel">取消</button>
+      <button type="button" class="btn danger" id="dmConfirmOk">确认删除</button>
     </div>
   </div>
 </div>
@@ -273,6 +273,7 @@
       <span class="grow"></span>
       <button type="button" class="btn" id="zoneCfgPreset" title="一键套用另一套拣货模式的分区映射（套用后需点「保存」）">切换模式…</button>
       <button type="button" class="btn" id="zoneCfgRefresh">刷新</button>
+      <button type="button" class="btn" id="zoneCfgRebuild" title="用当前设置重算全部历史数据集（不可撤销）">重算历史</button>
       <button type="button" class="btn primary" id="zoneCfgSave">保存</button>
     </div>
     <div class="modal-body">
@@ -281,6 +282,11 @@
       <div class="zone-add">
         <input type="text" id="zoneCfgNew" placeholder="手动新增拣货分区名（需与导出文件中的名称完全一致）">
         <button type="button" class="btn" id="zoneCfgAdd">新增</button>
+      </div>
+      <div class="zone-target">
+        <span>后场合流达标线</span>
+        <input type="number" id="zoneTarget" min="1" step="1" placeholder="留空 = 不设达标线">
+        <span class="unit">行/h</span>
       </div>
       <div class="note">
         该映射决定每条明细的「作业类型」：拣货单类型为「拣打一体」时固定为「一体化」，
@@ -291,6 +297,8 @@
         删除只把该分区从设置列表移除，<b>历史数据与统计口径都不变</b>，之后在下方重新新增同名分区即可恢复。<br>
         保存后只对<b>之后新入库</b>的数据生效：每个数据集入库时会固化当时的映射与忽略分区，
         之后切换模式 / 改映射都<b>不会重算历史数据集</b>，历史报表保持原样。<br>
+        需要让历史数据也按当前设置重新归类时，点<b>「重算历史」</b>（会用当前列表里的设置重算全部历史数据集，
+        并把各数据集的映射快照改成当前设置；不可撤销，缺少原始明细的老数据集会被跳过）。<br>
         若所有分区都被忽略，新数据会因无数据可统计而入库失败。
       </div>
     </div>

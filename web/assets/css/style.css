@@ -774,6 +774,19 @@ footer a:hover::after { width: 100%; }
   font: inherit; font-size: 14px; color: var(--txt);
 }
 .zone-add input:focus { outline: none; border-color: var(--primary); }
+/* 达标线（行/h）：透视卡分档与推送图上的橙色虚线都用这个值 */
+.zone-target {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 13px; padding-top: 13px; border-top: 1px dashed var(--line);
+  font-size: 13.5px; color: var(--txt);
+}
+.zone-target input {
+  width: 130px; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  font: inherit; font-size: 14px; color: var(--txt);
+}
+.zone-target input:focus { outline: none; border-color: var(--primary); }
+.zone-target .unit { color: var(--muted); font-size: 13px; }
 .zone-empty { padding: 20px 0; color: var(--muted); text-align: center; }
 
 /* 实时获取弹窗：分组卡片（取数条件 / 自动获取 / 接口 Cookie） */

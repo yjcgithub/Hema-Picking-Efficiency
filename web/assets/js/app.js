@@ -287,8 +287,10 @@
     return order;
   }
 
-  /* 达标值（行/h）：分块有达标线时按达标线分档，否则按块内相对色阶 */
-  var TARGETS = { '后场合流': 260 };
+  /* 达标值（行/h）：分块有达标线时按达标线分档，否则按块内相对色阶
+     实际取值随数据集下发（meta.targets，可在「分区设置」里改）；没有则用默认值 */
+  var DEFAULT_TARGETS = { '后场合流': 260 };
+  var TARGETS = DEFAULT_TARGETS;
 
   /* 色阶锚点：与「分区 × 小时效率热力图」visualMap.inRange.color 一致（7 档：红→黄→绿） */
   var HEAT_STOPS = [
@@ -307,7 +309,16 @@
   function heatColor(v, type, mn, mx) {
     if (v == null) return '';
     var t = TARGETS[type];
-    var r = t ? (v / t) : (mx > mn ? (v - mn) / (mx - mn) : 1);
+    var r;
+    if (t) {
+      /* 有达标线的分块（后场合流）：以达标线为中心的窄幅刻度，放大达标线附近的差异。
+         半幅 = max(块内离达标线最远的值, 达标线 × 15%)：
+         原来按 v/t 分档，达标线以上全部压成同一个深绿，差异看不出来 */
+      var half = Math.max(mx - t, t - mn, t * 0.15);
+      r = 0.5 + (v - t) / (2 * half);
+    } else {
+      r = mx > mn ? (v - mn) / (mx - mn) : 1;
+    }
     r = Math.max(0, Math.min(1, r));
     for (var i = 1; i < HEAT_STOPS.length; i++) {
       var a = HEAT_STOPS[i - 1], b = HEAT_STOPS[i];
@@ -362,6 +373,7 @@
   function renderPivotBlocks(d) {
     var host = document.getElementById('pivotBlocks');
     if (!host) return;
+    TARGETS = (d.meta && d.meta.targets) || DEFAULT_TARGETS;   // 达标线随数据集下发
     var pb = d.personByHour, hours = pb.hours;
     var unit = (d.meta && d.meta.bucket) || 'hour';   // 周 / 月聚合：列头为日期 / 周
     var colors = (global.HEMA_CONFIG && global.HEMA_CONFIG.COLORS) || {};
@@ -2362,8 +2374,10 @@
   var dmConfirmOk = document.getElementById('dmConfirmOk');
   var dmPending = null;
 
-  function askConfirm(text, onOk) {
+  // okText：确认按钮文案（默认「确认删除」；重算历史等场景可换）
+  function askConfirm(text, onOk, okText) {
     dmConfirmText.textContent = text;
+    document.getElementById('dmConfirmOk').textContent = okText || '确认删除';
     dmPending = onOk;
     dmConfirm.classList.remove('hidden');
     dmConfirmOk.focus();
@@ -2498,6 +2512,8 @@
   var zcSum = document.getElementById('zoneCfgSum');
   var zcNew = document.getElementById('zoneCfgNew');
   var zcSave = document.getElementById('zoneCfgSave');
+  var zcRebuild = document.getElementById('zoneCfgRebuild');
+  var zcTarget = document.getElementById('zoneTarget');
   var zcPresetBtn = document.getElementById('zoneCfgPreset');
   var zcTypes = [];        // 可选作业类型（「不映射」由前端补空值选项）
   var zcRows = [];         // [{ zone, type, ignored, inData }]；type 为空串 = 不映射
@@ -2654,6 +2670,7 @@
       zcPresets = j.presets || [];
       zcHidden = (j.hidden || []).slice();
       zcMode = j.mode || '';
+      if (zcTarget) zcTarget.value = (j.targets && j.targets['后场合流']) || '';
       zcEditing = -1;
       zcRows = (j.zones || []).map(function (z) {
         return { zone: z.zone, type: z.type || '', ignored: !!z.ignored, inData: !!z.inData };
@@ -2701,27 +2718,61 @@
     renderZoneCfg();
   }
 
-  function saveZoneCfg() {
-    var map = {}, ignore = [];
+  // 当前列表 → 请求体（保存与重算共用）
+  function zcSettingsBody() {
+    var map = {}, ignore = [], targets = {};
     zcRows.forEach(function (r) {
       if (r.ignored) ignore.push(r.zone);
       else if (r.type) map[r.zone] = r.type;
     });
+    var tv = parseFloat(zcTarget && zcTarget.value);
+    if (isFinite(tv) && tv > 0) targets['后场合流'] = tv;
+    return { map: map, ignore: ignore, hidden: zcHidden, mode: zcMode, targets: targets };
+  }
+
+  function saveZoneCfg() {
     zcSave.disabled = true;
     fetch(API + '/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ map: map, ignore: ignore, hidden: zcHidden, mode: zcMode })
+      body: JSON.stringify(zcSettingsBody())
     }).then(readJson).then(function (j) {
       zcSave.disabled = false;
       notice('已保存 ' + Object.keys(j.map || {}).length + ' 个分区的映射、' + (j.ignore || []).length +
         ' 个忽略分区、' + (j.hidden || []).length +
         ' 个已删除分区。历史数据集保持原映射不变，新设置从之后入库的数据生效', 'ok');
       renderZoneCfg();
+      // 达标线影响透视卡分档与虚线：重新拉取当前数据集立即生效（历史归类不变）
+      if (current && current.id != null) refetch(String(current.id)).catch(function () { });
     }).catch(function (e) {
       zcSave.disabled = false;
       notice('保存失败：' + esc(e.message || e), 'err');
     });
+  }
+
+  /* 重算历史：用当前弹窗里的设置（含未保存的改动）重算全部历史数据集，并把各数据集的
+     映射快照改成当前设置（不可撤销）。缺少原始明细的老数据集会被跳过 */
+  function rebuildHistory() {
+    askConfirm('将用当前设置重算全部历史数据集（不可撤销），缺少原始明细的老数据集会被跳过。继续？', function () {
+      zcRebuild.disabled = true;
+      fetch(API + '/settings/rebuild', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(zcSettingsBody())
+      }).then(readJson).then(function (j) {
+        zcRebuild.disabled = false;
+        var upd = (j.updated || []).length, skip = j.skipped || [], fail = (j.failed || []).length;
+        var msg = '已按当前设置重算 ' + upd + ' 个历史数据集';
+        if (skip.length) msg += '，跳过 ' + skip.length + ' 个（数据集 #' + skip.join('、') + ' 缺原始明细，需重新上传）';
+        if (fail) msg += '，失败 ' + fail + ' 个';
+        notice(msg, fail ? 'err' : 'ok');
+        renderZoneCfg();
+        if (current && current.id != null) refetch(String(current.id)).catch(function () { });
+      }).catch(function (e) {
+        zcRebuild.disabled = false;
+        notice('重算失败：' + esc(e.message || e), 'err');
+      });
+    }, '确认重算');
   }
 
   function openZoneCfg() { zcMask.classList.remove('hidden'); loadZoneCfg(); }
@@ -2731,6 +2782,7 @@
   document.getElementById('zoneCfgClose').addEventListener('click', closeZoneCfg);
   document.getElementById('zoneCfgRefresh').addEventListener('click', loadZoneCfg);
   document.getElementById('zoneCfgAdd').addEventListener('click', zcAdd);
+  if (zcRebuild) zcRebuild.addEventListener('click', rebuildHistory);
   if (zcPresetBtn) zcPresetBtn.addEventListener('click', function () {
     if (!zcPresets.length) return;
     var t = zcSwitchTarget();

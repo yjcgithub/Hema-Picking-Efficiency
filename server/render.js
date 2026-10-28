@@ -35,7 +35,11 @@ const PIVOT_ORDER = ['前场合流', '后场合流', '一体化'];
 // 推送里的分块短名
 const LABEL = { '前场合流': '前场', '后场合流': '后场' };
 // 达标线（行/h）：有达标线的分块按达标线分档，否则按块内相对色阶
-const TARGETS = { '后场合流': 260 };
+// 可由「分区设置」覆盖：出图前调用 setTargets(currentTargets())，传空对象 = 不设达标线
+let TARGETS = { '后场合流': 260 };
+function setTargets(t) {
+  TARGETS = (t && typeof t === 'object') ? Object.assign({}, t) : { '后场合流': 260 };
+}
 // 热力色阶锚点（与前端 HEAT_STOPS 一致：红 → 黄 → 绿）
 const HEAT_STOPS = [
   { r: 0.000, rgb: [254, 226, 226] },
@@ -107,7 +111,15 @@ function smoothPath(pts) {
 function heatColor(v, type, mn, mx) {
   if (v == null || isNaN(Number(v))) return '';
   const t = TARGETS[type];
-  let r = t ? (v / t) : (mx > mn ? (v - mn) / (mx - mn) : 1);
+  let r;
+  if (t) {
+    // 有达标线的分块（后场合流）：以达标线为中心的窄幅刻度，放大达标线附近的差异
+    // 半幅 = max(块内离达标线最远的值, 达标线 × 15%)；原来按 v/t 分档，达标线以上全挤在同一个深绿
+    const half = Math.max(mx - t, t - mn, t * 0.15);
+    r = 0.5 + (v - t) / (2 * half);
+  } else {
+    r = mx > mn ? (v - mn) / (mx - mn) : 1;
+  }
   r = Math.max(0, Math.min(1, r));
   for (let i = 1; i < HEAT_STOPS.length; i++) {
     const a = HEAT_STOPS[i - 1], b = HEAT_STOPS[i];
@@ -453,4 +465,4 @@ function renderPivot(dataset, opts) {
   return { period: periodText(d.meta), blocks };
 }
 
-module.exports = { available, unavailableReason, fontInfo, renderPivot };
+module.exports = { available, unavailableReason, fontInfo, renderPivot, setTargets };

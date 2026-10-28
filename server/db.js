@@ -241,6 +241,17 @@ function saveRecs(id, recs) {
   knownCache = null;
 }
 
+// 用重算结果覆盖 payload 与元数据（不动的列：created_at / recs / source_file 的既有引用）
+function updatePayload(id, dataset, snap) {
+  db.prepare(
+    `UPDATE datasets SET payload = ?, eff = ?, record_count = ?, dropped = ?, ignored = ?,
+            other_store = ?, dates = ?, map = ? WHERE id = ?`
+  ).run(JSON.stringify(dataset), dataset.totals.eff, dataset.meta.recordCount, dataset.meta.dropped,
+    dataset.meta.ignored || 0, dataset.meta.otherStore || 0, dataset.meta.dates.join(','),
+    snap ? JSON.stringify(snap) : null, id);
+  knownCache = null;
+}
+
 /* ---------- 键值设置 ---------- */
 
 function getSetting(key) {
@@ -258,6 +269,6 @@ function setSetting(key, value) {
 
 module.exports = {
   insert, findByDates, findByOverlap, overwrite, list, get, latest, remove, count, knownPickNos,
-  rebuildTargets, withoutRecs, recsOf, saveRecs, snapshotOf, freezeMaps,
+  rebuildTargets, withoutRecs, recsOf, saveRecs, updatePayload, snapshotOf, freezeMaps,
   getSetting, setSetting
 };
