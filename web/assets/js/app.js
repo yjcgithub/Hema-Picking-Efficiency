@@ -309,16 +309,7 @@
   function heatColor(v, type, mn, mx) {
     if (v == null) return '';
     var t = TARGETS[type];
-    var r;
-    if (t) {
-      /* 有达标线的分块（后场合流）：以达标线为中心的窄幅刻度，放大达标线附近的差异。
-         半幅 = max(块内离达标线最远的值, 达标线 × 15%)：
-         原来按 v/t 分档，达标线以上全部压成同一个深绿，差异看不出来 */
-      var half = Math.max(mx - t, t - mn, t * 0.15);
-      r = 0.5 + (v - t) / (2 * half);
-    } else {
-      r = mx > mn ? (v - mn) / (mx - mn) : 1;
-    }
+    var r = t ? (v / t) : (mx > mn ? (v - mn) / (mx - mn) : 1);
     r = Math.max(0, Math.min(1, r));
     for (var i = 1; i < HEAT_STOPS.length; i++) {
       var a = HEAT_STOPS[i - 1], b = HEAT_STOPS[i];

@@ -258,6 +258,36 @@ if (frozenSnap) {
   logInfo('[设置] 已为 ' + frozenSnap + ' 个历史数据集固化当前分区映射：之后切换映射只影响新数据，历史数据不重算');
 }
 
+/* 计算口径版本：与 config 保持一致；口径变更后旧 payload 的时长/效率不可比，
+   启动时按各数据集自己的映射快照全量重算一次，并把版本写进 payload.meta 供接口复用 */
+const COMPUTE_VERSION = CFG.COMPUTE_VERSION;
+if (String(db.getSetting(CFG.COMPUTE_VERSION_KEY) || '') !== COMPUTE_VERSION) {
+  const r = rebuildFromSnapshots();
+  db.setSetting(CFG.COMPUTE_VERSION_KEY, COMPUTE_VERSION);
+  logInfo('[计算] 时长口径升级为「并行订单只计一次」，已重算历史数据集 ' + r.updated.length + ' 个' +
+    (r.skipped.length ? '，跳过 ' + r.skipped.length + ' 个（缺原始明细）' : '') +
+    (r.failed.length ? '，失败 ' + r.failed.length + ' 个' : ''));
+  if (r.failed.length) logWarn('[计算] 重算失败：' + JSON.stringify(r.failed).slice(0, 300));
+}
+
+/* 按各数据集自身的映射快照重算（口径升级用：只换算法，不动分区映射） */
+function rebuildFromSnapshots() {
+  const updated = [], failed = [];
+  db.rebuildTargets().forEach(t => {
+    if (!t.recs || !t.recs.length) return;
+    const snap = db.snapshotOf(t.id) || currentSnap();
+    try {
+      const ds = compute.rebuild(t.recs,
+        { sourceFile: t.sourceFile, dropped: t.dropped, otherStore: t.otherStore }, snap.map, snap.ignore);
+      db.updatePayload(t.id, ds, snap);
+      updated.push(t.id);
+    } catch (e) {
+      failed.push({ id: t.id, error: e.message || String(e) });
+    }
+  });
+  return { updated, skipped: db.withoutRecs().map(x => x.id), failed };
+}
+
 // 汇总所有数据集里实际出现过的「拣货分区」（新数据集走原始明细，旧数据集用 payload 里的分区兜底）
 function dataZones() {
   const set = {};
@@ -307,6 +337,11 @@ function withDate(ds, date) {
   const anchor = dates.indexOf(date) >= 0 ? date : (dates[dates.length - 1] || '');
   const days = anchor ? [anchor] : [];
   if (!days.length) return ds;
+  // 口径版本一致 + 数据集本身只含这一天 → 已存的 payload 就是现成结果，直接复用（免去每次请求重算）
+  if (ds.meta.computeVersion === COMPUTE_VERSION && dates.length === 1 && dates[0] === anchor) {
+    ds.meta.date = anchor;
+    return ds;
+  }
   const recs = ds.id == null ? null : db.recsOf(ds.id);
   if (!recs || !recs.length) { ds.meta.date = anchor; return ds; }
   try {

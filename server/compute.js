@@ -236,7 +236,56 @@ function paretoTop(desc, totalRows, frac) {
 
 /* ---------- 数据集构建 ---------- */
 
-function buildDataset(recs, meta) {
+/* 并行订单时长去重（与盒马系统「拣选时长」口径一致）
+   合流按单时同一名拣货员会同时进行多单，各单的「开始 → 完成」区间相互重叠。
+   若逐单累加，重叠时段会被重复计入，时长虚高、效率偏低（实测前场虚高 1.3~1.7 倍）。
+   盒马系统按实际占用时间计，重叠部分只算一次。这里按「人 × 日期」把当日订单区间
+   按开始时间排序，逐单扣除已被前面订单占用的时段，剩余部分即该单的独占时长；
+   行数保持不变。返回新数组（不修改传入明细，避免污染入库的原始明细）。
+   起止时间以秒级（t0s）存储时不做任何容差；只有旧明细（仅存到分钟的 t0m）才把
+   「重叠 ≤ 30 秒」视为取整噪声不扣减。 */
+const OVERLAP_TOLERANCE_SEC = 30;
+
+function dedupOverlap(recs) {
+  const groups = new Map();
+  for (const r of recs) {
+    if (!(r.hours > 0) || (r.t0s == null && r.t0m == null)) continue;   // 无区间的旧明细：保持原样
+    const k = r.person + '\u0001' + r.date;
+    let a = groups.get(k);
+    if (!a) { a = []; groups.set(k, a); }
+    a.push(r);
+  }
+  const changed = new Map();
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const iv = list.slice().sort((a, b) => startSec(a) - startSec(b));
+    const cov = [];   // 已占用区间（按起点有序且互不重叠）
+    for (const r of iv) {
+      const s = startSec(r), e = s + r.hours * 3600;
+      const tol = r.t0s == null ? OVERLAP_TOLERANCE_SEC : 0;   // 分钟级明细才需要容差
+      let used = 0;
+      for (const c of cov) {
+        if (c[1] <= s) continue;
+        if (c[0] >= e) break;
+        const ov = Math.min(c[1], e) - Math.max(c[0], s);
+        if (ov > tol) used += ov;
+      }
+      if (used > 0) changed.set(r, Math.max(0, (e - s) - used) / 3600);
+      const last = cov[cov.length - 1];
+      if (last && s <= last[1]) { if (e > last[1]) last[1] = e; } else cov.push([s, e]);
+    }
+  }
+  if (!changed.size) return recs;
+  return recs.map(r => (changed.has(r) ? Object.assign({}, r, { hours: changed.get(r) }) : r));
+}
+
+// 单笔拣货的起始时刻（当日 00:00 起的秒数）：秒级优先，旧明细回落到分钟级
+function startSec(r) {
+  return r.t0s != null ? r.t0s : r.t0m * 60;
+}
+
+function buildDataset(sourceRecs, meta) {
+  const recs = dedupOverlap(sourceRecs);
   /* 时间轴粒度：
        hour = 单日视图（横轴为小时，含半小时细分刻度）
        date = 周视图（横轴为日期）
@@ -479,9 +528,11 @@ function buildDataset(recs, meta) {
       dates: meta.dates || dates,     // 时间维度：上传文件的完整日期集合（不受忽略分区影响）
       hours,
       bucket: bUnit,   // 时间轴粒度：'hour' 单日按小时；'date' 周视图按日期；'week' 月视图按自然周
-      period,
+      period: period,
       recordCount: recs.length, dropped: meta.dropped || 0, ignored: meta.ignored || 0,
-      otherStore: meta.otherStore || 0
+      otherStore: meta.otherStore || 0,
+      // 计算口径版本：接口据此判断已存 payload 能否直接复用（免去每次请求重算）
+      computeVersion: CFG.COMPUTE_VERSION
     },
     totals: {
       rows: Math.round(H[0]), qty: Math.round(H[2]), hours: r4(H[1]), eff: totalEff,
@@ -509,6 +560,7 @@ function buildDataset(recs, meta) {
 const TIMELINE_MERGE_GAP = 2;   // 上次拣货结束 → 下次拣货开始 的缓冲（分钟）
 
 // 单笔拣货的时间区间（当日 00:00 起的分钟数）
+// 注意：用 t0m/t1m（原始起止），不能用去重后的 hours —— 完全被并行的单 hours 为 0
 function recRange(r) {
   if (r.t0m != null && r.t1m != null && r.t1m > r.t0m) return [r.t0m, r.t1m];
   const s = (r.slot != null ? r.slot : r.hour) * 60;
@@ -760,9 +812,13 @@ function buildFromMatrix(matrix, meta, map) {
     const h0 = t0.getHours();
     // 工作时间图用：当日起始分钟数 + 时长（分钟），保证「完成 − 开始」与 hrs 一致（精确到分钟）
     const t0m = Math.round(h0 * 60 + t0.getMinutes() + t0.getSeconds() / 60);
+    // 并行订单去重用：当日起始秒数。只有「时间带秒」时才有意义 ——
+    // 导出若被截断到分钟（秒恒为 0），则留空，去重时回落到分钟级 + 取整容差
+    const t0sec = t0.getSeconds(), t0ms = t0.getMilliseconds();
+    const t0s = (t0sec || t0ms) ? h0 * 3600 + t0.getMinutes() * 60 + t0sec + t0ms / 1000 : undefined;
     const rec = {
       date: dateStr(t0), hour: h0, slot: h0 + (t0.getMinutes() >= 30 ? 0.5 : 0),
-      t0m, t1m: t0m + Math.round(hrs * 60),
+      t0m, t0s, t1m: t0m + Math.round(hrs * 60),
       jobType: jobType(zone, orderType, map),
       zone, orderType, code: zoneCode(zone),
       no: String(no).trim(),          // 拣货单号：增量获取合并去重的键

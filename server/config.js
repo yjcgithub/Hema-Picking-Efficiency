@@ -59,6 +59,11 @@ module.exports = {
   // 只影响设置界面是否列出（历史数据里仍存在这些分区，统计口径不变）
   HIDDEN_KEY: 'hiddenZones',
 
+  // 计算口径版本：升到 4 后，并行订单时长按秒级区间并集去重（无秒级字段的旧明细回落为分钟 + 30 秒容差）；
+  // 该版本号同时写进数据集 payload 的 meta.computeVersion，接口据此判断能否直接复用已算好的结果
+  COMPUTE_VERSION_KEY: 'computeVersion',
+  COMPUTE_VERSION: '4',
+
   // 拣货单类型 = 该值时判定为「一体化」
   INTEGRATED_ORDER_TYPE: '拣打一体',
 
